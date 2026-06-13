@@ -3,6 +3,7 @@ package dev.upscaler.mixin;
 import com.mojang.blaze3d.vulkan.VulkanBackend;
 import com.mojang.blaze3d.vulkan.VulkanPhysicalDevice;
 import dev.upscaler.UpscalerMod;
+import net.fabricmc.loader.api.FabricLoader;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.ModifyArgs;
@@ -13,9 +14,15 @@ import java.util.Collection;
 import java.util.List;
 
 /**
- * Adds device extensions the FFX runtime needs to the extension list vanilla
- * enables at vkCreateDevice time (the miniature, hardcoded version of the
- * Sodium "Phase 0" device-negotiation hook).
+ * Standalone fallback for the Vulkan device-negotiation hook: adds the device
+ * extensions the FFX runtime needs to the extension list vanilla enables at
+ * vkCreateDevice time.
+ *
+ * <p>When Sodium is present this defers entirely to Sodium's
+ * {@code DeviceExtensionRegistry} (fed via {@link dev.upscaler.client.SodiumCompat}),
+ * which owns device negotiation — this is the "Phase 0" layering. Both paths
+ * dedupe and Sodium returns a Set, so even if both ran the result would be
+ * correct; deferring just keeps a single owner.
  *
  * <p>FFX resolves vkGetImageMemoryRequirements2KHR etc. through
  * vkGetDeviceProcAddr using the KHR-suffixed extension names; per Vulkan spec
@@ -31,10 +38,17 @@ public abstract class VulkanBackendMixin {
 			"VK_KHR_get_memory_requirements2",
 			"VK_KHR_dedicated_allocation");
 
+	private static final boolean SODIUM_OWNS_NEGOTIATION =
+			FabricLoader.getInstance().isModLoaded("sodium");
+
 	@ModifyArgs(
 			method = "createDevice(JLcom/mojang/blaze3d/shaders/ShaderSource;Lcom/mojang/blaze3d/shaders/GpuDebugOptions;Ljava/lang/Runnable;)Lcom/mojang/blaze3d/systems/GpuDevice;",
 			at = @At(value = "INVOKE", target = "Lcom/mojang/blaze3d/vulkan/VulkanBackend;createDevice(Ljava/util/Collection;Lcom/mojang/blaze3d/vulkan/VulkanPhysicalDevice;Ljava/util/Set;)Lorg/lwjgl/vulkan/VkDevice;"))
 	private void upscaler$addDeviceExtensions(Args args) {
+		if (SODIUM_OWNS_NEGOTIATION) {
+			return; // Sodium's DeviceExtensionRegistry handles these
+		}
+
 		Collection<String> requested = args.get(0);
 		VulkanPhysicalDevice physicalDevice = args.get(1);
 

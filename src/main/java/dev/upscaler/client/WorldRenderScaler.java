@@ -69,7 +69,7 @@ public final class WorldRenderScaler {
 	}
 
 	public boolean isEnabled() {
-		return this.scale < 1.0f;
+		return true;
 	}
 
 	/** Swap low-res textures into the main target. Call right before level rendering. */
