@@ -6,6 +6,7 @@ $ErrorActionPreference = "Stop"
 $upscalerRoot = $PSScriptRoot
 $sodiumRoot = Resolve-Path (Join-Path $upscalerRoot "..\sodium-26.2-beta")
 $modsDir = Join-Path $upscalerRoot "run\mods"
+$nativesDir = Join-Path $upscalerRoot "run\natives"
 
 Write-Host "Building Sodium Fabric jar..."
 Push-Location $sodiumRoot
@@ -29,9 +30,16 @@ Get-ChildItem -Path $modsDir -Filter "sodium-fabric-*.jar" -ErrorAction Silently
 Copy-Item -LiteralPath $sodiumJar.FullName -Destination (Join-Path $modsDir $sodiumJar.Name) -Force
 Write-Host "Copied $($sodiumJar.Name) to $modsDir"
 
+$ngxShim = Join-Path $upscalerRoot "native\ngx_shim\out\Release\ngxshim.dll"
+if (Test-Path -LiteralPath $ngxShim) {
+	New-Item -ItemType Directory -Force -Path $nativesDir | Out-Null
+	Copy-Item -LiteralPath $ngxShim -Destination (Join-Path $nativesDir "ngxshim.dll") -Force
+	Write-Host "Copied rebuilt ngxshim.dll to $nativesDir"
+}
+
 Push-Location $upscalerRoot
 try {
-	$env:JAVA_TOOL_OPTIONS='-Dupscaler.fsrDebugView=true -Dupscaler.renderScale=1.0'
+	$env:JAVA_TOOL_OPTIONS='-Dupscaler.backend=dlss -Dupscaler.dlss.quality=0 -Dupscaler.fsrDebugView=true -Dupscaler.renderScale=0.5'
 	.\gradlew.bat --stop
 	.\gradlew.bat runClient
 } finally {

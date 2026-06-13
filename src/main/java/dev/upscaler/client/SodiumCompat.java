@@ -1,6 +1,7 @@
 package dev.upscaler.client;
 
 import com.mojang.blaze3d.textures.GpuTexture;
+import com.mojang.blaze3d.textures.GpuTextureView;
 import dev.upscaler.UpscalerMod;
 import net.fabricmc.loader.api.FabricLoader;
 import org.joml.Matrix4f;
@@ -32,6 +33,7 @@ public final class SodiumCompat {
 	private static Method setCullingViewProjectionOverride;
 	private static Object rawVulkanAccess;
 	private static Method vkImage;
+	private static Method vkImageView;
 
 	private SodiumCompat() {
 	}
@@ -94,9 +96,8 @@ public final class SodiumCompat {
 		}
 
 		try {
-			if (rawVulkanAccess == null || vkImage == null) {
-				Class<?> apiClass = Class.forName("net.caffeinemc.mods.sodium.api.gpu.SodiumGpuApi");
-				rawVulkanAccess = apiClass.getMethod("rawVulkan").invoke(null);
+			ensureRawVulkanAccess();
+			if (vkImage == null) {
 				vkImage = rawVulkanAccess.getClass().getMethod("vkImage", GpuTexture.class);
 			}
 
@@ -111,6 +112,37 @@ public final class SodiumCompat {
 		}
 
 		return null;
+	}
+
+	public static Long vkImageView(GpuTextureView textureView) {
+		if (!SODIUM_LOADED) {
+			return null;
+		}
+
+		try {
+			ensureRawVulkanAccess();
+			if (vkImageView == null) {
+				vkImageView = rawVulkanAccess.getClass().getMethod("vkImageView", GpuTextureView.class);
+			}
+
+			return (Long) vkImageView.invoke(rawVulkanAccess, textureView);
+		} catch (ClassNotFoundException | NoSuchMethodException e) {
+			logMissingApi();
+		} catch (IllegalAccessException | InvocationTargetException e) {
+			if (!loggedRawAccessFailure) {
+				loggedRawAccessFailure = true;
+				UpscalerMod.LOGGER.warn("Sodium raw Vulkan texture-view access failed; falling back to local access", e);
+			}
+		}
+
+		return null;
+	}
+
+	private static void ensureRawVulkanAccess() throws ClassNotFoundException, NoSuchMethodException, InvocationTargetException, IllegalAccessException {
+		if (rawVulkanAccess == null) {
+			Class<?> apiClass = Class.forName("net.caffeinemc.mods.sodium.api.gpu.SodiumGpuApi");
+			rawVulkanAccess = apiClass.getMethod("rawVulkan").invoke(null);
+		}
 	}
 
 	private static void logMissingApi() {

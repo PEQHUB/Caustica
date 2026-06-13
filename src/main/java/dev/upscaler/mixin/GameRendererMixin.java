@@ -1,8 +1,8 @@
 package dev.upscaler.mixin;
 
 import com.mojang.blaze3d.pipeline.RenderTarget;
+import dev.upscaler.client.DlssPipeline;
 import dev.upscaler.client.FsrPipeline;
-import dev.upscaler.client.SodiumCompat;
 import dev.upscaler.client.WorldRenderScaler;
 import net.minecraft.client.DeltaTracker;
 import net.minecraft.client.renderer.GameRenderer;
@@ -64,7 +64,7 @@ public abstract class GameRendererMixin {
 		// (this projection already includes view bobbing, exactly as rendered).
 		var cameraState = this.gameRenderState().levelRenderState.cameraRenderState;
 		FsrPipeline.INSTANCE.captureFrame(projection, cameraState.viewRotationMatrix, cameraState.pos, cameraState.depthFar);
-		SodiumCompat.setCullingViewProjectionOverride(projection, cameraState.viewRotationMatrix);
+		DlssPipeline.INSTANCE.captureFrame(projection, cameraState.viewRotationMatrix, cameraState.pos);
 
 		float jx = FsrPipeline.INSTANCE.jitterNdcX();
 		float jy = FsrPipeline.INSTANCE.jitterNdcY();

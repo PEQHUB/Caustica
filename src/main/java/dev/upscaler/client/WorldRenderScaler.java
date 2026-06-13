@@ -13,6 +13,7 @@ import net.minecraft.client.renderer.RenderPipelines;
 
 import java.util.Optional;
 import java.util.OptionalDouble;
+import java.util.Locale;
 
 /**
  * M2 spike: renders the world at a reduced internal resolution, then upscales
@@ -36,6 +37,7 @@ public final class WorldRenderScaler {
 	private static final float DEFAULT_SCALE = 1.0f / 1.5f;
 
 	private final float scale;
+	private final BackendPreference backendPreference;
 
 	// low-res resources, owned by this class
 	private GpuTexture lowResColor;
@@ -66,6 +68,7 @@ public final class WorldRenderScaler {
 			}
 		}
 		this.scale = Math.clamp(configured, 0.1f, 1.0f);
+		this.backendPreference = BackendPreference.fromProperty(System.getProperty("upscaler.backend", "auto"));
 	}
 
 	public boolean isEnabled() {
@@ -133,13 +136,22 @@ public final class WorldRenderScaler {
 		this.savedDepth = null;
 		this.savedDepthView = null;
 
-		// Preferred path: FSR 3.1 temporal upscale low-res color/depth -> native color.
+		// Preferred path: temporal upscale low-res color/depth -> native color.
 		// The seam sits before the pre-hand depth clear, so lowResDepth holds pure
 		// world depth here — no snapshot needed.
-		boolean fsrDone = FsrPipeline.INSTANCE.dispatch(
-				this.lowResColor, this.lowResDepth, this.lowResDepthView, this.lowResWidth, this.lowResHeight,
-				mainTarget.getColorTexture(), this.savedWidth, this.savedHeight);
-		if (fsrDone) {
+		boolean temporalDone = false;
+		if (this.backendPreference != BackendPreference.FSR && this.backendPreference != BackendPreference.BILINEAR) {
+			temporalDone = DlssPipeline.INSTANCE.dispatch(
+					this.lowResColor, this.lowResColorView,
+					this.lowResDepth, this.lowResDepthView, this.lowResWidth, this.lowResHeight,
+					mainTarget.getColorTexture(), this.savedWidth, this.savedHeight);
+		}
+		if (!temporalDone && this.backendPreference != BackendPreference.BILINEAR) {
+			temporalDone = FsrPipeline.INSTANCE.dispatch(
+					this.lowResColor, this.lowResDepth, this.lowResDepthView, this.lowResWidth, this.lowResHeight,
+					mainTarget.getColorTexture(), this.savedWidth, this.savedHeight);
+		}
+		if (temporalDone) {
 			return;
 		}
 
@@ -194,5 +206,21 @@ public final class WorldRenderScaler {
 		}
 		this.lowResWidth = -1;
 		this.lowResHeight = -1;
+	}
+
+	private enum BackendPreference {
+		AUTO,
+		DLSS,
+		FSR,
+		BILINEAR;
+
+		private static BackendPreference fromProperty(String value) {
+			try {
+				return BackendPreference.valueOf(value.trim().toUpperCase(Locale.ROOT));
+			} catch (IllegalArgumentException e) {
+				UpscalerMod.LOGGER.warn("Invalid upscaler.backend '{}', using auto", value);
+				return AUTO;
+			}
+		}
 	}
 }

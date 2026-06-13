@@ -169,23 +169,32 @@ public final class FsrPipeline {
 	 * Advances the jitter sequence for this frame. Called from
 	 * {@link WorldRenderScaler#begin} before the level renders; the same offset is
 	 * applied to the level projection (via GameRendererMixin) and reported to the
-	 * FSR dispatch. Until the context exists (first frame), jitter is zero.
+	 * FSR/DLSS dispatch. Until the FSR context exists, a CPU Halton fallback is
+	 * used so the DLSS backend can still converge from its first active frame.
 	 */
 	public void prepareFrameJitter(int renderWidth, int renderHeight, int displayWidth) {
-		if (this.context == null || this.failed || !this.enabledByProperty) {
-			this.jitterPixelsX = 0.0f;
-			this.jitterPixelsY = 0.0f;
-			this.jitterNdcX = 0.0f;
-			this.jitterNdcY = 0.0f;
-			return;
-		}
 		try {
-			int phaseCount = Math.max(1, this.context.queryJitterPhaseCount(renderWidth, displayWidth));
-			var offset = this.context.queryJitterOffset(this.jitterFrameIndex++ % phaseCount, phaseCount);
-			this.jitterPixelsX = offset.x();
-			this.jitterPixelsY = offset.y();
-			this.jitterNdcX = this.jitterSignX * 2.0f * offset.x() / renderWidth;
-			this.jitterNdcY = this.jitterSignY * 2.0f * offset.y() / renderHeight;
+			int phaseCount;
+			float offsetX;
+			float offsetY;
+
+			if (this.context != null && !this.failed && this.enabledByProperty) {
+				phaseCount = Math.max(1, this.context.queryJitterPhaseCount(renderWidth, displayWidth));
+				var offset = this.context.queryJitterOffset(this.jitterFrameIndex++ % phaseCount, phaseCount);
+				offsetX = offset.x();
+				offsetY = offset.y();
+			} else {
+				float ratio = Math.max(1.0f, (float) displayWidth / Math.max(1, renderWidth));
+				phaseCount = Math.max(1, Math.round(8.0f * ratio * ratio));
+				int index = this.jitterFrameIndex++ % phaseCount;
+				offsetX = halton(index + 1, 2) - 0.5f;
+				offsetY = halton(index + 1, 3) - 0.5f;
+			}
+
+			this.jitterPixelsX = offsetX;
+			this.jitterPixelsY = offsetY;
+			this.jitterNdcX = this.jitterSignX * 2.0f * offsetX / renderWidth;
+			this.jitterNdcY = this.jitterSignY * 2.0f * offsetY / renderHeight;
 		} catch (FfxUpscaleContext.FfxException e) {
 			UpscalerMod.LOGGER.warn("Jitter query failed; disabling jitter", e);
 			this.jitterPixelsX = 0.0f;
@@ -195,12 +204,31 @@ public final class FsrPipeline {
 		}
 	}
 
+	private static float halton(int index, int base) {
+		float result = 0.0f;
+		float fraction = 1.0f / base;
+		while (index > 0) {
+			result += (index % base) * fraction;
+			index /= base;
+			fraction /= base;
+		}
+		return result;
+	}
+
 	public float jitterNdcX() {
 		return this.jitterNdcX;
 	}
 
 	public float jitterNdcY() {
 		return this.jitterNdcY;
+	}
+
+	public float jitterPixelsX() {
+		return this.jitterPixelsX;
+	}
+
+	public float jitterPixelsY() {
+		return this.jitterPixelsY;
 	}
 
 	/**
