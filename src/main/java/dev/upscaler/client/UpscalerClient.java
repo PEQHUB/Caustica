@@ -5,6 +5,7 @@ import dev.upscaler.rt.RtContext;
 import dev.upscaler.rt.RtDeviceBringup;
 import dev.upscaler.rt.RtSelfTest;
 import dev.upscaler.rt.RtComposite;
+import dev.upscaler.rt.RtTerrain;
 import dev.upscaler.rt.RtTriangleScene;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientLifecycleEvents;
@@ -13,6 +14,7 @@ import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 public final class UpscalerClient implements ClientModInitializer {
 	private static boolean smokeTestDone = false;
 	private static boolean rtInitDone = false;
+	private static boolean terrainDone = false;
 
 	@Override
 	public void onInitializeClient() {
@@ -35,6 +37,14 @@ public final class UpscalerClient implements ClientModInitializer {
 						RtSelfTest.run(ctx, scene.tlas());
 					}
 					rtInitDone = true;
+				}
+			}
+
+			// P1: once RT is up and the player is in a world, extract terrain once.
+			if (rtInitDone && RtTerrain.ENABLED && !terrainDone) {
+				RtContext ctx = RtContext.currentOrNull();
+				if (ctx != null && RtTerrain.extractAroundPlayer(ctx)) {
+					terrainDone = true;
 				}
 			}
 		});
