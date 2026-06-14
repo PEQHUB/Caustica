@@ -89,7 +89,7 @@ public final class RtSmokeTest {
     // vanilla's (VulkanBackend.createVma) lacks it, so it rejects SHADER_DEVICE_ADDRESS buffers.
     private static long rtVma;
 
-    private static long rtVma(VulkanDevice device) {
+    public static long rtVma(VulkanDevice device) {
         if (rtVma != 0L) {
             return rtVma;
         }

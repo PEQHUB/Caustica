@@ -9,6 +9,7 @@ import com.mojang.blaze3d.textures.GpuTexture;
 import com.mojang.blaze3d.textures.GpuTextureView;
 import dev.upscaler.UpscalerMod;
 import dev.upscaler.mixin.RenderTargetAccessor;
+import dev.upscaler.rt.RtComposite;
 import net.minecraft.client.renderer.RenderPipelines;
 
 import java.util.Optional;
@@ -135,6 +136,12 @@ public final class WorldRenderScaler {
 		this.savedColorView = null;
 		this.savedDepth = null;
 		this.savedDepthView = null;
+
+		// P0 RT composite: when on, ray trace over the world target and skip the upscaler
+		// (RT replaces rasterization rather than upscaling it).
+		if (RtComposite.ENABLED && RtComposite.INSTANCE.composite(mainTarget.getColorTexture(), this.savedWidth, this.savedHeight)) {
+			return;
+		}
 
 		// Preferred path: temporal upscale low-res color/depth -> native color.
 		// The seam sits before the pre-hand depth clear, so lowResDepth holds pure
