@@ -11,11 +11,16 @@ import org.lwjgl.vulkan.VkAccelerationStructureCreateInfoKHR;
 import org.lwjgl.vulkan.VkAccelerationStructureDeviceAddressInfoKHR;
 import org.lwjgl.vulkan.VkAccelerationStructureGeometryKHR;
 import org.lwjgl.vulkan.VkAccelerationStructureInstanceKHR;
+import org.lwjgl.vulkan.VkCommandBuffer;
 import org.lwjgl.vulkan.VkDevice;
+import org.lwjgl.vulkan.VkMemoryBarrier;
 
 import java.util.List;
 
 import static org.lwjgl.vulkan.KHRAccelerationStructure.VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR;
+import static org.lwjgl.vulkan.KHRAccelerationStructure.VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+import static org.lwjgl.vulkan.KHRAccelerationStructure.VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+import static org.lwjgl.vulkan.KHRAccelerationStructure.VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR;
 import static org.lwjgl.vulkan.KHRAccelerationStructure.VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
 import static org.lwjgl.vulkan.KHRAccelerationStructure.VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
 import static org.lwjgl.vulkan.KHRAccelerationStructure.VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
@@ -142,18 +147,7 @@ public final class RtAccel {
             for (PreparedBlas b : prepared) {
                 // Per-iteration stack frame: hundreds of builds on one frame would overflow the 64 KB stack.
                 try (MemoryStack stack = MemoryStack.stackPush()) {
-                    VkAccelerationStructureGeometryKHR.Buffer geom = triangleGeometry(stack, b.vertexAddr, b.indexAddr, b.maxVertex + 1, b.opaque);
-                    VkAccelerationStructureBuildGeometryInfoKHR.Buffer build = VkAccelerationStructureBuildGeometryInfoKHR.calloc(1, stack);
-                    build.sType$Default().type(VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR)
-                            .flags(VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR)
-                            .mode(VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR).geometryCount(1).pGeometries(geom)
-                            .dstAccelerationStructure(b.accel.handle);
-                    build.get(0).scratchData().deviceAddress(b.scratch.deviceAddress);
-                    VkAccelerationStructureBuildRangeInfoKHR.Buffer range = VkAccelerationStructureBuildRangeInfoKHR.calloc(1, stack);
-                    range.get(0).primitiveCount(b.triangleCount).primitiveOffset(0).firstVertex(0).transformOffset(0);
-                    PointerBuffer ppRange = stack.mallocPointer(1).put(0, range.address());
-                    // Builds are independent (own dst AS + scratch), so no barriers needed between them.
-                    vkCmdBuildAccelerationStructuresKHR(cmd, build, ppRange);
+                    recordBlasBuild(cmd, stack, b); // independent builds (own dst AS + scratch), no barriers needed
                 }
             }
         });
@@ -179,8 +173,23 @@ public final class RtAccel {
     public record Instance(float[] transform3x4, long blasDeviceAddress) {
     }
 
-    /** Build a top-level AS from instances. */
-    public static RtAccel buildTlas(RtContext ctx, List<Instance> instances) {
+    /** A TLAS whose AS + backing + instance buffer are allocated but whose build is recorded later. */
+    public static final class PreparedTlas {
+        public final RtAccel accel;
+        private final RtBuffer instanceBuffer;
+        private final RtBuffer scratch;
+        private final int instanceCount;
+
+        private PreparedTlas(RtAccel accel, RtBuffer instanceBuffer, RtBuffer scratch, int instanceCount) {
+            this.accel = accel;
+            this.instanceBuffer = instanceBuffer;
+            this.scratch = scratch;
+            this.instanceCount = instanceCount;
+        }
+    }
+
+    /** Allocate a TLAS (AS + backing + filled instance buffer + scratch), deferring the build. */
+    public static PreparedTlas prepareTlas(RtContext ctx, List<Instance> instances) {
         VkDevice vk = ctx.vk();
         int count = instances.size();
         RtBuffer instanceBuffer = ctx.createBuffer((long) VkAccelerationStructureInstanceKHR.SIZEOF * count,
@@ -202,51 +211,92 @@ public final class RtAccel {
                         VkAccelerationStructureInstanceKHR.SIZEOF);
             }
 
-            VkAccelerationStructureGeometryKHR.Buffer geom = VkAccelerationStructureGeometryKHR.calloc(1, stack);
-            geom.sType$Default().geometryType(VK_GEOMETRY_TYPE_INSTANCES_KHR).flags(VK_GEOMETRY_OPAQUE_BIT_KHR);
-            geom.geometry().instances().sType$Default().arrayOfPointers(false);
-            geom.geometry().instances().data().deviceAddress(instanceBuffer.deviceAddress);
-
-            VkAccelerationStructureBuildGeometryInfoKHR.Buffer build = VkAccelerationStructureBuildGeometryInfoKHR.calloc(1, stack);
-            build.sType$Default().type(VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR)
-                    .flags(VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR)
-                    .mode(VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR).geometryCount(1).pGeometries(geom);
-
+            VkAccelerationStructureBuildGeometryInfoKHR.Buffer build = tlasBuildInfo(stack, instanceBuffer.deviceAddress);
             VkAccelerationStructureBuildSizesInfoKHR sizes = VkAccelerationStructureBuildSizesInfoKHR.calloc(stack).sType$Default();
             vkGetAccelerationStructureBuildSizesKHR(vk, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
                     build.get(0), stack.ints(count), sizes);
 
-            RtAccel accel = createAndBuild(ctx, build, sizes, VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR, count, stack);
-            instanceBuffer.destroy(); // consumed by the build (synchronous), safe to free
-            return accel;
+            RtBuffer backing = ctx.createBuffer(sizes.accelerationStructureSize(), VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR, false);
+            VkAccelerationStructureCreateInfoKHR ci = VkAccelerationStructureCreateInfoKHR.calloc(stack).sType$Default()
+                    .buffer(backing.handle).offset(0).size(sizes.accelerationStructureSize()).type(VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR);
+            java.nio.LongBuffer pAs = stack.mallocLong(1);
+            RtContext.check(vkCreateAccelerationStructureKHR(vk, ci, null, pAs), "vkCreateAccelerationStructureKHR");
+            long handle = pAs.get(0);
+            RtBuffer scratch = ctx.createBuffer(sizes.buildScratchSize(), VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, false);
+            VkAccelerationStructureDeviceAddressInfoKHR addrInfo = VkAccelerationStructureDeviceAddressInfoKHR.calloc(stack)
+                    .sType$Default().accelerationStructure(handle);
+            long deviceAddress = vkGetAccelerationStructureDeviceAddressKHR(vk, addrInfo);
+            return new PreparedTlas(new RtAccel(vk, handle, deviceAddress, backing), instanceBuffer, scratch, count);
         }
     }
 
-    private static RtAccel createAndBuild(RtContext ctx, VkAccelerationStructureBuildGeometryInfoKHR.Buffer build,
-                                          VkAccelerationStructureBuildSizesInfoKHR sizes, int type, int primitiveCount,
-                                          MemoryStack stack) {
-        VkDevice vk = ctx.vk();
-        RtBuffer backing = ctx.createBuffer(sizes.accelerationStructureSize(), VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR, false);
-        VkAccelerationStructureCreateInfoKHR ci = VkAccelerationStructureCreateInfoKHR.calloc(stack).sType$Default()
-                .buffer(backing.handle).offset(0).size(sizes.accelerationStructureSize()).type(type);
-        java.nio.LongBuffer pAs = stack.mallocLong(1);
-        RtContext.check(vkCreateAccelerationStructureKHR(vk, ci, null, pAs), "vkCreateAccelerationStructureKHR");
-        long handle = pAs.get(0);
+    private static VkAccelerationStructureBuildGeometryInfoKHR.Buffer tlasBuildInfo(MemoryStack stack, long instanceBufferAddr) {
+        VkAccelerationStructureGeometryKHR.Buffer geom = VkAccelerationStructureGeometryKHR.calloc(1, stack);
+        geom.sType$Default().geometryType(VK_GEOMETRY_TYPE_INSTANCES_KHR).flags(VK_GEOMETRY_OPAQUE_BIT_KHR);
+        geom.geometry().instances().sType$Default().arrayOfPointers(false);
+        geom.geometry().instances().data().deviceAddress(instanceBufferAddr);
+        VkAccelerationStructureBuildGeometryInfoKHR.Buffer build = VkAccelerationStructureBuildGeometryInfoKHR.calloc(1, stack);
+        build.sType$Default().type(VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR)
+                .flags(VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR)
+                .mode(VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR).geometryCount(1).pGeometries(geom);
+        return build;
+    }
 
-        RtBuffer scratch = ctx.createBuffer(sizes.buildScratchSize(), VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, false);
-        build.get(0).dstAccelerationStructure(handle);
-        build.get(0).scratchData().deviceAddress(scratch.deviceAddress);
+    /** Build a top-level AS from instances (convenience: no new BLAS in the same submission). */
+    public static RtAccel buildTlas(RtContext ctx, List<Instance> instances) {
+        return buildBatch(ctx, List.of(), instances);
+    }
 
+    /**
+     * Build (in one submission) every prepared BLAS and a TLAS over {@code instances}. The BLAS builds
+     * are separated from the TLAS build by an acceleration-structure barrier (the TLAS reads the BLAS
+     * the build just wrote). One {@code submitSync} → one queue drain for the whole tick's geometry
+     * update. Scratch + instance buffers are freed afterwards; the returned TLAS is the caller's to own.
+     */
+    public static RtAccel buildBatch(RtContext ctx, List<PreparedBlas> blasToBuild, List<Instance> instances) {
+        PreparedTlas tlas = prepareTlas(ctx, instances);
+        ctx.submitSync(cmd -> {
+            for (PreparedBlas b : blasToBuild) {
+                try (MemoryStack stack = MemoryStack.stackPush()) { // per-iteration: avoid 64 KB stack overflow
+                    recordBlasBuild(cmd, stack, b);
+                }
+            }
+            try (MemoryStack stack = MemoryStack.stackPush()) {
+                if (!blasToBuild.isEmpty()) {
+                    VkMemoryBarrier.Buffer bar = VkMemoryBarrier.calloc(1, stack).sType$Default()
+                            .srcAccessMask(VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR)
+                            .dstAccessMask(VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR);
+                    VK10.vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+                            VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, 0, bar, null, null);
+                }
+                VkAccelerationStructureBuildGeometryInfoKHR.Buffer build = tlasBuildInfo(stack, tlas.instanceBuffer.deviceAddress);
+                build.get(0).dstAccelerationStructure(tlas.accel.handle);
+                build.get(0).scratchData().deviceAddress(tlas.scratch.deviceAddress);
+                VkAccelerationStructureBuildRangeInfoKHR.Buffer range = VkAccelerationStructureBuildRangeInfoKHR.calloc(1, stack);
+                range.get(0).primitiveCount(tlas.instanceCount).primitiveOffset(0).firstVertex(0).transformOffset(0);
+                PointerBuffer ppRange = stack.mallocPointer(1).put(0, range.address());
+                vkCmdBuildAccelerationStructuresKHR(cmd, build, ppRange);
+            }
+        });
+        for (PreparedBlas b : blasToBuild) {
+            b.scratch.destroy();
+        }
+        tlas.scratch.destroy();
+        tlas.instanceBuffer.destroy();
+        return tlas.accel;
+    }
+
+    private static void recordBlasBuild(VkCommandBuffer cmd, MemoryStack stack, PreparedBlas b) {
+        VkAccelerationStructureGeometryKHR.Buffer geom = triangleGeometry(stack, b.vertexAddr, b.indexAddr, b.maxVertex + 1, b.opaque);
+        VkAccelerationStructureBuildGeometryInfoKHR.Buffer build = VkAccelerationStructureBuildGeometryInfoKHR.calloc(1, stack);
+        build.sType$Default().type(VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR)
+                .flags(VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR)
+                .mode(VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR).geometryCount(1).pGeometries(geom)
+                .dstAccelerationStructure(b.accel.handle);
+        build.get(0).scratchData().deviceAddress(b.scratch.deviceAddress);
         VkAccelerationStructureBuildRangeInfoKHR.Buffer range = VkAccelerationStructureBuildRangeInfoKHR.calloc(1, stack);
-        range.get(0).primitiveCount(primitiveCount).primitiveOffset(0).firstVertex(0).transformOffset(0);
+        range.get(0).primitiveCount(b.triangleCount).primitiveOffset(0).firstVertex(0).transformOffset(0);
         PointerBuffer ppRange = stack.mallocPointer(1).put(0, range.address());
-
-        ctx.submitSync(cmd -> vkCmdBuildAccelerationStructuresKHR(cmd, build, ppRange));
-        scratch.destroy();
-
-        VkAccelerationStructureDeviceAddressInfoKHR addrInfo = VkAccelerationStructureDeviceAddressInfoKHR.calloc(stack)
-                .sType$Default().accelerationStructure(handle);
-        long deviceAddress = vkGetAccelerationStructureDeviceAddressKHR(vk, addrInfo);
-        return new RtAccel(vk, handle, deviceAddress, backing);
+        vkCmdBuildAccelerationStructuresKHR(cmd, build, ppRange);
     }
 }

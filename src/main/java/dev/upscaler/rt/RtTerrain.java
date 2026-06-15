@@ -180,8 +180,8 @@ public final class RtTerrain {
         }
         empty.removeIf(k -> !desired.contains(k));
 
-        boolean changed = !removed.isEmpty();
-
+        // Tessellate + upload new sections (BLAS build deferred to rebuild's single batched submission).
+        List<PreparedSection> prepared = new ArrayList<>();
         if (!missing.isEmpty()) {
             // Build nearest-first so terrain fills from the player outward.
             missing.sort((a, b) -> Integer.compare(dist2(a, pcx, psy, pcz), dist2(b, pcx, psy, pcz)));
@@ -193,7 +193,6 @@ public final class RtTerrain {
             capture.view = view;
             BlockPos.MutableBlockPos m = new BlockPos.MutableBlockPos();
             int budget = SECTIONS_PER_TICK;
-            List<PreparedSection> prepared = new ArrayList<>();
             for (int[] s : missing) {
                 if (budget <= 0) {
                     break;
@@ -207,22 +206,10 @@ public final class RtTerrain {
                     empty.add(key);
                 }
             }
-            if (!prepared.isEmpty()) {
-                // Batch all this tick's BLAS builds into one submission (one queue drain instead of one per section).
-                List<RtAccel.PreparedBlas> builds = new ArrayList<>(prepared.size());
-                for (PreparedSection ps : prepared) {
-                    builds.add(ps.blas());
-                }
-                RtAccel.buildPrepared(ctx, builds);
-                for (PreparedSection ps : prepared) {
-                    resident.put(ps.key(), new SectionGeom(ps.positions(), ps.indices(), ps.uvs(), ps.material(), ps.blas().accel, ps.sx(), ps.sy(), ps.sz()));
-                }
-                changed = true;
-            }
         }
 
-        if (changed) {
-            rebuild(ctx, removed, pb.getX(), pb.getY(), pb.getZ());
+        if (!removed.isEmpty() || !prepared.isEmpty()) {
+            rebuild(ctx, prepared, removed, pb.getX(), pb.getY(), pb.getZ());
         }
     }
 
@@ -294,8 +281,16 @@ public final class RtTerrain {
                                    RtAccel.PreparedBlas blas, int sx, int sy, int sz) {
     }
 
-    /** Rebuild the section table + TLAS from the current resident set; free old + removed sections. */
-    private void rebuild(RtContext ctx, List<SectionGeom> removed, int rbx, int rby, int rbz) {
+    /**
+     * Commit a tick's changes: add the newly prepared sections, then build their BLAS + a fresh TLAS
+     * over the whole resident set in one batched submission, and free the old TLAS/table + removed
+     * sections. {@code rbx/rby/rbz} is the new rebase origin (player block).
+     */
+    private void rebuild(RtContext ctx, List<PreparedSection> prepared, List<SectionGeom> removed, int rbx, int rby, int rbz) {
+        for (PreparedSection ps : prepared) {
+            resident.put(ps.key(), new SectionGeom(ps.positions(), ps.indices(), ps.uvs(), ps.material(), ps.blas().accel, ps.sx(), ps.sy(), ps.sz()));
+        }
+
         List<SectionGeom> ordered = new ArrayList<>(resident.values());
         if (ordered.isEmpty()) {
             ctx.waitIdle();
@@ -323,13 +318,19 @@ public final class RtTerrain {
             MemoryUtil.memPutLong(base, g.material.deviceAddress);
             MemoryUtil.memPutLong(base + 8, g.indices.deviceAddress);
             MemoryUtil.memPutLong(base + 16, g.uvs.deviceAddress);
-            // instanceCustomIndex == table index i (buildTlas assigns it from the list order).
+            // instanceCustomIndex == table index i (buildBatch assigns it from the list order).
             float[] xform = {1, 0, 0, g.sx - rbx, 0, 1, 0, g.sy - rby, 0, 0, 1, g.sz - rbz};
             instances.add(new RtAccel.Instance(xform, g.blas.deviceAddress));
         }
-        RtAccel newTlas = RtAccel.buildTlas(ctx, instances);
 
-        // No explicit waitIdle: buildTlas's submitSync is queued after any in-flight frame on the
+        // One submission: build this tick's new BLAS, barrier, then the TLAS over the whole set.
+        List<RtAccel.PreparedBlas> blasBuilds = new ArrayList<>(prepared.size());
+        for (PreparedSection ps : prepared) {
+            blasBuilds.add(ps.blas());
+        }
+        RtAccel newTlas = RtAccel.buildBatch(ctx, blasBuilds, instances);
+
+        // No explicit waitIdle: buildBatch's submitSync is queued after any in-flight frame on the
         // graphics queue and waits on its fence, so by here those frames have completed and the old
         // TLAS/table/removed buffers are safe to free. (The empty-set branch above still needs its
         // own waitIdle since it does no build.)
