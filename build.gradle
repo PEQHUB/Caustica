@@ -1,3 +1,6 @@
+import javax.inject.Inject
+import org.gradle.process.ExecOperations
+
 plugins {
 	id "fabric-loom" version "${loom_version}"
 	id "maven-publish"
@@ -51,6 +54,62 @@ processResources {
 		expand "version": inputs.properties.version
 	}
 }
+
+// Compile the RT GLSL shaders (shaders/rt/*) to SPIR-V at build time instead of tracking the .spv.
+// The .spv are pure build output of the GLSL; generating them here makes stale binaries impossible
+// and gives incremental up-to-date checks. Requires the Vulkan SDK's glslangValidator (+ spirv-val);
+// located via the VULKAN_SDK env var (set by the SDK installer) with a PATH fallback.
+def shaderGenRoot = layout.buildDirectory.dir("generated/shaders") // classpath root -> /upscaler/rt/*.spv
+
+def resolveVulkanTool = { String name ->
+	def exe = org.gradle.internal.os.OperatingSystem.current().windows ? ".exe" : ""
+	def sdk = System.getenv("VULKAN_SDK")
+	if (sdk) {
+		def fromSdk = file("${sdk}/Bin/${name}${exe}")
+		if (fromSdk.exists()) {
+			return fromSdk.absolutePath
+		}
+	}
+	return "${name}${exe}" // fall back to PATH; exec fails with a clear message if absent
+}
+
+abstract class CompileShaders extends DefaultTask {
+	@InputDirectory abstract DirectoryProperty getSrcDir()
+	@OutputDirectory abstract DirectoryProperty getOutDir()
+	@Input abstract Property<String> getGlslang()
+	@Input abstract Property<String> getSpirvVal()
+
+	@Inject abstract ExecOperations getExecOps()
+
+	@TaskAction
+	void compile() {
+		def outDirFile = outDir.get().asFile
+		outDirFile.mkdirs()
+		def stages = ~/.*\.(rgen|rchit|rahit|rmiss|rcall|comp|vert|frag)$/
+		srcDir.get().asFile.listFiles().findAll { it.isFile() && it.name ==~ stages }.each { src ->
+			def spv = new File(outDirFile, "${src.name}.spv")
+			execOps.exec {
+				commandLine glslang.get(), "-V", "--target-env", "vulkan1.2", src.absolutePath, "-o", spv.absolutePath
+			}
+			execOps.exec {
+				commandLine spirvVal.get(), "--target-env", "vulkan1.2", spv.absolutePath
+			}
+		}
+	}
+}
+
+def compileShaders = tasks.register("compileShaders", CompileShaders) {
+	group = "build"
+	description = "Compiles shaders/rt/*.{rgen,rchit,rahit,rmiss,comp} to SPIR-V and validates them."
+	srcDir = file("shaders/rt")
+	outDir = layout.buildDirectory.dir("generated/shaders/upscaler/rt")
+	glslang = resolveVulkanTool("glslangValidator")
+	spirvVal = resolveVulkanTool("spirv-val")
+}
+
+// Emit the .spv into the main resources so they land in the jar / on the runClient classpath at the
+// same /upscaler/rt/ path the loader (RtPipeline/RtBlendPipeline) reads. builtBy wires the dependency.
+sourceSets.main.resources.srcDir(files(shaderGenRoot).builtBy(compileShaders))
 
 tasks.withType(JavaCompile).configureEach {
 	it.options.release = 25
