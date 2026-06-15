@@ -18,9 +18,11 @@
 // Russian roulette terminates deep paths; a firefly clamp tames the rare bright spike. Output is
 // HDR (R16G16B16A16_SFLOAT); the HDR -> LDR tonemap happens later at the blend.comp seam.
 //
-// No temporal accumulation yet (P3.1b): we average SPP independent paths per frame and the RNG is
-// seeded per-pixel only, so the grain is stable across frames (no flicker) but the still image is
-// still noisy. SPP keeps it viewable until temporal accumulation / the P4 denoiser converge it.
+// Temporal accumulation (accumulate-when-static, P3.1b): each frame averages SPP paths, then folds
+// that into an incremental running mean stored in the HDR target itself (no extra image/binding). The
+// CPU resets the accumFrame push constant to 0 on any camera move or geometry (TLAS) change; while
+// the viewpoint is static the image converges frame over frame. The RNG is seeded with accumFrame so
+// successive frames draw different paths. (Still no AA jitter — that comes with the P4 denoiser.)
 layout(binding = 0, set = 0) uniform accelerationStructureEXT topLevelAS;
 // HDR trace target (R16G16B16A16_SFLOAT): we write linear radiance which may exceed 1. The
 // HDR -> LDR tonemap happens later, at the blend.comp seam, not here.
@@ -29,6 +31,10 @@ layout(binding = 1, set = 0, rgba16f) uniform image2D outImage;
 layout(push_constant) uniform Push {
     mat4 invViewProj;
     vec3 camOffset;
+    // Frames already accumulated for the current static viewpoint (0 = first frame after a reset).
+    // Explicit offset 88 leaves the closest-hit/any-hit section-table address at 80 (raygen ignores
+    // that field). Drives the temporal running mean below and decorrelates the per-frame RNG.
+    layout(offset = 88) uint accumFrame;
 } pc;
 
 struct Payload {
@@ -144,15 +150,27 @@ void main() {
     vec3 origin = nearP + pc.camOffset;
     vec3 dir = normalize(farP - nearP);
 
-    // Seeded per-pixel only (stable across frames -> static grain) until P3.1b adds a frame index.
-    uint seed = uint(pix.x) * 1973u + uint(pix.y) * 9277u + 26699u;
+    // Seed includes accumFrame so each accumulated frame draws a different path set (otherwise the
+    // running mean would fold in identical samples and never converge).
+    uint seed = (uint(pix.x) * 1973u + uint(pix.y) * 9277u + 26699u) ^ (pc.accumFrame * 2654435761u);
 
-    vec3 acc = vec3(0.0);
+    vec3 frameRadiance = vec3(0.0);
     for (int s = 0; s < SPP; s++) {
         seed = pcg(seed); // decorrelate per-sample paths (shared camera ray, no AA jitter yet)
-        acc += min(tracePath(origin, dir, seed), vec3(FIREFLY_MAX));
+        frameRadiance += min(tracePath(origin, dir, seed), vec3(FIREFLY_MAX));
     }
-    acc /= float(SPP);
+    frameRadiance /= float(SPP);
 
-    imageStore(outImage, pix, vec4(acc, 1.0));
+    // Temporal accumulation: incremental running mean in the HDR target. accumFrame == 0 means a fresh
+    // viewpoint (camera/geometry just changed), so start over; otherwise blend this frame in at weight
+    // 1/(n+1). Stored values stay in display range (no unbounded growth), so fp16 holds up for the few
+    // hundred frames a static view converges in.
+    vec3 outColor;
+    if (pc.accumFrame == 0u) {
+        outColor = frameRadiance;
+    } else {
+        vec3 prev = imageLoad(outImage, pix).rgb;
+        outColor = prev + (frameRadiance - prev) / float(pc.accumFrame + 1u);
+    }
+    imageStore(outImage, pix, vec4(outColor, 1.0));
 }
