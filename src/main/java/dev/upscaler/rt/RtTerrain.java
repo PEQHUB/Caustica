@@ -65,6 +65,7 @@ public final class RtTerrain {
 
     private final Map<Long, SectionGeom> resident = new HashMap<>();
     private final Set<Long> empty = new HashSet<>(); // loaded, in-window sections with no geometry
+    private final Set<Long> dirty = java.util.concurrent.ConcurrentHashMap.newKeySet(); // edited sections to re-extract
     private RtBuffer sectionTable;
     private RtAccel tlas;
     private boolean ready;
@@ -101,6 +102,23 @@ public final class RtTerrain {
         INSTANCE.clear(ctx);
     }
 
+    /**
+     * Mark every section overlapping a dirty block area for re-extraction. Fed by the LevelExtractor
+     * hook (vanilla's block-change signal). Thread-safe; drained on the next {@link #tick}.
+     */
+    public static void markBlocksDirty(int minX, int minY, int minZ, int maxX, int maxY, int maxZ) {
+        if (!ENABLED) {
+            return;
+        }
+        for (int scx = minX >> 4; scx <= maxX >> 4; scx++) {
+            for (int scy = minY >> 4; scy <= maxY >> 4; scy++) {
+                for (int scz = minZ >> 4; scz <= maxZ >> 4; scz++) {
+                    INSTANCE.dirty.add(sectionKey(scx, scy, scz));
+                }
+            }
+        }
+    }
+
     private void tick(RtContext ctx) {
         Minecraft mc = Minecraft.getInstance();
         ClientLevel level = mc.level;
@@ -116,6 +134,22 @@ public final class RtTerrain {
         int maxSecY = (level.getMinY() + level.getHeight() - 1) >> 4;
         int loY = Math.max(minSecY, psy - VIEW_SECTIONS_V);
         int hiY = Math.min(maxSecY, psy + VIEW_SECTIONS_V);
+
+        List<SectionGeom> removed = new ArrayList<>();
+
+        // Re-extract edited sections: drop them from residency (and the empty set) so the window pass
+        // rebuilds the ones still in view. Snapshot+removeAll drains without losing concurrent adds.
+        if (!dirty.isEmpty()) {
+            List<Long> keys = new ArrayList<>(dirty);
+            dirty.removeAll(keys);
+            for (long key : keys) {
+                SectionGeom g = resident.remove(key);
+                if (g != null) {
+                    removed.add(g);
+                }
+                empty.remove(key);
+            }
+        }
 
         // Desired window = loaded sections within the view. hasChunk gating makes residency follow
         // vanilla: unloaded chunks aren't desired (so their sections get freed), loaded ones are.
@@ -137,7 +171,6 @@ public final class RtTerrain {
         }
 
         // Free sections that left the window (or whose chunk unloaded).
-        List<SectionGeom> removed = new ArrayList<>();
         for (Iterator<Map.Entry<Long, SectionGeom>> it = resident.entrySet().iterator(); it.hasNext(); ) {
             Map.Entry<Long, SectionGeom> e = it.next();
             if (!desired.contains(e.getKey())) {
