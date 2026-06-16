@@ -88,24 +88,8 @@ public final class RtPipeline {
         this.firstExtraBinding = firstExtraBinding;
     }
 
-    public static RtPipeline create(RtContext ctx, String rgen, String rmiss, String rchit) {
-        return create(ctx, rgen, rmiss, rchit, 0);
-    }
-
-    public static RtPipeline create(RtContext ctx, String rgen, String rmiss, String rchit, int pushConstantSize) {
-        return create(ctx, rgen, rmiss, rchit, pushConstantSize, false);
-    }
-
-    public static RtPipeline create(RtContext ctx, String rgen, String rmiss, String rchit, int pushConstantSize, boolean withAtlasSampler) {
-        return create(ctx, rgen, new String[]{rmiss}, rchit, pushConstantSize, withAtlasSampler);
-    }
-
-    public static RtPipeline create(RtContext ctx, String rgen, String[] rmiss, String rchit, int pushConstantSize, boolean withAtlasSampler) {
-        return create(ctx, rgen, rmiss, rchit, null, pushConstantSize, withAtlasSampler, 0);
-    }
-
     /**
-     * Full form. {@code rahit} (nullable) adds an any-hit shader to the single triangle hit group for
+     * Builds the RT pipeline. {@code rahit} (nullable) adds an any-hit shader to the single triangle hit group for
      * alpha-tested cutout geometry — it's an extra pipeline stage but not an extra SBT group, so the
      * record layout is unchanged. When present, the atlas sampler and push constants are also made
      * visible to the any-hit stage. {@code extraStorageImages} adds that many raygen-visible storage

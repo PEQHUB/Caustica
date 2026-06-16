@@ -1,17 +1,22 @@
 # Plan: A Hardware Ray-Traced Renderer for Minecraft (Java, 26.2 / Vulkan)
 
-Status: implemented through P4.2b (DLSS-RR render-res split + sub-pixel jitter; vanilla renders full
-res while the path tracer runs at -Dupscaler.rt.renderScale and DLSS Ray Reconstruction upscales to
-display), 2026-06-16. P3 path-traced lighting GPU-verified; P4.2b builds (NOT yet GPU-verified). Next:
-P4.3 tuning (jitter sign / RR preset / MV sign+scale). Supersedes the "augment Sodium for RT"
-approach in `sodium-26.2-beta/RENDER_API_PLAN.md` (Phases 3–4 there). The upscaler
-work in `dlss-mod/` (`UPSCALER_PLAN.md`) is reused as the denoise/upscale backend.
+Status: **P0–P4 complete** (2026-06-17). P3 path-traced lighting GPU-verified; P4 DLSS Ray
+Reconstruction working — render-res split + sub-pixel jitter, vanilla renders full res while the path
+tracer runs at `-Dupscaler.rt.renderScale` and DLSS-RR upscales to display. The P4.2b jitter bugs are
+fixed: motion vectors are now jitter-free (subtract the jittered ndc) and the reported `InJitterOffset`
+is negated, both validated against `mcvr-ref`. **The renderer is now DLSS-RR-only** — the legacy FSR
+and DLSS Super-Resolution rasterizer paths and the P0 triangle self-test were deleted (compatibility /
+vendor-agnostic denoiser fallback deferred to the end; recoverable from git history). **Next: P5
+(dynamic content — entities/block-entities as rigid cuboid instances + per-object motion vectors).**
+Supersedes the "augment Sodium for RT" approach in `sodium-26.2-beta/RENDER_API_PLAN.md` (Phases 3–4
+there). The upscaler work in `dlss-mod/` (`UPSCALER_PLAN.md`) is reused as the denoise/upscale backend.
 Validated against prior art: **Radiance** (Java/Fabric) + its C++ engine **MCVR**,
 both studied 2026-06-14 (see "Prior art" below) — local checkouts `radiance-ref/`,
 `mcvr-ref/`.
 
-**Progress (2026-06-15):** Implemented through **P2** inside `dlss-mod` (package `dev.upscaler.rt`,
-step-tagged commits on `main`; run flags + internals in the `rt-renderer-p0` auto-memory).
+**Progress (2026-06-17):** Implemented through **P4** inside `dlss-mod` (package `dev.upscaler.rt`,
+step-tagged commits on `main`; run flags + internals in the `rt-renderer-p0` auto-memory). P3 + P4
+notes are below; P0–P2 detail follows.
 
 - **P0 complete** — device bring-up → AS → RT pipeline/SBT → on-screen triangle.
 - **P1 complete** — on-screen, camera-driven, **textured** terrain with **biome tint** (resolved
@@ -243,16 +248,19 @@ to fill our own buffers — we do not consume its packed/culled render output.)
   per-frame TLAS with camera-relative rebasing; AS memory budget + sliding window over
   render distance. Goal: fly around (including far from world origin) without leaks,
   corruption, or precision cracks.
-- **P3 — Path-traced lighting.** ← next. Same trace loop, not a separate subsystem. Start with
-  a simple brute-force "vanilla-pt" lit pass (NEE + MIS, Russian roulette, firefly
-  clamping; sun/sky + emissive). Then, since brute-force is too noisy real-time, adopt
-  MCVR's proven structure: **ReSTIR** for direct light (emitter-dense caves) and a
-  **SHARC radiance cache** for indirect GI rather than raising raw bounce count. HDR
-  accumulation. Goal: real shadows + emissive, then indirect/color bleeding (noisy).
-- **P4 — Denoise + temporal + upscale.** Port the NGX/FFX plumbing; integrate **DLSS
-  Ray Reconstruction** as a *new* feature path (its guide buffers: diffuse/specular
-  albedo, normals, roughness, hit distance); HDR tonemap. Goal: clean real-time image.
-- **P5 — Dynamic content.** Entity/block-entity geometry as **rigid cuboid instances**
+- **P3 — Path-traced lighting.** ✅ Done (GPU-verified). Brute-force "vanilla-pt" lit pass: NEE +
+  MIS, Russian roulette, firefly clamping; sun/sky + emissive from the block light table; HDR
+  accumulation. ReSTIR DI + SHARC GI deferred to a later optimization pass (P3.3). Temporal
+  accumulation was removed once DLSS-RR owned temporal reuse (1 spp + per-frame seed).
+- **P4 — Denoise + temporal + upscale.** ✅ Done. **DLSS Ray Reconstruction** as a *new* NGX feature
+  path (guide buffers: diffuse/specular albedo, world normals, roughness packed in normal.w, linear
+  hit distance, render-res motion vectors); render-res trace → RR denoise+upscale to display; HDR
+  tonemap in `blend.comp`. Jitter (Halton, applied to the primary ray in `world.rgen`, reported
+  negated to RR) and jitter-free MVs validated against `mcvr-ref`. **Implementation is DLSS-RR-only**:
+  the FSR/DLSS-SR rasterizer paths were removed; the SVGF/NRD/FSR/XeSS vendor-agnostic fallback in
+  step 5 above is deferred to the end of the project. Exposure: AutoExposure (fixed-exposure A/B is a
+  P-final tuning item). Goal met: clean real-time image at ~1/4 the ray work.
+- **P5 — Dynamic content.** ← next. Entity/block-entity geometry as **rigid cuboid instances**
   (`ModelPart` boxes are rigid, not skinned — instance a unit-cube BLAS per part, or
   refit a per-entity BLAS only on pose change; cheap even with many mobs) + per-frame
   motion vectors (owned, so MV is clean); water/translucency (refraction); foliage
@@ -343,15 +351,15 @@ volumetrics/multiple denoisers is months of work; we save the GL layer, not the 
 
 ## Immediate next step
 
-P0–P2 are done (see Progress). **P3 — path-traced lighting** is next: start with a brute-force
-"vanilla-pt" lit pass (NEE + MIS, Russian-roulette termination, firefly clamping; sun/sky +
-emissive from the block light-emission table) accumulated in **HDR**, then adopt MCVR's structure —
-**ReSTIR** for direct light and a **SHARC radiance cache** for indirect GI — rather than raising raw
-bounce count. This is the big visual leap past the current sun+AO look: real shadows from all
-emitters, then indirect/colour bleed. (It also forces the HDR target + the guide buffers P4's DLSS
-Ray Reconstruction will consume.)
+P0–P4 are done (see Progress); the renderer is DLSS-RR-only. **P5 — dynamic content** is next:
+entity/block-entity geometry as **rigid cuboid instances** (`ModelPart` boxes are rigid, not skinned
+— instance a unit-cube BLAS per part, or refit a per-entity BLAS only on pose change) with **per-frame
+per-object motion vectors** (extending P4's owned MV/guide-buffer infra), plus water/translucency
+(refraction) and any remaining cutout polish. Sequencing rationale: dynamic entities animate the TLAS
+every frame, so this is gated on the real denoiser P4 just delivered.
 
-Smaller deferred items that can slot in anytime: **alpha-tested cutout shadows** (drop the
-force-opaque flag on shadow/AO rays so foliage casts dappled light), **fluids** (water/lava via
-`FluidRenderer` + a capturing `VertexConsumer`; water stays opaque until P5 translucency), and
-**grass cross-model dedup** (collapse coincident `cross` quads to kill the z-fight).
+Smaller deferred items that can slot in anytime: **grass cross-model dedup** (collapse coincident
+`cross` quads to kill the z-fight); the **ReSTIR DI + SHARC GI** quality pass (P3.3); a
+**vendor-agnostic denoiser/upscaler fallback** (SVGF/NRD + FSR/XeSS) and a non-RTX path — explicitly
+deferred to the end of the project; and DLSS-RR fine-tuning (RR preset sweep, fixed-exposure A/B vs
+AutoExposure, jitter-sign reconfirm via the dev DLL).
