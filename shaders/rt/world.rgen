@@ -49,6 +49,9 @@ layout(push_constant) uniform Push {
     layout(offset = 96)  mat4 prevViewProj;
     layout(offset = 160) vec3 camDelta;
     layout(offset = 172) uint spp; // samples per pixel this frame (>=1); low for the RR-denoised path
+    // P4.2b sub-pixel camera jitter, in render pixels (the same Halton offset reported to DLSS-RR).
+    // Applied to the primary ray only; the motion-vector pass keeps the unjittered pixel centre.
+    layout(offset = 176) vec2 jitter;
 } pc;
 
 // First-hit (primary-visibility) guide attributes, captured at bounce 0 of tracePath. The primary ray
@@ -186,10 +189,16 @@ void main() {
     const ivec2 pix = ivec2(gl_LaunchIDEXT.xy);
     const vec2 size = vec2(gl_LaunchSizeEXT.xy);
     vec2 uv = (vec2(pix) + 0.5) / size;
-    vec2 ndc = uv * 2.0 - 1.0;
+    vec2 ndc = uv * 2.0 - 1.0; // unjittered pixel centre — the motion vector reprojects this
 
-    vec4 nearH = pc.invViewProj * vec4(ndc.x, ndc.y, 1.0, 1.0);
-    vec4 farH = pc.invViewProj * vec4(ndc.x, ndc.y, 0.0, 1.0);
+    // P4.2b: offset the primary ray within the pixel by the sub-pixel jitter reported to DLSS-RR, so
+    // successive frames sample different positions and RR can resolve detail above render resolution.
+    // The guide buffers below come from this jittered first hit (they must match the jittered colour);
+    // only the motion vector stays on the unjittered centre, which DLSS expects.
+    vec2 jndc = (uv + pc.jitter / size) * 2.0 - 1.0;
+
+    vec4 nearH = pc.invViewProj * vec4(jndc.x, jndc.y, 1.0, 1.0);
+    vec4 farH = pc.invViewProj * vec4(jndc.x, jndc.y, 0.0, 1.0);
     vec3 nearP = nearH.xyz / nearH.w;
     vec3 farP = farH.xyz / farH.w;
 

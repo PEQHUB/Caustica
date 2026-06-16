@@ -57,6 +57,11 @@ public final class WorldRenderScaler {
 	private int savedHeight;
 	private boolean active;
 	private boolean loggedActivation;
+	// RT-composite passthrough: when the ray traced path owns upscaling (DLSS-RR at render res), the
+	// vanilla world renders at full res — no low-res swap, no SR/FSR upscale — and this window only
+	// drives the RT composite once, at the before-hand seam. Tracks that the window is open so the
+	// safety-net end() does not composite a second time.
+	private boolean rtWindowOpen;
 
 	private WorldRenderScaler() {
 		float configured = DEFAULT_SCALE;
@@ -79,6 +84,12 @@ public final class WorldRenderScaler {
 	/** Swap low-res textures into the main target. Call right before level rendering. */
 	public void begin(RenderTarget mainTarget) {
 		if (!isEnabled() || this.active) {
+			return;
+		}
+
+		// RT composite owns upscaling via DLSS-RR (at its own render res); render vanilla at full res.
+		if (RtComposite.ENABLED) {
+			this.rtWindowOpen = true;
 			return;
 		}
 
@@ -120,6 +131,16 @@ public final class WorldRenderScaler {
 	 * motion vectors would be exactly wrong for it.
 	 */
 	public void end(RenderTarget mainTarget) {
+		// RT passthrough: vanilla already rendered full res; just run the RT composite once, here at the
+		// before-hand seam (the safety-net end() then no-ops because the window is already closed).
+		if (RtComposite.ENABLED) {
+			if (this.rtWindowOpen) {
+				this.rtWindowOpen = false;
+				RtComposite.INSTANCE.composite(mainTarget.getColorTexture(), mainTarget.width, mainTarget.height);
+			}
+			return;
+		}
+
 		if (!this.active) {
 			return;
 		}
@@ -153,7 +174,6 @@ public final class WorldRenderScaler {
 					mainTarget.getColorTexture(), this.savedWidth, this.savedHeight);
 		}
 		if (temporalDone) {
-			compositeRt(mainTarget);
 			return;
 		}
 
@@ -170,13 +190,6 @@ public final class WorldRenderScaler {
 			pass.bindTexture("InSampler", this.lowResColorView,
 					RenderSystem.getSamplerCache().getClampToEdge(FilterMode.LINEAR));
 			pass.draw(3, 1, 0, 0);
-		}
-		compositeRt(mainTarget);
-	}
-
-	private void compositeRt(RenderTarget mainTarget) {
-		if (RtComposite.ENABLED) {
-			RtComposite.INSTANCE.composite(mainTarget.getColorTexture(), this.savedWidth, this.savedHeight);
 		}
 	}
 
@@ -203,6 +216,7 @@ public final class WorldRenderScaler {
 		this.savedDepth = null;
 		this.savedDepthView = null;
 		this.active = false;
+		this.rtWindowOpen = false;
 	}
 
 	private void destroyLowResTargets() {

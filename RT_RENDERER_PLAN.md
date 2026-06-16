@@ -1,6 +1,9 @@
 # Plan: A Hardware Ray-Traced Renderer for Minecraft (Java, 26.2 / Vulkan)
 
-Status: implemented through P2 (geometry lifecycle), 2026-06-15. Supersedes the "augment Sodium for RT"
+Status: implemented through P4.2b (DLSS-RR render-res split + sub-pixel jitter; vanilla renders full
+res while the path tracer runs at -Dupscaler.rt.renderScale and DLSS Ray Reconstruction upscales to
+display), 2026-06-16. P3 path-traced lighting GPU-verified; P4.2b builds (NOT yet GPU-verified). Next:
+P4.3 tuning (jitter sign / RR preset / MV sign+scale). Supersedes the "augment Sodium for RT"
 approach in `sodium-26.2-beta/RENDER_API_PLAN.md` (Phases 3–4 there). The upscaler
 work in `dlss-mod/` (`UPSCALER_PLAN.md`) is reused as the denoise/upscale backend.
 Validated against prior art: **Radiance** (Java/Fabric) + its C++ engine **MCVR**,

@@ -8,6 +8,7 @@ import com.mojang.blaze3d.vulkan.VulkanGpuTexture;
 import com.mojang.blaze3d.vulkan.VulkanGpuTextureView;
 import dev.upscaler.UpscalerMod;
 import dev.upscaler.client.SodiumCompat;
+import dev.upscaler.client.UpscalerJitter;
 import dev.upscaler.mixin.CommandEncoderAccessor;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.texture.TextureAtlas;
@@ -16,6 +17,7 @@ import org.joml.Matrix4fc;
 import org.lwjgl.system.MemoryStack;
 import org.lwjgl.vulkan.VK10;
 import org.lwjgl.vulkan.VkCommandBuffer;
+import org.lwjgl.vulkan.VkImageBlit;
 import org.lwjgl.vulkan.VkImageCopy;
 import org.lwjgl.vulkan.VkSamplerCreateInfo;
 
@@ -23,13 +25,19 @@ import java.nio.ByteBuffer;
 import java.nio.LongBuffer;
 
 /**
- * On-screen composite. Each frame, ray-trace into a screen-sized storage image, blend it 50/50
- * with a storage-capable copy of the upscaled world color, and copy the result back to the world
- * target at the end-of-world seam. Gated by {@code -Dupscaler.rt.composite=true}.
+ * On-screen composite. Each frame, ray-trace into a render-res storage image (+ guide buffers), use
+ * DLSS Ray Reconstruction to denoise and upscale it to display res, blend that over a storage-capable
+ * copy of the full-res vanilla world color, and copy the result back to the world target at the
+ * end-of-world seam. Gated by {@code -Dupscaler.rt.composite=true}.
+ *
+ * <p>P4.2b resolution split: the path tracer and its guide buffers run at {@link #RENDER_SCALE} of
+ * display res with a per-frame sub-pixel camera jitter; DLSS-RR ({@link RtDlssRr}) reconstructs the
+ * display-res image. With RR disabled the trace runs at 1:1 and a linear blit stands in for the
+ * upscale (a raw, noisy reference). The vanilla world is rendered at full res (see WorldRenderScaler).
  *
  * <p>When {@link RtTerrain} has been extracted (P1), traces real terrain with perspective camera
  * rays (camera matrices captured each frame via {@link #captureFrame}); otherwise falls back to
- * the P0 triangle. Pipelines/SBT/descriptors are built once; screen-sized images rebuilt on resize.
+ * the P0 triangle. Pipelines/SBT/descriptors are built once; sized images rebuilt on resize.
  */
 public final class RtComposite {
     public static final RtComposite INSTANCE = new RtComposite();
@@ -38,20 +46,38 @@ public final class RtComposite {
     public static final float BLEND = parseBlend();
 
     // invViewProj(64) + camOffset(@64) + sectionTableAddr(@80) + debugView(@88) + frameIndex(@92)
-    // + prevViewProj(@96) + camDelta(@160) + spp(@172)
-    private static final int WORLD_PUSH_SIZE = 176;
+    // + prevViewProj(@96) + camDelta(@160) + spp(@172) + jitter(@176)
+    private static final int WORLD_PUSH_SIZE = 184;
     private static final int GUIDE_COUNT = 5; // P4 guide buffers bound at world-pipeline bindings 3..7
 
     /** Debug guide-buffer view: 0 = normal render, 1 = normals, 2 = albedo, 3 = depth, 4 = roughness. */
     public static final int DEBUG_VIEW = Integer.getInteger("upscaler.rt.debugView", 0);
     /** Samples per pixel per frame. Default 1: DLSS-RR denoises ~1 spp; raise for the no-RR reference. */
     public static final int SPP = Math.max(1, Integer.getInteger("upscaler.rt.spp", 1));
+    /**
+     * P4.2b RT trace scale: the path tracer + guide buffers run at this fraction of display resolution
+     * and DLSS-RR upscales to display. Only applied when {@link RtDlssRr#ENABLED}; the no-RR reference
+     * traces at 1.0 (a 1:1 blit). Default 1/1.5 matches DLSS MaxQuality. {@code -Dupscaler.rt.renderScale}.
+     */
+    public static final float RENDER_SCALE = parseRenderScale();
+    // Sign of the sub-pixel jitter as reported to DLSS-RR + applied to the primary ray, mirroring the
+    // validated DLSS-SR convention (Vulkan flipped clip space wants Y negated). Tune in P4.3.
+    private static final float JITTER_SIGN_X = Float.parseFloat(System.getProperty("upscaler.rt.jitterSignX", "1"));
+    private static final float JITTER_SIGN_Y = Float.parseFloat(System.getProperty("upscaler.rt.jitterSignY", "-1"));
 
     private static float parseBlend() {
         try {
             return Math.clamp(Float.parseFloat(System.getProperty("upscaler.rt.blend", "0.5")), 0f, 1f);
         } catch (NumberFormatException e) {
             return 0.5f;
+        }
+    }
+
+    private static float parseRenderScale() {
+        try {
+            return Math.clamp(Float.parseFloat(System.getProperty("upscaler.rt.renderScale", "0.6667")), 0.25f, 1f);
+        } catch (NumberFormatException e) {
+            return 0.6667f;
         }
     }
 
@@ -73,8 +99,15 @@ public final class RtComposite {
     private RtImage gDepth;
     private RtImage gMotion;
     private RtImage gSpecAlbedo;
-    // DLSS-RR denoised output (display res); copied back into `output` so the blend path is unchanged.
+    // Display-res RT image the blend reads: DLSS-RR writes it (render -> display denoise+upscale), or a
+    // linear blit of `output` fills it when RR is off/unavailable (the no-RR reference / fallback).
     private RtImage rrOutput;
+
+    // P4.2b resolution split: the trace + guide buffers run at render res, the composite at display res.
+    private int displayW = -1;
+    private int displayH = -1;
+    private int renderW = -1;
+    private int renderH = -1;
 
     // Motion-vector reprojection state (P4.0b): the previous frame's camera-relative view-projection
     // and camera position, read into the push constant each frame then advanced at frame end.
@@ -137,7 +170,7 @@ public final class RtComposite {
             if (useWorld) {
                 updateMotion();
             }
-            recordFrame(active, useWorld, nativeColor, width, height);
+            recordFrame(active, useWorld, nativeColor);
             if (!loggedActive) {
                 loggedActive = true;
                 UpscalerMod.LOGGER.info("RT composite active ({}): {}x{}, RT blended at {} over the world target",
@@ -225,8 +258,7 @@ public final class RtComposite {
     }
 
     private void ensureOutput(RtContext ctx, int width, int height) {
-        if (output != null && baseCopy != null && output.width == width && output.height == height
-                && baseCopy.width == width && baseCopy.height == height) {
+        if (output != null && baseCopy != null && rrOutput != null && displayW == width && displayH == height) {
             return;
         }
         ctx.waitIdle(); // resize is rare; no in-flight frame may use the old image/descriptor
@@ -237,21 +269,29 @@ public final class RtComposite {
             output.destroy();
         }
         destroyGuideImages();
+
+        displayW = width;
+        displayH = height;
+        // The path tracer + its guide buffers run at render res; DLSS-RR (or a fallback blit) upscales
+        // to display res. With RR off there is no upscaler, so trace at 1:1 for a faithful reference.
+        float scale = RtDlssRr.ENABLED ? RENDER_SCALE : 1.0f;
+        renderW = Math.max(1, Math.round(width * scale));
+        renderH = Math.max(1, Math.round(height * scale));
+
         // RT traces into an HDR (R16G16B16A16_SFLOAT) target so radiance > 1 survives to the tonemap
         // seam in blend.comp. baseCopy stays R8G8B8A8 to match the vanilla world target it is copied
         // to/from (vkCmdCopyImage requires texel-size-compatible formats).
-        output = ctx.createStorageImage(width, height, VK10.VK_FORMAT_R16G16B16A16_SFLOAT);
+        output = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R16G16B16A16_SFLOAT);
         baseCopy = ctx.createStorageImage(width, height);
-        // Guide buffers match the trace resolution (render-res split arrives in P4.2).
-        gNormal = ctx.createStorageImage(width, height, VK10.VK_FORMAT_R16G16B16A16_SFLOAT);
-        gAlbedo = ctx.createStorageImage(width, height, VK10.VK_FORMAT_R16G16B16A16_SFLOAT);
-        gDepth = ctx.createStorageImage(width, height, VK10.VK_FORMAT_R32_SFLOAT);
-        gMotion = ctx.createStorageImage(width, height, VK10.VK_FORMAT_R16G16_SFLOAT);
-        gSpecAlbedo = ctx.createStorageImage(width, height, VK10.VK_FORMAT_R16G16B16A16_SFLOAT);
-        if (RtDlssRr.ENABLED) {
-            // DLSS-RR output. P4.2a is native res (display == render); P4.2b makes this display-res.
-            rrOutput = ctx.createStorageImage(width, height, VK10.VK_FORMAT_R16G16B16A16_SFLOAT);
-        }
+        // Guide buffers match the trace (render) resolution; DLSS-RR consumes them at render res.
+        gNormal = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R16G16B16A16_SFLOAT);
+        gAlbedo = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R16G16B16A16_SFLOAT);
+        gDepth = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R32_SFLOAT);
+        gMotion = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R16G16_SFLOAT);
+        gSpecAlbedo = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R16G16B16A16_SFLOAT);
+        // Display-res RT image the blend reads. Always present (DLSS-RR target, or blit-upscale fallback).
+        rrOutput = ctx.createStorageImage(width, height, VK10.VK_FORMAT_R16G16B16A16_SFLOAT);
+
         mvHasPrev = false; // recreated images -> first MV frame is zero
         if (trianglePipeline != null) {
             trianglePipeline.setStorageImage(output.view);
@@ -260,7 +300,7 @@ public final class RtComposite {
             worldPipeline.setStorageImage(output.view);
             bindGuideImages();
         }
-        blendPipeline.setImages(baseCopy.view, output.view);
+        blendPipeline.setImages(baseCopy.view, rrOutput.view);
     }
 
     /**
@@ -288,11 +328,23 @@ public final class RtComposite {
         mvHasPrev = true;
     }
 
-    private void recordFrame(RtPipeline active, boolean useWorld, GpuTexture nativeColor, int width, int height) {
+    private void recordFrame(RtPipeline active, boolean useWorld, GpuTexture nativeColor) {
         long dstImage = vkImage(nativeColor);
         var encoder = (VulkanCommandEncoder) ((CommandEncoderAccessor) RenderSystem.getDevice().createCommandEncoder()).upscaler$getBackend();
         VkCommandBuffer cmd = encoder.allocateAndBeginTransientCommandBuffer();
         try (MemoryStack stack = MemoryStack.stackPush()) {
+            // RR drives the upscale: trace + jitter at render res, DLSS-RR denoises+upscales to display.
+            // Jitter is suppressed for the no-RR reference and for the debug guide views (raw inspection).
+            boolean rrPath = useWorld && RtDlssRr.ENABLED && DEBUG_VIEW == 0;
+            float jitterX = 0f;
+            float jitterY = 0f;
+            if (rrPath) {
+                UpscalerJitter.INSTANCE.prepare(renderW, renderH, displayW);
+                jitterX = UpscalerJitter.INSTANCE.jitterPixelsX() * JITTER_SIGN_X;
+                jitterY = UpscalerJitter.INSTANCE.jitterPixelsY() * JITTER_SIGN_Y;
+            }
+
+            boolean rrDone = false;
             if (useWorld) {
                 RtTerrain terrain = RtTerrain.currentOrNull();
                 ByteBuffer push = stack.malloc(WORLD_PUSH_SIZE);
@@ -308,34 +360,39 @@ public final class RtComposite {
                 push.putFloat(164, mvCamDeltaY);
                 push.putFloat(168, mvCamDeltaZ);
                 push.putInt(172, SPP);
-                active.trace(cmd, width, height, push);
-                // P4.2a: DLSS-RR denoise. The RT pass wrote the noisy color into `output` plus the guide
-                // buffers; RR reads them and writes the denoised result into rrOutput, which we copy back
-                // into `output` so the downstream tonemap/blend path is unchanged (native res, 1:1 copy).
-                if (RtDlssRr.ENABLED && rrOutput != null
-                        && RtDlssRr.INSTANCE.ensureFeature(cmd.address(), width, height, width, height)) {
+                push.putFloat(176, jitterX);
+                push.putFloat(180, jitterY);
+                active.trace(cmd, renderW, renderH, push);
+                // P4.2b: DLSS-RR denoise + upscale. The RT pass wrote noisy color (render res) + guides;
+                // RR reads them and writes the display-res denoised result straight into rrOutput, which
+                // the blend reads. No copy-back: render and display sizes now differ.
+                if (rrPath && RtDlssRr.INSTANCE.ensureFeature(cmd.address(), renderW, renderH, displayW, displayH)) {
                     VulkanCommandEncoder.memoryBarrier(cmd, stack); // RT writes visible to DLSS reads
-                    if (RtDlssRr.INSTANCE.evaluate(cmd.address(), output, gDepth, gMotion, gAlbedo,
-                            gSpecAlbedo, gNormal, rrOutput, width, height, width, height)) {
-                        VulkanCommandEncoder.memoryBarrier(cmd, stack); // DLSS write visible to the copy
-                        VK10.vkCmdCopyImage(cmd, rrOutput.image, VK10.VK_IMAGE_LAYOUT_GENERAL,
-                                output.image, VK10.VK_IMAGE_LAYOUT_GENERAL, copyRegion(stack, width, height));
-                    }
+                    rrDone = RtDlssRr.INSTANCE.evaluate(cmd.address(), output, gDepth, gMotion, gAlbedo,
+                            gSpecAlbedo, gNormal, rrOutput, renderW, renderH, displayW, displayH, jitterX, jitterY);
                 }
             } else {
-                active.trace(cmd, width, height);
+                active.trace(cmd, renderW, renderH);
+            }
+
+            // When DLSS-RR did not produce the display-res image (disabled, debug view, or a runtime
+            // failure), bring the render-res trace up to display res with a linear blit so the blend
+            // always has a display-res RT image. With RR off render == display, so this is a 1:1 copy.
+            if (!rrDone) {
+                VulkanCommandEncoder.memoryBarrier(cmd, stack);
+                blitUpscale(cmd, stack, output, rrOutput);
             }
             VulkanCommandEncoder.memoryBarrier(cmd, stack);
 
             VK10.vkCmdCopyImage(cmd, dstImage, VK10.VK_IMAGE_LAYOUT_GENERAL,
-                    baseCopy.image, VK10.VK_IMAGE_LAYOUT_GENERAL, copyRegion(stack, width, height));
+                    baseCopy.image, VK10.VK_IMAGE_LAYOUT_GENERAL, copyRegion(stack, displayW, displayH));
             VulkanCommandEncoder.memoryBarrier(cmd, stack);
 
-            blendPipeline.dispatch(cmd, width, height, BLEND);
+            blendPipeline.dispatch(cmd, displayW, displayH, BLEND);
             VulkanCommandEncoder.memoryBarrier(cmd, stack);
 
             VK10.vkCmdCopyImage(cmd, baseCopy.image, VK10.VK_IMAGE_LAYOUT_GENERAL,
-                    dstImage, VK10.VK_IMAGE_LAYOUT_GENERAL, copyRegion(stack, width, height));
+                    dstImage, VK10.VK_IMAGE_LAYOUT_GENERAL, copyRegion(stack, displayW, displayH));
             VulkanCommandEncoder.memoryBarrier(cmd, stack);
         }
         if (VK10.vkEndCommandBuffer(cmd) != VK10.VK_SUCCESS) {
@@ -434,5 +491,20 @@ public final class RtComposite {
         region.get(0).dstSubresource().aspectMask(VK10.VK_IMAGE_ASPECT_COLOR_BIT).mipLevel(0).baseArrayLayer(0).layerCount(1);
         region.get(0).extent().set(width, height, 1);
         return region;
+    }
+
+    /**
+     * Linear-filtered blit of the full render-res image into the full display-res image. Used as the
+     * non-RR / fallback upscale so the blend always sees a display-res RT image; a no-op stretch when
+     * the two are the same size (RR disabled -> render == display).
+     */
+    private static void blitUpscale(VkCommandBuffer cmd, MemoryStack stack, RtImage src, RtImage dst) {
+        VkImageBlit.Buffer region = VkImageBlit.calloc(1, stack);
+        region.get(0).srcSubresource().aspectMask(VK10.VK_IMAGE_ASPECT_COLOR_BIT).mipLevel(0).baseArrayLayer(0).layerCount(1);
+        region.get(0).dstSubresource().aspectMask(VK10.VK_IMAGE_ASPECT_COLOR_BIT).mipLevel(0).baseArrayLayer(0).layerCount(1);
+        region.get(0).srcOffsets(1).set(src.width, src.height, 1); // srcOffsets[0] zeroed by calloc
+        region.get(0).dstOffsets(1).set(dst.width, dst.height, 1);
+        VK10.vkCmdBlitImage(cmd, src.image, VK10.VK_IMAGE_LAYOUT_GENERAL,
+                dst.image, VK10.VK_IMAGE_LAYOUT_GENERAL, region, VK10.VK_FILTER_LINEAR);
     }
 }

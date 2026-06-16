@@ -23,9 +23,8 @@ import java.nio.file.Path;
  * over our path-traced color + guide buffers (normals/roughness, diffuse/specular albedo, depth,
  * motion vectors), denoising and (later, P4.2b) upscaling in one pass.
  *
- * <p>P4.2a wires NGX init, the runtime RR-available gate, and feature creation at native resolution
- * (render == display, denoise only). The per-frame evaluate + composite, the render-res split, and
- * jitter follow.
+ * <p>P4.2a wired NGX init, the RR-available gate, and feature creation. P4.2b adds the render-res
+ * split (trace render res &lt; display res, RR upscales to display) and sub-pixel camera jitter.
  */
 public final class RtDlssRr {
     public static final RtDlssRr INSTANCE = new RtDlssRr();
@@ -72,13 +71,15 @@ public final class RtDlssRr {
     }
 
     /**
-     * Record a DLSS-RR evaluation: denoise (+ upscale, once render &lt; display) the noisy path-traced
-     * color using the guide buffers, writing the result into {@code out}. Returns false (disabling RR)
-     * on failure. P4.2a: native res, no jitter, MVs already in render-pixel space (scale 1).
+     * Record a DLSS-RR evaluation: denoise + upscale the noisy path-traced color (at render res) using
+     * the guide buffers, writing the display-res result into {@code out}. {@code jitterX/jitterY} is the
+     * sub-pixel camera jitter applied to the primary ray this frame, in render pixels. Returns false
+     * (disabling RR) on failure. MVs are already in render-pixel space (scale 1).
      */
     public boolean evaluate(long cmd, RtImage color, RtImage depth, RtImage motion,
                             RtImage diffuseAlbedo, RtImage specularAlbedo, RtImage normals, RtImage out,
-                            int renderWidth, int renderHeight, int displayWidth, int displayHeight) {
+                            int renderWidth, int renderHeight, int displayWidth, int displayHeight,
+                            float jitterX, float jitterY) {
         if (!isReady()) {
             return false;
         }
@@ -97,7 +98,8 @@ public final class RtDlssRr {
                     normals.view, normals.image, VK10.VK_FORMAT_R16G16B16A16_SFLOAT,
                     out.view, out.image, VK10.VK_FORMAT_R16G16B16A16_SFLOAT,
                     renderWidth, renderHeight, displayWidth, displayHeight,
-                    0.0f, 0.0f, 1.0f, 1.0f, resetHistory ? 1 : 0, frameMs);
+                    // jitter in render pixels (P4.2b); MVs are already in render-pixel units, so MV scale = 1.
+                    jitterX, jitterY, 1.0f, 1.0f, resetHistory ? 1 : 0, frameMs);
             resetHistory = false;
             if (ngxFailed(rc)) {
                 throw new IllegalStateException("ngxshim_evaluate_dlssd failed: 0x" + Integer.toHexString(rc)
