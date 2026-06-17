@@ -74,9 +74,16 @@ public final class RtEntityCollector implements SubmitNodeCollector {
         if (firstRenderType == null) {
             firstRenderType = renderType;
         }
-        // Resolve this submission's texture to a bindless slot; the capture stamps it on every prim it
-        // emits, so the body and each feature layer (armor, eyes, …) keep their own texture.
-        capture.currentTexSlot = RtEntityTextures.INSTANCE.slotFor(renderType);
+        // Resolve this submission's texture to a bindless slot; the capture stamps it on every prim.
+        // Block-entity models (chests/signs/beds) texture from an atlas SPRITE: use that atlas + remap
+        // the ModelPart 0..1 UVs into the sprite's region. Mobs use a full texture (sprite == null).
+        if (sprite != null) {
+            capture.currentTexSlot = RtEntityTextures.INSTANCE.slotForAtlas(sprite.atlasLocation());
+            capture.setUvRemap(sprite.getU0(), sprite.getV0(), sprite.getU1(), sprite.getV1());
+        } else {
+            capture.currentTexSlot = RtEntityTextures.INSTANCE.slotFor(renderType);
+            capture.clearUvRemap();
+        }
         // Pose the model from its render state (idempotent re-pose; mirrors what the renderer does for
         // its feature layers), then render the posed parts into the capture. renderToBuffer applies the
         // PoseStack to every vertex/normal, so the capture receives world-/camera-relative geometry.

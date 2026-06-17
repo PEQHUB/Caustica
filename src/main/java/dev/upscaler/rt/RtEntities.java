@@ -4,11 +4,16 @@ import com.mojang.blaze3d.vertex.PoseStack;
 import dev.upscaler.UpscalerMod;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
+import net.minecraft.client.renderer.blockentity.BlockEntityRenderDispatcher;
+import net.minecraft.client.renderer.blockentity.state.BlockEntityRenderState;
 import net.minecraft.client.renderer.entity.EntityRenderDispatcher;
 import net.minecraft.client.renderer.entity.state.EntityRenderState;
 import net.minecraft.client.renderer.state.level.CameraRenderState;
+import net.minecraft.core.BlockPos;
 import net.minecraft.util.Mth;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.level.block.entity.BlockEntity;
+import net.minecraft.world.level.chunk.LevelChunk;
 import net.minecraft.world.phys.Vec3;
 import org.joml.Matrix4f;
 import org.lwjgl.system.MemoryUtil;
@@ -41,6 +46,8 @@ public final class RtEntities {
     /** Custom-index flag bit (bit 23 of the 24-bit instanceCustomIndex) marking an entity instance. */
     public static final int ENTITY_BIT = 0x800000;
     private static final int MAX_ENTITIES = Integer.getInteger("upscaler.rt.maxEntities", 1024);
+    // Chunk radius around the player to scan for block entities (chests/signs/…) each frame.
+    private static final int BE_VIEW_CHUNKS = Integer.getInteger("upscaler.rt.beViewChunks", 8);
     // Entity geometry table entry: {u64 primAddr, u64 idxAddr, u64 uvAddr, pad8, vec4 disp} = 48 bytes
     // (std430 vec4 forces the struct to 16-align/48-size; disp.xyz = per-object MV world displacement).
     private static final int TABLE_ENTRY_BYTES = 48;
@@ -84,11 +91,30 @@ public final class RtEntities {
     private record Deferred(long freeFrame, Runnable free) {
     }
 
+    /** Mutable per-frame build state shared by the entity + block-entity capture passes. */
+    private final class FrameBuild {
+        final List<RtAccel.Instance> base;
+        List<RtAccel.Instance> instances;
+        List<RtAccel.PreparedBlas> blas;
+        List<RtBuffer> buffers;
+        long tableBase;
+        long geomTableAddr;
+        int count;
+
+        FrameBuild(List<RtAccel.Instance> base) {
+            this.base = base;
+        }
+
+        boolean full() {
+            return count >= MAX_ENTITIES;
+        }
+    }
+
     /**
-     * Capture this frame's model entities into per-entity meshes/BLAS and merge them with the terrain
-     * static instances. The caller (RtComposite) records the returned BLAS builds before the TLAS build
-     * and pushes the geometry-table address. Returns terrain-only (no BLAS, addr 0) when disabled or
-     * there are no model entities. Coordinates are captured rebase-relative → identity instance transform.
+     * Capture this frame's model entities + block entities into per-object meshes/BLAS and merge them
+     * with the terrain static instances. The caller (RtComposite) records the returned BLAS builds
+     * before the TLAS build and pushes the geometry-table address. Returns terrain-only (no BLAS, addr 0)
+     * when disabled or nothing captured. Coordinates are captured rebase-relative → identity instance.
      */
     public FrameEntities beginFrame(RtContext ctx, List<RtAccel.Instance> base, int rbx, int rby, int rbz,
                                     double camX, double camY, double camZ, Matrix4f projection, Matrix4f viewRotation) {
@@ -101,21 +127,40 @@ public final class RtEntities {
         if (level == null) {
             return new FrameEntities(base, List.of(), 0L);
         }
-        EntityRenderDispatcher dispatcher = mc.getEntityRenderDispatcher();
         float partial = mc.getDeltaTracker().getGameTimeDeltaPartialTick(false);
-        Entity cameraEntity = mc.getCameraEntity();
         setCamera(camX, camY, camZ, projection, viewRotation);
 
-        List<RtAccel.Instance> instances = null;
-        List<RtAccel.PreparedBlas> blasToBuild = null;
-        List<RtBuffer> frameBuffers = null;
-        long tableBase = 0L;
-        long geomTableAddr = 0L;
-        Map<Integer, float[]> curPositions = new HashMap<>();
-        int count = 0;
+        FrameBuild build = new FrameBuild(base);
+        captureEntities(ctx, build, mc, level, partial, rbx, rby, rbz);
+        captureBlockEntities(ctx, build, mc, level, partial, rbx, rby, rbz);
 
+        if (build.instances == null) {
+            return new FrameEntities(base, List.of(), 0L);
+        }
+        // Retire this frame's meshes + BLAS once it is no longer in flight (their build + the trace that
+        // reads them must complete first).
+        long freeAt = RtComposite.frameCounter() + KEEP_FRAMES;
+        List<RtAccel.PreparedBlas> blasForFree = build.blas;
+        List<RtBuffer> buffersForFree = build.buffers;
+        deferred.add(new Deferred(freeAt, () -> {
+            RtAccel.freeBlasScratch(blasForFree);
+            for (RtAccel.PreparedBlas b : blasForFree) {
+                b.accel.destroy();
+            }
+            for (RtBuffer buf : buffersForFree) {
+                buf.destroy();
+            }
+        }));
+        return new FrameEntities(build.instances, build.blas, build.geomTableAddr);
+    }
+
+    /** Capture animated entities (mobs, items, falling blocks) with per-object motion-vector displacement. */
+    private void captureEntities(RtContext ctx, FrameBuild build, Minecraft mc, ClientLevel level, float partial, int rbx, int rby, int rbz) {
+        EntityRenderDispatcher dispatcher = mc.getEntityRenderDispatcher();
+        Entity cameraEntity = mc.getCameraEntity();
+        Map<Integer, float[]> curPositions = new HashMap<>();
         for (Entity entity : level.entitiesForRendering()) {
-            if (count >= MAX_ENTITIES) {
+            if (build.full()) {
                 break;
             }
             if (entity == cameraEntity || entity.isInvisible()) {
@@ -127,91 +172,113 @@ public final class RtEntities {
             capture.reset();
             try {
                 EntityRenderState state = dispatcher.extractEntity(entity, partial);
-                PoseStack pose = new PoseStack();
                 collector.begin(capture);
                 // Capture directly in rebased space so the TLAS instance transform is identity.
-                dispatcher.submit(state, cameraState, ix - rbx, iy - rby, iz - rbz, pose, collector);
+                dispatcher.submit(state, cameraState, ix - rbx, iy - rby, iz - rbz, new PoseStack(), collector);
             } catch (Throwable t) {
                 continue; // non-fatal: skip an entity whose extract/submit throws
             } finally {
                 collector.begin(null);
             }
             if (capture.isEmpty()) {
-                continue; // non-model entity (item/arrow/etc.) — no body geometry captured
+                continue; // non-model entity (arrow/etc.) — no body geometry captured
             }
-
-            if (instances == null) {
-                instances = new ArrayList<>(base);
-                blasToBuild = new ArrayList<>();
-                frameBuffers = new ArrayList<>();
-                ensureResources(ctx);
-                tableSlot = (tableSlot + 1) % TABLE_RING;
-                tableBase = tableRing[tableSlot].mapped;
-                geomTableAddr = tableRing[tableSlot].deviceAddress;
-            }
-
-            int asInput = org.lwjgl.vulkan.KHRAccelerationStructure.VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
-            int storage = org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
-            int vertCount = capture.verts.size() / 3;
-            int idxCount = capture.idx.size();
-            RtBuffer positions = ctx.createBuffer((long) capture.verts.size() * Float.BYTES, asInput, true);
-            RtBuffer indices = ctx.createBuffer((long) capture.idx.size() * Integer.BYTES, asInput | storage, true);
-            RtBuffer uvs = ctx.createBuffer((long) capture.uvList.size() * Float.BYTES, storage, true);
-            RtBuffer prim = ctx.createBuffer((long) capture.prim.size() * Float.BYTES, storage, true);
-            MemoryUtil.memFloatBuffer(positions.mapped, capture.verts.size()).put(capture.verts.elements(), 0, capture.verts.size());
-            MemoryUtil.memIntBuffer(indices.mapped, capture.idx.size()).put(capture.idx.elements(), 0, capture.idx.size());
-            MemoryUtil.memFloatBuffer(uvs.mapped, capture.uvList.size()).put(capture.uvList.elements(), 0, capture.uvList.size());
-            MemoryUtil.memFloatBuffer(prim.mapped, capture.prim.size()).put(capture.prim.elements(), 0, capture.prim.size());
-
-            // Non-opaque so world.rahit alpha-tests the entity texture (cutout: hat/jacket overlays,
-            // eyes, capes, …). Fully-opaque texels (alpha ≥ cutoff) pass straight through to the chit.
-            RtAccel.PreparedBlas blas = RtAccel.prepareTrianglesBlas(ctx, positions, vertCount, indices, idxCount, false);
-
-            // Per-object world displacement since last frame (0 for new entities) for the motion vector.
             int id = entity.getId();
             float[] prev = prevPositions.get(id);
-            float dispX = prev == null ? 0f : ix - prev[0];
-            float dispY = prev == null ? 0f : iy - prev[1];
-            float dispZ = prev == null ? 0f : iz - prev[2];
+            float dx = prev == null ? 0f : ix - prev[0];
+            float dy = prev == null ? 0f : iy - prev[1];
+            float dz = prev == null ? 0f : iz - prev[2];
             curPositions.put(id, new float[]{ix, iy, iz});
-
-            long entry = tableBase + (long) count * TABLE_ENTRY_BYTES;
-            MemoryUtil.memPutLong(entry, prim.deviceAddress);
-            MemoryUtil.memPutLong(entry + 8, indices.deviceAddress);
-            MemoryUtil.memPutLong(entry + 16, uvs.deviceAddress);
-            MemoryUtil.memPutFloat(entry + 32, dispX);
-            MemoryUtil.memPutFloat(entry + 36, dispY);
-            MemoryUtil.memPutFloat(entry + 40, dispZ);
-            MemoryUtil.memPutFloat(entry + 44, 0f);
-
-            instances.add(new RtAccel.Instance(IDENTITY, blas.accel.deviceAddress, ENTITY_BIT | (count & 0x7FFFFF)));
-            blasToBuild.add(blas);
-            frameBuffers.add(positions);
-            frameBuffers.add(indices);
-            frameBuffers.add(uvs);
-            frameBuffers.add(prim);
-            count++;
+            appendCapture(ctx, build, dx, dy, dz);
         }
         prevPositions = curPositions;
+    }
 
-        if (instances == null) {
-            return new FrameEntities(base, List.of(), 0L);
+    /** Capture block entities (chests, signs, …) — static, so motion-vector displacement is zero. */
+    private void captureBlockEntities(RtContext ctx, FrameBuild build, Minecraft mc, ClientLevel level, float partial, int rbx, int rby, int rbz) {
+        BlockEntityRenderDispatcher beDispatcher = mc.getBlockEntityRenderDispatcher();
+        beDispatcher.prepare(cameraState.pos); // sets the camera for shouldRender / extract
+        int pcx = rbx >> 4, pcz = rbz >> 4;
+        for (int cx = pcx - BE_VIEW_CHUNKS; cx <= pcx + BE_VIEW_CHUNKS; cx++) {
+            for (int cz = pcz - BE_VIEW_CHUNKS; cz <= pcz + BE_VIEW_CHUNKS; cz++) {
+                if (build.full()) {
+                    return;
+                }
+                if (!level.getChunkSource().hasChunk(cx, cz) || !(level.getChunk(cx, cz) instanceof LevelChunk chunk)) {
+                    continue;
+                }
+                for (BlockEntity be : chunk.getBlockEntities().values()) {
+                    if (build.full()) {
+                        return;
+                    }
+                    capture.reset();
+                    try {
+                        BlockEntityRenderState state = beDispatcher.tryExtractRenderState(be, partial, null, false);
+                        if (state == null) {
+                            continue; // off-screen-only (beacon/end-gateway), distance-culled, or no renderer
+                        }
+                        BlockPos p = be.getBlockPos();
+                        PoseStack pose = new PoseStack();
+                        pose.translate(p.getX() - rbx, p.getY() - rby, p.getZ() - rbz);
+                        collector.begin(capture);
+                        beDispatcher.submit(state, pose, collector, cameraState);
+                    } catch (Throwable t) {
+                        continue;
+                    } finally {
+                        collector.begin(null);
+                    }
+                    if (capture.isEmpty()) {
+                        continue;
+                    }
+                    appendCapture(ctx, build, 0f, 0f, 0f); // static → zero MV displacement
+                }
+            }
         }
-        // Retire this frame's entity meshes + BLAS once it is no longer in flight (their build + the
-        // trace that reads them must complete first).
-        long freeAt = RtComposite.frameCounter() + KEEP_FRAMES;
-        List<RtAccel.PreparedBlas> blasForFree = blasToBuild;
-        List<RtBuffer> buffersForFree = frameBuffers;
-        deferred.add(new Deferred(freeAt, () -> {
-            RtAccel.freeBlasScratch(blasForFree);
-            for (RtAccel.PreparedBlas b : blasForFree) {
-                b.accel.destroy();
-            }
-            for (RtBuffer buf : buffersForFree) {
-                buf.destroy();
-            }
-        }));
-        return new FrameEntities(instances, blasToBuild, geomTableAddr);
+    }
+
+    /** Upload the current {@link #capture} as a per-object mesh + BLAS, add its instance + geom-table entry. */
+    private void appendCapture(RtContext ctx, FrameBuild build, float dispX, float dispY, float dispZ) {
+        if (build.instances == null) {
+            build.instances = new ArrayList<>(build.base);
+            build.blas = new ArrayList<>();
+            build.buffers = new ArrayList<>();
+            ensureResources(ctx);
+            tableSlot = (tableSlot + 1) % TABLE_RING;
+            build.tableBase = tableRing[tableSlot].mapped;
+            build.geomTableAddr = tableRing[tableSlot].deviceAddress;
+        }
+        int asInput = org.lwjgl.vulkan.KHRAccelerationStructure.VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
+        int storage = org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+        int vertCount = capture.verts.size() / 3;
+        int idxCount = capture.idx.size();
+        RtBuffer positions = ctx.createBuffer((long) capture.verts.size() * Float.BYTES, asInput, true);
+        RtBuffer indices = ctx.createBuffer((long) capture.idx.size() * Integer.BYTES, asInput | storage, true);
+        RtBuffer uvs = ctx.createBuffer((long) capture.uvList.size() * Float.BYTES, storage, true);
+        RtBuffer prim = ctx.createBuffer((long) capture.prim.size() * Float.BYTES, storage, true);
+        MemoryUtil.memFloatBuffer(positions.mapped, capture.verts.size()).put(capture.verts.elements(), 0, capture.verts.size());
+        MemoryUtil.memIntBuffer(indices.mapped, capture.idx.size()).put(capture.idx.elements(), 0, capture.idx.size());
+        MemoryUtil.memFloatBuffer(uvs.mapped, capture.uvList.size()).put(capture.uvList.elements(), 0, capture.uvList.size());
+        MemoryUtil.memFloatBuffer(prim.mapped, capture.prim.size()).put(capture.prim.elements(), 0, capture.prim.size());
+
+        // Non-opaque so world.rahit alpha-tests the texture (cutout). Opaque texels pass to the chit.
+        RtAccel.PreparedBlas blas = RtAccel.prepareTrianglesBlas(ctx, positions, vertCount, indices, idxCount, false);
+
+        long entry = build.tableBase + (long) build.count * TABLE_ENTRY_BYTES;
+        MemoryUtil.memPutLong(entry, prim.deviceAddress);
+        MemoryUtil.memPutLong(entry + 8, indices.deviceAddress);
+        MemoryUtil.memPutLong(entry + 16, uvs.deviceAddress);
+        MemoryUtil.memPutFloat(entry + 32, dispX);
+        MemoryUtil.memPutFloat(entry + 36, dispY);
+        MemoryUtil.memPutFloat(entry + 40, dispZ);
+        MemoryUtil.memPutFloat(entry + 44, 0f);
+
+        build.instances.add(new RtAccel.Instance(IDENTITY, blas.accel.deviceAddress, ENTITY_BIT | (build.count & 0x7FFFFF)));
+        build.blas.add(blas);
+        build.buffers.add(positions);
+        build.buffers.add(indices);
+        build.buffers.add(uvs);
+        build.buffers.add(prim);
+        build.count++;
     }
 
     private void setCamera(double camX, double camY, double camZ, Matrix4f projection, Matrix4f viewRotation) {

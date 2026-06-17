@@ -33,6 +33,12 @@ public final class RtEntityCapture implements VertexConsumer {
     // collector per submitModel, so body + feature layers get their own texture). Stored per-prim in
     // tint.w; the hit shader samples entityTex[texSlot].
     int currentTexSlot;
+    // P5.1b-2f: when a model textures from an atlas SPRITE (block entities: chests/signs/beds via a
+    // Material), its ModelPart UVs are 0..1 in a virtual texture and must be remapped into the sprite's
+    // atlas region — the work vanilla's sprite-coordinate-expander VertexConsumer does, which we bypass.
+    // Off for full-texture models (mobs, sprite == null) and for baked quads (already atlas-space).
+    private boolean uvRemap;
+    private float uvU0, uvV0, uvDU, uvDV;
 
     private int n; // quad vertex accumulator (0..3)
     private final float[] qx = new float[4], qy = new float[4], qz = new float[4];
@@ -50,8 +56,23 @@ public final class RtEntityCapture implements VertexConsumer {
         n = 0;
         any = false;
         currentTexSlot = 0;
+        uvRemap = false;
         minX = minY = minZ = Float.MAX_VALUE;
         maxX = maxY = maxZ = -Float.MAX_VALUE;
+    }
+
+    /** Remap subsequent {@link #addVertex} (ModelPart) UVs from 0..1 into a sprite's atlas region. */
+    public void setUvRemap(float u0, float v0, float u1, float v1) {
+        uvRemap = true;
+        uvU0 = u0;
+        uvV0 = v0;
+        uvDU = u1 - u0;
+        uvDV = v1 - v0;
+    }
+
+    /** Use ModelPart UVs as-is (full-texture models). */
+    public void clearUvRemap() {
+        uvRemap = false;
     }
 
     public boolean isEmpty() {
@@ -69,6 +90,10 @@ public final class RtEntityCapture implements VertexConsumer {
     @Override
     public void addVertex(float x, float y, float z, int color, float u, float v,
                           int overlay, int light, float nx, float ny, float nz) {
+        if (uvRemap) { // ModelPart 0..1 UV → sprite's atlas region (block-entity Material sprites)
+            u = uvU0 + u * uvDU;
+            v = uvV0 + v * uvDV;
+        }
         qx[n] = x; qy[n] = y; qz[n] = z;
         qu[n] = u; qv[n] = v;
         qnx[n] = nx; qny[n] = ny; qnz[n] = nz;
