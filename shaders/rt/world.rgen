@@ -64,12 +64,17 @@ float gv_rough;
 // length. Always >= 0; sky resolves to a large far value (no negative sentinel).
 float gv_depth;
 vec3 gv_hitCamRel;  // hit position relative to the current camera (for motion-vector reprojection)
+// P5.1c: world-space displacement of the first-hit surface since the previous frame (0 for static
+// terrain/sky, the entity's per-object motion for a dynamic entity). Subtracted from the MV
+// reprojection so moving entities get correct motion vectors instead of the camera-only reprojection.
+vec3 gv_objDisp;
 
 struct Payload {
     vec3 albedo;    // hit: block albedo (atlas * tint). miss: sky radiance.
     vec3 normal;    // hit: geometric normal, oriented toward the viewer.
     float hitT;     // >= 0 on hit (ray length), < 0 on miss.
     float emission; // hit: block light level 0..1; 0 on miss.
+    vec3 motionPrev; // hit: world displacement since last frame (entity per-object MV); 0 otherwise.
 };
 layout(location = 0) rayPayloadEXT Payload payload;
 layout(location = 1) rayPayloadEXT float shadowVis; // 1.0 if the visibility ray escaped, else 0.0
@@ -138,6 +143,7 @@ vec3 tracePath(vec3 ro, vec3 rd, inout uint seed) {
                 gv_albedo = payload.albedo;
                 gv_rough = 1.0;
                 gv_hitCamRel = rd * 1.0e6; // sky at infinity: only rotation parallax (-> large far depth)
+                gv_objDisp = vec3(0.0);    // sky is static
             }
             L += throughput * payload.albedo * SKY_GAIN; // escaped to sky
             break;
@@ -152,6 +158,7 @@ vec3 tracePath(vec3 ro, vec3 rd, inout uint seed) {
             gv_albedo = albedo;
             gv_rough = 1.0; // Lambertian for now (PBR roughness arrives in P6)
             gv_hitCamRel = ro + rd * payload.hitT - pc.camOffset; // camera-relative hit position
+            gv_objDisp = payload.motionPrev; // per-object world motion (0 for static terrain)
         }
 
         // Emissive surfaces (lava, glowstone, torches, ...) add radiance directly, colored by albedo.
@@ -240,7 +247,10 @@ void main() {
     // DLSS expects with MVJittered unset. (Subtracting the unjittered centre leaked the per-frame jitter
     // into the MV as a constant screen-wide offset = pc.jitter.) Matches mcvr's computeCameraMotionVector,
     // which subtracts the jittered pixelCenter. Scaled from NDC into render-pixel space.
-    vec4 prevClip = pc.prevViewProj * vec4(gv_hitCamRel + pc.camDelta, 1.0);
+    // P5.1c: for a dynamic entity the surface also moved in world space, so its previous-frame position
+    // is the current point minus the per-object displacement; subtracting gv_objDisp de-cameras the MV
+    // (gv_objDisp is 0 for static terrain/sky, leaving the validated camera-only reprojection).
+    vec4 prevClip = pc.prevViewProj * vec4(gv_hitCamRel + pc.camDelta - gv_objDisp, 1.0);
     vec2 motion = (prevClip.xy / prevClip.w - jndc) * 0.5 * size;
     imageStore(gMotion, pix, vec4(motion, 0.0, 0.0));
 

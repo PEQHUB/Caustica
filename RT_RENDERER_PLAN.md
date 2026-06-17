@@ -274,8 +274,8 @@ to fill our own buffers — we do not consume its packed/culled render output.)
     grew to 6 (per-frame rebind cycles a slot every frame; must exceed frames-in-flight). De-risking
     milestone: **terrain image unchanged, no leaks/corruption flying around** — the foundation entities
     (P5.1b) and per-object MVs (P5.1c) build on.
-  - **P5.1b-1 — entity bounding-box instances (in working tree; compiles + shaders validate; NOT yet
-    GPU-verified).** Dynamic entities enter the trace as **flat-shaded AABB boxes**: a single unit-cube
+  - **P5.1b-1 — entity bounding-box instances (done; commit `356578f`; GPU-verified in-game).**
+    Dynamic entities enter the trace as **flat-shaded AABB boxes**: a single unit-cube
     BLAS (`RtEntities`, built once) is instanced per entity into the per-frame TLAS with a scale+translate
     transform from the entity's interpolated hitbox (rebase-relative, so no per-frame BLAS builds — only
     the cheap per-frame TLAS P5.1a already rebuilds). `RtAccel.Instance` gained an explicit `customIndex`;
@@ -284,8 +284,16 @@ to fill our own buffers — we do not consume its packed/culled render output.)
     shadows/GI). Gated by `-Dupscaler.rt.entities`. **Coarse but real**: lit, shadow-casting dynamic
     objects. Deferred to **P5.1b-2**: real `ModelPart` model capture (actual mob shapes + entity textures
     via a capturing `SubmitNodeCollector` — `ModelPart.Cube.compile` emits the same bulk `addVertex` the
-    fluid path already taps). Until **P5.1c** (per-object MVs) moving entities ghost under DLSS-RR (they
-    reuse the camera-reprojection MV, wrong for objects that move relative to the world).
+    fluid path already taps).
+  - **P5.1c — per-object motion vectors (in working tree; compiles + shaders validate; NOT yet
+    GPU-verified).** Moving entities now get correct (non-camera) motion vectors so they stop ghosting
+    under DLSS-RR. `RtEntities` tracks each entity's interpolated world position across frames and writes
+    its per-frame displacement (`cur − prev`) into a per-entity table (a 6-slot fixed-size buffer ring,
+    indexed by the entity instance index); `world.rchit` reads it on entity hits into the payload, and
+    `world.rgen` subtracts it in the MV reprojection (`prevClip = prevViewProj·(hitCamRel + camDelta −
+    objDisp)`; `objDisp` = 0 for static terrain/sky → the validated camera-only MV is unchanged). New
+    push field `entityTableAddr@184` (WORLD_PUSH 184→192). Exact for the rigid boxes; for animated
+    models (P5.1b-2) it's the rigid-body approximation (limb motion is unmodeled) — fine for DLSS-RR.
 - **P6 — PBR materials.** LabPBR resource-pack ingestion (normal/roughness/metallic/
   emissive/SSS) + proper BRDF. Heuristic fallback when no PBR pack.
 - **P7 — Perf & polish.** AS compaction, SER tuning, texture-LOD via ray cones,

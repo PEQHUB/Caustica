@@ -46,8 +46,8 @@ public final class RtComposite {
     public static final float BLEND = parseBlend();
 
     // invViewProj(64) + camOffset(@64) + sectionTableAddr(@80) + debugView(@88) + frameIndex(@92)
-    // + prevViewProj(@96) + camDelta(@160) + spp(@172) + jitter(@176)
-    private static final int WORLD_PUSH_SIZE = 184;
+    // + prevViewProj(@96) + camDelta(@160) + spp(@172) + jitter(@176) + entityTableAddr(@184)
+    private static final int WORLD_PUSH_SIZE = 192;
     private static final int GUIDE_COUNT = 5; // P4 guide buffers bound at world-pipeline bindings 3..7
     // Frames a retired per-frame TLAS must outlive before it's freed (> frames-in-flight); matches
     // RtTerrain's deferred-free horizon. The frame TLAS is built + traced this frame, then freed once
@@ -356,6 +356,9 @@ public final class RtComposite {
             // once this frame is no longer in flight.
             var instances = RtEntities.INSTANCE.withEntities(ctx, terrain.staticInstances(),
                     terrain.blockX, terrain.blockY, terrain.blockZ);
+            // P5.1c: the entity displacement table this frame's entity hits read for per-object MVs
+            // (0 when no entities — never dereferenced since only entity hits read it).
+            push.putLong(184, RtEntities.INSTANCE.entityTableAddress());
             RtAccel.PreparedTlas frameTlas = RtAccel.prepareTlas(ctx, instances);
             active.setTlas(frameTlas.accel.handle);
             RtAccel.recordTlasBuild(cmd, frameTlas);

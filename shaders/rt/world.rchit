@@ -22,6 +22,9 @@ layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer Pr
 layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer Indices { uint i[]; };
 layout(buffer_reference, std430, buffer_reference_align = 8) readonly buffer UVs { vec2 uv[]; };
 layout(buffer_reference, std430, buffer_reference_align = 8) readonly buffer SectionTable { Section s[]; };
+// P5.1c: per-entity world-space displacement since the previous frame (xyz; w padding), indexed by the
+// entity instance index (the low bits of gl_InstanceCustomIndexEXT). See RtEntities.
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer EntityTable { vec4 disp[]; };
 
 layout(binding = 2, set = 0) uniform sampler2D blockAtlas;
 
@@ -29,6 +32,7 @@ layout(push_constant) uniform Push {
     mat4 invViewProj;
     vec3 camOffset;
     uint64_t tableAddr;
+    layout(offset = 184) uint64_t entityTableAddr;
 } pc;
 
 struct Payload {
@@ -36,6 +40,7 @@ struct Payload {
     vec3 normal;
     float hitT;
     float emission; // block light level 0..1 (stashed in prim normal.w during extraction)
+    vec3 motionPrev; // world displacement since last frame (entity per-object MV); 0 for static terrain
 };
 layout(location = 0) rayPayloadInEXT Payload payload;
 hitAttributeEXT vec2 attribs;
@@ -59,10 +64,12 @@ void main() {
         if (dot(n, gl_WorldRayDirectionEXT) > 0.0) {
             n = -n; // orient toward the viewer, like the terrain path below
         }
+        int eidx = gl_InstanceCustomIndexEXT & ~ENTITY_BIT; // entity instance index into the table
         payload.albedo = ENTITY_ALBEDO;
         payload.normal = n;
         payload.hitT = gl_HitTEXT;
         payload.emission = 0.0;
+        payload.motionPrev = EntityTable(pc.entityTableAddr).disp[eidx].xyz; // per-object MV
         return;
     }
 
@@ -90,4 +97,5 @@ void main() {
     payload.normal = n;
     payload.hitT = gl_HitTEXT;
     payload.emission = pr.normal.w; // 0..1 light level, written by extraction into the free slot
+    payload.motionPrev = vec3(0.0); // static terrain: camera-only motion vector
 }

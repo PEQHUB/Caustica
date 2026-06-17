@@ -8,6 +8,7 @@ struct Payload {
     vec3 normal;
     float hitT;
     float emission;
+    vec3 motionPrev;
 };
 layout(location = 0) rayPayloadInEXT Payload payload;
 
@@ -18,4 +19,5 @@ void main() {
     payload.albedo = mix(horizon, zenith, t);
     payload.hitT = -1.0;
     payload.emission = 0.0;
+    payload.motionPrev = vec3(0.0);
 }

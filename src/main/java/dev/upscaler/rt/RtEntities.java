@@ -8,7 +8,9 @@ import net.minecraft.world.phys.AABB;
 import org.lwjgl.system.MemoryUtil;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * P5.1b: dynamic entities as ray-traced bounding-box instances. A single unit-cube BLAS is built once
@@ -35,13 +37,32 @@ public final class RtEntities {
     /** Custom-index flag bit (bit 23 of the 24-bit instanceCustomIndex) marking an entity-box instance. */
     public static final int ENTITY_BIT = 0x800000;
     private static final int MAX_ENTITIES = Integer.getInteger("upscaler.rt.maxEntities", 1024);
+    private static final int TABLE_ENTRY_BYTES = 16; // vec4: world displacement xyz (+ pad) per entity
+    // Ring of fixed-size displacement tables: each frame fills the next slot, so the GPU read of the
+    // frame's trace never races a later frame's host write. > frames-in-flight (mirrors RtPipeline RING).
+    private static final int TABLE_RING = 6;
 
     private RtAccel cubeBlas;
     private RtBuffer cubePositions; // kept only so shutdown() can free them; the BLAS is self-contained post-build
     private RtBuffer cubeIndices;
     private long cubeBlasAddr;
 
+    // P5.1c per-object motion vectors: a per-frame table of each entity's world-space displacement
+    // since the previous frame (cur − prev interpolated position), read by world.rchit and subtracted
+    // in the raygen MV reprojection so moving entities get correct (non-camera) motion vectors.
+    private RtBuffer[] tableRing;
+    private int tableSlot;
+    private long entityTableAddr;
+    // Previous frame's absolute interpolated positions, keyed by entity id; rebuilt each frame (prunes
+    // entities that left). New/unseen entities get zero displacement (no ghost-correction artifact).
+    private Map<Integer, float[]> prevPositions = new HashMap<>();
+
     private RtEntities() {
+    }
+
+    /** Device address of this frame's entity displacement table (valid whenever entity instances exist). */
+    public long entityTableAddress() {
+        return entityTableAddr;
     }
 
     /**
@@ -63,6 +84,8 @@ public final class RtEntities {
         float partial = mc.getDeltaTracker().getGameTimeDeltaPartialTick(false);
 
         List<RtAccel.Instance> out = null;
+        long tableBase = 0L; // mapped pointer of this frame's displacement table slot (set on first entity)
+        Map<Integer, float[]> curPositions = new HashMap<>();
         int idx = 0;
         for (Entity entity : level.entitiesForRendering()) {
             if (idx >= MAX_ENTITIES) {
@@ -79,30 +102,56 @@ public final class RtEntities {
             if (sx <= 0f || sy <= 0f || sz <= 0f) {
                 continue; // degenerate AABB (e.g. markers) — nothing to trace
             }
-            // Interpolate the box to the rendered sub-tick position for smooth motion (the ticked AABB
-            // sits at the current position; shift it by interpPos − currentPos).
-            double dx = Mth.lerp(partial, entity.xo, entity.getX()) - entity.getX();
-            double dy = Mth.lerp(partial, entity.yo, entity.getY()) - entity.getY();
-            double dz = Mth.lerp(partial, entity.zo, entity.getZ()) - entity.getZ();
+            // Absolute interpolated position at the rendered sub-tick (for smooth motion + MVs).
+            float ix = (float) Mth.lerp(partial, entity.xo, entity.getX());
+            float iy = (float) Mth.lerp(partial, entity.yo, entity.getY());
+            float iz = (float) Mth.lerp(partial, entity.zo, entity.getZ());
+            // Shift the ticked AABB (at the current position) to the interpolated position.
+            double shiftX = ix - entity.getX();
+            double shiftY = iy - entity.getY();
+            double shiftZ = iz - entity.getZ();
             // Row-major 3x4: unit cube [0,1]^3 scaled by the AABB size and translated to its rebased min.
-            float tx = (float) (box.minX + dx - rebaseX);
-            float ty = (float) (box.minY + dy - rebaseY);
-            float tz = (float) (box.minZ + dz - rebaseZ);
+            float tx = (float) (box.minX + shiftX - rebaseX);
+            float ty = (float) (box.minY + shiftY - rebaseY);
+            float tz = (float) (box.minZ + shiftZ - rebaseZ);
             float[] xform = {sx, 0, 0, tx, 0, sy, 0, ty, 0, 0, sz, tz};
             if (out == null) {
                 out = new ArrayList<>(base);
-                ensureCube(ctx);
+                ensureResources(ctx);
+                tableSlot = (tableSlot + 1) % TABLE_RING;
+                tableBase = tableRing[tableSlot].mapped;
+                entityTableAddr = tableRing[tableSlot].deviceAddress;
             }
+            // P5.1c: world-space displacement since last frame (zero for new entities), written into the
+            // table at this instance's index so world.rchit/raygen can de-camera the motion vector.
+            int id = entity.getId();
+            float[] prev = prevPositions.get(id);
+            float dispX = prev == null ? 0f : ix - prev[0];
+            float dispY = prev == null ? 0f : iy - prev[1];
+            float dispZ = prev == null ? 0f : iz - prev[2];
+            long entry = tableBase + (long) idx * TABLE_ENTRY_BYTES;
+            MemoryUtil.memPutFloat(entry, dispX);
+            MemoryUtil.memPutFloat(entry + 4, dispY);
+            MemoryUtil.memPutFloat(entry + 8, dispZ);
+            MemoryUtil.memPutFloat(entry + 12, 0f);
+            curPositions.put(id, new float[]{ix, iy, iz});
+
             out.add(new RtAccel.Instance(xform, cubeBlasAddr, ENTITY_BIT | (idx & 0x7FFFFF)));
             idx++;
         }
+        prevPositions = curPositions; // advance (and prune entities that left view)
         return out == null ? base : out;
     }
 
-    /** Build the shared unit-cube BLAS once. One-shot synchronous build (happens a single time). */
-    private void ensureCube(RtContext ctx) {
+    /** Build the shared unit-cube BLAS + the displacement-table ring once (one-shot, on first entity). */
+    private void ensureResources(RtContext ctx) {
         if (cubeBlas != null) {
             return;
+        }
+        int storage = org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+        tableRing = new RtBuffer[TABLE_RING];
+        for (int i = 0; i < TABLE_RING; i++) {
+            tableRing[i] = ctx.createBuffer((long) MAX_ENTITIES * TABLE_ENTRY_BYTES, storage, true);
         }
         // Unit cube [0,1]^3: 8 corners, 12 triangles (2 per face). The face order MUST match world.rchit's
         // CUBE_N normals indexed by gl_PrimitiveID>>1: -Z, +Z, -Y, +Y, -X, +X.
@@ -132,7 +181,7 @@ public final class RtEntities {
         cubeBlasAddr = cubeBlas.deviceAddress;
     }
 
-    /** Free the shared cube BLAS + its source buffers (teardown; GPU must be idle). */
+    /** Free the shared cube BLAS + its source buffers + the displacement-table ring (teardown; GPU idle). */
     public void shutdown() {
         if (cubeBlas != null) {
             cubeBlas.destroy();
@@ -146,6 +195,14 @@ public final class RtEntities {
             cubeIndices.destroy();
             cubeIndices = null;
         }
+        if (tableRing != null) {
+            for (RtBuffer b : tableRing) {
+                b.destroy();
+            }
+            tableRing = null;
+        }
         cubeBlasAddr = 0L;
+        entityTableAddr = 0L;
+        prevPositions.clear();
     }
 }
