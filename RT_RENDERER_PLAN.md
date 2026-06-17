@@ -260,11 +260,13 @@ to fill our own buffers — we do not consume its packed/culled render output.)
   the FSR/DLSS-SR rasterizer paths were removed; the SVGF/NRD/FSR/XeSS vendor-agnostic fallback in
   step 5 above is deferred to the end of the project. Exposure: AutoExposure (fixed-exposure A/B is a
   P-final tuning item). Goal met: clean real-time image at ~1/4 the ray work.
-- **P5 — Dynamic content.** ← in progress. Entity/block-entity geometry as **rigid cuboid instances**
-  (`ModelPart` boxes are rigid, not skinned — instance a unit-cube BLAS per part, or
-  refit a per-entity BLAS only on pose change; cheap even with many mobs) + per-frame
-  motion vectors (owned, so MV is clean); water/translucency (refraction); foliage
-  alpha-test via native **any-hit**.
+- **P5 — Dynamic content.** ← **P5.1 (dynamic entities) DONE.** Mobs, items (held + dropped), falling
+  blocks, and block entities (chests/signs/…) all ray-trace with their real `ModelPart`/baked-quad
+  geometry, per-type bindless textures, alpha-cutout transparency, and per-object motion vectors. Built
+  on a per-frame TLAS (P5.1a) that merges static terrain BLAS with per-frame per-entity BLAS. Remaining
+  deferred: water/translucency (refraction) + biome water tint = **P5.2**; per-vertex entity MV (spin/
+  swing) = P5.1c-2; sign text + special-renderer items (shields/banners) + special-geometry BEs
+  (conduit/beacon beam). Commits 9870dc5 → 1ff2c7f.
   - **P5.1a — dynamic per-frame TLAS plumbing (done; commit `9870dc5`; GPU-verified terrain unchanged).**
     The traced TLAS moved out of `RtTerrain` (which still builds the section BLAS async) into a
     **per-frame rebuild recorded inline in the composite's frame command buffer**: `RtTerrain` now
@@ -285,8 +287,8 @@ to fill our own buffers — we do not consume its packed/culled render output.)
     objects. Deferred to **P5.1b-2**: real `ModelPart` model capture (actual mob shapes + entity textures
     via a capturing `SubmitNodeCollector` — `ModelPart.Cube.compile` emits the same bulk `addVertex` the
     fluid path already taps).
-  - **P5.1c — per-object motion vectors (in working tree; compiles + shaders validate; NOT yet
-    GPU-verified).** Moving entities now get correct (non-camera) motion vectors so they stop ghosting
+  - **P5.1c — per-object motion vectors (done; commit `688f7e2`; GPU-verified).** Moving entities get
+    correct (non-camera) motion vectors so they stop ghosting
     under DLSS-RR. `RtEntities` tracks each entity's interpolated world position across frames and writes
     its per-frame displacement (`cur − prev`) into a per-entity table (a 6-slot fixed-size buffer ring,
     indexed by the entity instance index); `world.rchit` reads it on entity hits into the payload, and
@@ -299,23 +301,31 @@ to fill our own buffers — we do not consume its packed/culled render output.)
     an `RtEntityCapture` VertexConsumer; the rest no-op). **Step 1 (done; commit `a4342e8`; GPU-verified
     via the probe — 107/112 entities captured, 0 failed, sane meshes):** the capture infra
     (`RtEntityCapture`, `RtEntityCollector`) + a gated/throttled verification probe (`RtEntities.probe`,
-    `-Dupscaler.rt.entityProbe`). **Step 2 (in working tree; compiles + shaders validate; NOT yet
-    GPU-verified):** replaces the AABB boxes with the real captured meshes — per model entity a per-frame
-    BLAS built inline in the composite cmd buffer (entity BLAS → barrier → TLAS → trace), an entity
-    geometry table `{primAddr, idxAddr, uvAddr, disp}` (48-byte ring) so `world.rchit` reads real
-    per-triangle normals + vertex-colour tint + the per-object MV (the CUBE_N box path is removed);
-    captured rebase-relative → identity instance transform. Per-frame BLAS/buffer churn is heavy (cap
-    `-Dupscaler.rt.maxEntities`; pooling/refit deferred).
+    `-Dupscaler.rt.entityProbe`). **Step 2 (done; commit `7649211`; GPU-verified):** replaces the AABB
+    boxes with the real captured meshes — per model entity a per-frame BLAS built inline in the composite
+    cmd buffer (entity BLAS → barrier → TLAS → trace), an entity geometry table `{primAddr, idxAddr,
+    uvAddr, disp}` (48-byte ring) so `world.rchit` reads real per-triangle normals + vertex-colour tint +
+    the per-object MV (the CUBE_N box path is removed); captured rebase-relative → identity instance
+    transform. Per-frame BLAS/buffer churn is heavy (cap `-Dupscaler.rt.maxEntities`; pooling/refit deferred).
   - **P5.1b-2b — bindless entity textures.** Entities use per-type texture files (not the block atlas),
     so each `RenderType`'s texture (resolved via the public `RenderType.prepare().textures()`) gets a
     slot in a **bindless `sampler2D[]`** (descriptor set 1, partially-bound + update-after-bind; needs
     the VK12 descriptor-indexing features, enabled in `RtDeviceBringup`). The capture stamps a per-prim
     texture slot into the free `tint.w`; the hit shader interpolates the entity UV and samples
-    `entityTex[nonuniformEXT(slot)] × tint`. **Step b1 (done; commit pending): texture resolution
-    (`RtEntityTextures`) + probe — verified handles non-zero/distinct per type.** **Step b2 (in working
-    tree; compiles + shaders validate; needs a full restart for the device features):** the
-    descriptor-indexing features + bindless set + per-prim slot + UV sampling. Multi-texture layers
-    (armor/eyes) handled per-prim; held items still uncaptured.
+    `entityTex[nonuniformEXT(slot)] × tint`. **Done; commits `a4342e8` (b1 resolution + probe) +
+    `707dee5` (b2 device features + bindless set + per-prim slot + UV sampling); GPU-verified.**
+    Multi-texture layers (armor/eyes) handled per-prim. Block-entity models texture from an atlas
+    *sprite* (non-null `submitModel` sprite), so their ModelPart UVs are remapped into the sprite region.
+  - **P5.1b-2c — entity cutout transparency (done; commit `dba50ab`).** Entity BLAS built non-opaque;
+    `world.rahit` alpha-tests the per-prim bindless texture (cutoff 0.1). Hat/jacket overlays, eyes,
+    capes are see-through + cast cutout shadows. 2D item sprites get cutout for free.
+  - **P5.1b-2d/e — items + falling blocks (done; commit `4d8abdc`).** Held weapons + dropped items via
+    `submitItem` (resolve each quad's atlas — items use a *separate* item atlas — to its own bindless
+    slot); falling blocks via `submitMovingBlock` (mesh the block model). `RtEntityCapture.addBakedQuad`.
+  - **P5.1b-2f — block entities (done; commit `1ff2c7f`).** Chests/signs/beds/… aren't in
+    `entitiesForRendering()` → a second pass scans loaded chunks (`BE_VIEW_CHUNKS`) and submits each via
+    `BlockEntityRenderDispatcher` into the same collector (static, zero MV). `beginFrame` refactored into
+    a shared `FrameBuild`/`appendCapture` tail across the entity + block-entity passes.
 - **P6 — PBR materials.** LabPBR resource-pack ingestion (normal/roughness/metallic/
   emissive/SSS) + proper BRDF. Heuristic fallback when no PBR pack.
 - **P7 — Perf & polish.** AS compaction, SER tuning, texture-LOD via ray cones,
