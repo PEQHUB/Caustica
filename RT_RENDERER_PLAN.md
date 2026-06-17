@@ -330,6 +330,14 @@ to fill our own buffers — we do not consume its packed/culled render output.)
   emissive/SSS) + proper BRDF. Heuristic fallback when no PBR pack.
 - **P7 — Perf & polish.** AS compaction, SER tuning, texture-LOD via ray cones,
   distant-geometry LOD or hybrid far-field, variable sample counts, settings UI.
+  - **Entity-path perf (deferred from P5.1, which prioritized correctness):** (1) pool + **refit**
+    per-entity BLAS instead of rebuilding ~6 buffers + a fresh BLAS per entity per frame (biggest win;
+    also relieves `maxMemoryAllocationCount`); (2) **static BLAS cache + event-driven residency** for
+    block entities (mostly static, currently rebuilt + 289-chunk-scanned every frame); (3) per-RenderType
+    **OPAQUE flag** so solid mob bodies skip the cutout any-hit (the transparency step made all entity
+    geometry non-opaque); (4) reusable TLAS instance/scratch ring; (5) tap vanilla's extracted render
+    states instead of re-extracting each frame; (6) distance-cull captured entities. (Terrain P0–P4 is
+    already optimized.)
 
 P0–P1 alone prove the whole concept. P4 is where it becomes real-time-viable.
 
