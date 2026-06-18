@@ -332,8 +332,12 @@ to fill our own buffers — we do not consume its packed/culled render output.)
   distant-geometry LOD or hybrid far-field, variable sample counts, settings UI.
   - **Entity-path perf (deferred from P5.1, which prioritized correctness):** (1) pool + **refit**
     per-entity BLAS instead of rebuilding ~6 buffers + a fresh BLAS per entity per frame (biggest win;
-    also relieves `maxMemoryAllocationCount`); (2) **static BLAS cache + event-driven residency** for
-    block entities (mostly static, currently rebuilt + 289-chunk-scanned every frame); (3) per-RenderType
+    also relieves `maxMemoryAllocationCount`) — **DONE: step 1 pool/recycle (commit `9594939`) + step 2
+    UPDATE-mode refit keyed by entity id (commit `9d87723`), both GPU-verified; `RtBufferPool` +
+    `RtAccel.prepareUpdatableBlasBuild`/`refitUpdate`, gated `-Dupscaler.rt.entityRefit`. Entities only**;
+    (2) **static BLAS cache + event-driven residency** for
+    block entities (mostly static, currently rebuilt + 289-chunk-scanned every frame — the per-frame
+    pooled-BUILD path from step 1 still applies to BEs; this item replaces it); (3) per-RenderType
     **OPAQUE flag** so solid mob bodies skip the cutout any-hit (the transparency step made all entity
     geometry non-opaque); (4) reusable TLAS instance/scratch ring; (5) tap vanilla's extracted render
     states instead of re-extracting each frame; (6) distance-cull captured entities. (Terrain P0–P4 is
