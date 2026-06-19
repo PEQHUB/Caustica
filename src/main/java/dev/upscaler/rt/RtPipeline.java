@@ -81,12 +81,13 @@ public final class RtPipeline {
     private final long bindlessLayout;
     private final long bindlessPool;
     private final long bindlessSet;
-    // P6.2a: descriptor binding of the LabPBR _s atlas combined-image-sampler, or -1 if not created.
+    // P6.2a/b: descriptor bindings of the LabPBR _s / _n atlas combined-image-samplers, or -1 if absent.
     private final int specAtlasBinding;
+    private final int normalAtlasBinding;
     private boolean destroyed;
 
     private RtPipeline(RtContext ctx, long dsl, long pool, long[] sets, long layout, long pipeline, RtBuffer sbt, long stride, int missCount, int pushConstantSize, int pushConstantStages, int firstExtraBinding,
-                       long bindlessLayout, long bindlessPool, long bindlessSet, int specAtlasBinding) {
+                       long bindlessLayout, long bindlessPool, long bindlessSet, int specAtlasBinding, int normalAtlasBinding) {
         this.ctx = ctx;
         this.descriptorSetLayout = dsl;
         this.descriptorPool = pool;
@@ -104,6 +105,7 @@ public final class RtPipeline {
         this.bindlessPool = bindlessPool;
         this.bindlessSet = bindlessSet;
         this.specAtlasBinding = specAtlasBinding;
+        this.normalAtlasBinding = normalAtlasBinding;
     }
 
     /**
@@ -114,15 +116,19 @@ public final class RtPipeline {
      * images at bindings 3.. (the P4 guide buffers: normal/roughness, albedo, depth, motion vectors);
      * write them with {@link #setExtraStorageImage}.
      */
-    public static RtPipeline create(RtContext ctx, String rgen, String[] rmiss, String rchit, String rahit, int pushConstantSize, boolean withAtlasSampler, int extraStorageImages, int bindlessTextures, boolean blockSpecAtlas) {
+    public static RtPipeline create(RtContext ctx, String rgen, String[] rmiss, String rchit, String rahit, int pushConstantSize, boolean withAtlasSampler, int extraStorageImages, int bindlessTextures, boolean blockMaterialAtlases) {
         VkDevice vk = ctx.vk();
         boolean hasAhit = rahit != null;
         try (MemoryStack stack = MemoryStack.stackPush()) {
             int firstExtraBinding = withAtlasSampler ? 3 : 2;
-            // P6.2a: the LabPBR _s atlas (combined image sampler) follows the guide images, so binding =
-            // firstExtraBinding + extraStorageImages. Sampled only by the closest-hit (material readout).
-            int specBinding = blockSpecAtlas ? (firstExtraBinding + extraStorageImages) : -1;
-            int bindingCount = firstExtraBinding + extraStorageImages + (blockSpecAtlas ? 1 : 0);
+            // P6.2a/b: the LabPBR _s (binding 8) + _n (binding 9) atlases (combined image samplers) follow
+            // the guide images, so they start at firstExtraBinding + extraStorageImages. Sampled only by
+            // the closest-hit (material readout).
+            int materialBase = firstExtraBinding + extraStorageImages;
+            int specBinding = blockMaterialAtlases ? materialBase : -1;
+            int normalBinding = blockMaterialAtlases ? materialBase + 1 : -1;
+            int materialSamplers = blockMaterialAtlases ? 2 : 0;
+            int bindingCount = firstExtraBinding + extraStorageImages + materialSamplers;
             VkDescriptorSetLayoutBinding.Buffer binds = VkDescriptorSetLayoutBinding.calloc(bindingCount, stack);
             binds.get(0).binding(0).descriptorType(VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR)
                     .descriptorCount(1).stageFlags(VK_SHADER_STAGE_RAYGEN_BIT_KHR);
@@ -137,8 +143,10 @@ public final class RtPipeline {
                 binds.get(firstExtraBinding + e).binding(firstExtraBinding + e).descriptorType(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
                         .descriptorCount(1).stageFlags(VK_SHADER_STAGE_RAYGEN_BIT_KHR);
             }
-            if (blockSpecAtlas) {
+            if (blockMaterialAtlases) {
                 binds.get(specBinding).binding(specBinding).descriptorType(VK10.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
+                        .descriptorCount(1).stageFlags(VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR);
+                binds.get(normalBinding).binding(normalBinding).descriptorType(VK10.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
                         .descriptorCount(1).stageFlags(VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR);
             }
             VkDescriptorSetLayoutCreateInfo dslci = VkDescriptorSetLayoutCreateInfo.calloc(stack).sType$Default().pBindings(binds);
@@ -146,7 +154,7 @@ public final class RtPipeline {
             check(VK10.vkCreateDescriptorSetLayout(vk, dslci, null, p), "vkCreateDescriptorSetLayout");
             long dsl = p.get(0);
 
-            int combinedSamplers = (withAtlasSampler ? 1 : 0) + (blockSpecAtlas ? 1 : 0); // block atlas + _s atlas
+            int combinedSamplers = (withAtlasSampler ? 1 : 0) + materialSamplers; // block atlas + _s/_n atlases
             int poolSizeCount = 2 + (combinedSamplers > 0 ? 1 : 0);
             VkDescriptorPoolSize.Buffer poolSizes = VkDescriptorPoolSize.calloc(poolSizeCount, stack);
             poolSizes.get(0).type(VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR).descriptorCount(RING);
@@ -279,7 +287,7 @@ public final class RtPipeline {
                 MemoryUtil.memCopy(MemoryUtil.memAddress(handles) + (long) g * handleSize, sbt.mapped + g * stride, handleSize);
             }
             return new RtPipeline(ctx, dsl, pool, sets, layout, pipeline, sbt, stride, missCount, pushConstantSize, pcStages, firstExtraBinding,
-                    bindlessLayout, bindlessPool, bindlessSet, specBinding);
+                    bindlessLayout, bindlessPool, bindlessSet, specBinding, normalBinding);
         }
     }
 
@@ -342,10 +350,23 @@ public final class RtPipeline {
     }
 
     /** Bind the LabPBR {@code _s} atlas (combined image sampler) into every ring slot — only valid if
-     *  created with {@code blockSpecAtlas}. The view handle is stable across DynamicTexture re-uploads,
-     *  so this is typically called once, then the atlas pixels are refreshed via the texture's upload. */
+     *  created with {@code blockMaterialAtlases}. The view handle is stable across DynamicTexture
+     *  re-uploads, so this is called once, then the atlas pixels are refreshed via the texture's upload. */
     public void setBlockSpecAtlas(long imageView, long sampler) {
-        if (specAtlasBinding < 0) {
+        writeAtlasBinding(specAtlasBinding, imageView, sampler);
+    }
+
+    /** Bind the LabPBR {@code _n} (normal) atlas — see {@link #setBlockSpecAtlas}. */
+    public void setBlockNormalAtlas(long imageView, long sampler) {
+        writeAtlasBinding(normalAtlasBinding, imageView, sampler);
+    }
+
+    public boolean hasBlockMaterialAtlases() {
+        return specAtlasBinding >= 0;
+    }
+
+    private void writeAtlasBinding(int binding, long imageView, long sampler) {
+        if (binding < 0) {
             return;
         }
         try (MemoryStack stack = MemoryStack.stackPush()) {
@@ -353,15 +374,11 @@ public final class RtPipeline {
             info.get(0).sampler(sampler).imageView(imageView).imageLayout(VK10.VK_IMAGE_LAYOUT_GENERAL);
             VkWriteDescriptorSet.Buffer write = VkWriteDescriptorSet.calloc(RING, stack);
             for (int i = 0; i < RING; i++) {
-                write.get(i).sType$Default().dstSet(descriptorSets[i]).dstBinding(specAtlasBinding)
+                write.get(i).sType$Default().dstSet(descriptorSets[i]).dstBinding(binding)
                         .descriptorCount(1).descriptorType(VK10.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER).pImageInfo(info);
             }
             VK10.vkUpdateDescriptorSets(ctx.vk(), write, null);
         }
-    }
-
-    public boolean hasBlockSpecAtlas() {
-        return specAtlasBinding >= 0;
     }
 
     /** Write an entity texture into bindless slot {@code slot} (set 1, binding 0). Update-after-bind +

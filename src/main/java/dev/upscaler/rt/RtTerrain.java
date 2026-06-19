@@ -626,14 +626,17 @@ public final class RtTerrain {
             // P6.1: heuristic PBR material (roughness, metalness) for the GGX BRDF / DLSS-RR guides.
             float rough = RtMaterials.roughness(state);
             float metal = RtMaterials.metalness(state);
-            // P6.2a: if a LabPBR _s map exists for this quad's sprite, ingest it into the parallel _s
-            // atlas and flag the prim (mat.z = 1) so the shader samples per-texel roughness/metalness;
-            // otherwise mat.z = 0 keeps the heuristic above.
+            // P6.2a/b: ingest this quad's sprite's LabPBR maps into the parallel atlases and flag the prim
+            // — mat.z = 1 if an _s map exists (per-texel roughness/metalness/F0/emission), mat.w = 1 if an
+            // _n map exists (per-texel normal). Missing maps keep the heuristic / flat geometric normal.
             float hasS = 0f;
+            float hasN = 0f;
             if (RtMaterials.ENABLED) {
                 TextureAtlasSprite sprite = quad.materialInfo().sprite();
-                if (sprite != null && RtBlockMaterials.INSTANCE.ensure(sprite)) {
-                    hasS = 1f;
+                if (sprite != null) {
+                    int flags = RtBlockMaterials.INSTANCE.ensure(sprite);
+                    hasS = (flags & RtBlockMaterials.HAS_S) != 0 ? 1f : 0f;
+                    hasN = (flags & RtBlockMaterials.HAS_N) != 0 ? 1f : 0f;
                 }
             }
 
@@ -650,7 +653,7 @@ public final class RtTerrain {
                 prim.add(rough);
                 prim.add(metal);
                 prim.add(hasS);
-                prim.add(0f);
+                prim.add(hasN);
             }
         }
 

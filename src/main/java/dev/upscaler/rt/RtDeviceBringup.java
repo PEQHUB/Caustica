@@ -14,6 +14,7 @@ import org.lwjgl.vulkan.VkPhysicalDeviceAccelerationStructurePropertiesKHR;
 import org.lwjgl.vulkan.VkPhysicalDeviceProperties2;
 import org.lwjgl.vulkan.VkPhysicalDeviceRayTracingPipelineFeaturesKHR;
 import org.lwjgl.vulkan.VkPhysicalDeviceRayTracingPipelinePropertiesKHR;
+import org.lwjgl.vulkan.VkPhysicalDeviceRayTracingPositionFetchFeaturesKHR;
 import org.lwjgl.vulkan.VkPhysicalDeviceFeatures;
 import org.lwjgl.vulkan.VkPhysicalDeviceVulkan12Features;
 import org.spongepowered.asm.mixin.injection.invoke.arg.Args;
@@ -27,6 +28,8 @@ import static org.lwjgl.vulkan.KHRAccelerationStructure.VK_STRUCTURE_TYPE_PHYSIC
 import static org.lwjgl.vulkan.KHRDeferredHostOperations.VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME;
 import static org.lwjgl.vulkan.KHRRayTracingPipeline.VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME;
 import static org.lwjgl.vulkan.KHRRayTracingPipeline.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR;
+import static org.lwjgl.vulkan.KHRRayTracingPositionFetch.VK_KHR_RAY_TRACING_POSITION_FETCH_EXTENSION_NAME;
+import static org.lwjgl.vulkan.KHRRayTracingPositionFetch.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_POSITION_FETCH_FEATURES_KHR;
 
 /**
  * P0 — RT bring-up. Enables the hardware ray-tracing device extensions and their
@@ -56,11 +59,17 @@ public final class RtDeviceBringup {
     public static final boolean ENABLED_BY_PROPERTY =
             Boolean.parseBoolean(System.getProperty("upscaler.rt", "true"));
 
-    /** The three device extensions RT needs (BDA/descriptor-indexing/SPIR-V 1.4 are core on 1.4). */
+    /**
+     * The device extensions RT needs (BDA/descriptor-indexing/SPIR-V 1.4 are core on 1.4).
+     * P6.2b: {@code ray_tracing_position_fetch} lets the closest-hit read the hit triangle's vertex
+     * positions ({@code gl_HitTriangleVertexPositionsEXT}) for the normal-map TBN, avoiding a positions
+     * buffer plumbed through the geometry tables. Supported on all RTX GPUs (the project's target).
+     */
     public static final List<String> RT_EXTENSIONS = List.of(
             VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME,
             VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME,
-            VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME);
+            VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME,
+            VK_KHR_RAY_TRACING_POSITION_FETCH_EXTENSION_NAME);
 
     /** Set by SodiumCompat once the RT extension names are registered in Sodium's registry. */
     public static volatile boolean sodiumExtensionsRegistered = false;
@@ -122,6 +131,10 @@ public final class RtDeviceBringup {
         VulkanPNextStruct rtStruct = new VulkanPNextStruct(
                 VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR,
                 VkPhysicalDeviceRayTracingPipelineFeaturesKHR.SIZEOF);
+        // P6.2b: ray-tracing position fetch (gl_HitTriangleVertexPositionsEXT in the closest-hit).
+        VulkanPNextStruct posFetchStruct = new VulkanPNextStruct(
+                VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_POSITION_FETCH_FEATURES_KHR,
+                VkPhysicalDeviceRayTracingPositionFetchFeaturesKHR.SIZEOF);
         // bufferDeviceAddress merges into vanilla's existing Vulkan12Features struct.
         features.add(new VulkanFeature(VulkanBackend.VK12_FEATURES_STRUCT, "bufferDeviceAddress",
                 VkPhysicalDeviceVulkan12Features.BUFFERDEVICEADDRESS));
@@ -143,6 +156,8 @@ public final class RtDeviceBringup {
                 VkPhysicalDeviceAccelerationStructureFeaturesKHR.ACCELERATIONSTRUCTURE));
         features.add(new VulkanFeature(rtStruct, "rayTracingPipeline",
                 VkPhysicalDeviceRayTracingPipelineFeaturesKHR.RAYTRACINGPIPELINE));
+        features.add(new VulkanFeature(posFetchStruct, "rayTracingPositionFetch",
+                VkPhysicalDeviceRayTracingPositionFetchFeaturesKHR.RAYTRACINGPOSITIONFETCH));
         args.set(2, features);
 
         rtRequested = true;

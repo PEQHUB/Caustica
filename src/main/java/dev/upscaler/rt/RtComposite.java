@@ -208,15 +208,19 @@ public final class RtComposite {
             // resolved samples something defined rather than an unbound (partially-bound) descriptor.
             RtEntityTextures.INSTANCE.reset();
             worldPipeline.setBindlessTexture(0, blockAtlasView(), atlasSampler(ctx));
-            // P6.2a: LabPBR _s atlas. Bind the (initially block-atlas-sized) parallel atlas once; its
+            // P6.2a/b: LabPBR _s + _n parallel atlases. Bind the (block-atlas-sized) atlases once; their
             // pixels are filled lazily as terrain extraction encounters sprites and refreshed via flush().
-            // Fall back to the block atlas view if the _s atlas didn't initialize, so binding 8 always
-            // holds a valid descriptor — the shader only samples it when a prim is _s-flagged (mat.z),
-            // which can't happen unless the _s atlas exists, so the fallback content is never read.
+            // Fall back to the block atlas view if an atlas didn't initialize, so bindings 8/9 always hold
+            // a valid descriptor — the shader only samples them when a prim is flagged (mat.z/mat.w),
+            // which can't happen unless the atlas exists, so the fallback content is never read.
             if (RtMaterials.ENABLED) {
                 RtBlockMaterials.INSTANCE.reset();
-                long specView = RtBlockMaterials.INSTANCE.view();
-                worldPipeline.setBlockSpecAtlas(specView != 0L ? specView : blockAtlasView(), atlasSampler(ctx));
+                long sampler = atlasSampler(ctx);
+                long fallback = blockAtlasView();
+                long specView = RtBlockMaterials.INSTANCE.viewS();
+                long normalView = RtBlockMaterials.INSTANCE.viewN();
+                worldPipeline.setBlockSpecAtlas(specView != 0L ? specView : fallback, sampler);
+                worldPipeline.setBlockNormalAtlas(normalView != 0L ? normalView : fallback, sampler);
             }
         }
         // The TLAS is no longer bound here — it's rebuilt and bound per frame in recordFrame (P5.1a),

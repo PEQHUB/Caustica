@@ -354,11 +354,31 @@ to fill our own buffers — we do not consume its packed/culled render output.)
       `(1-r)²`; green → reflectance (dielectric F0 0–229, the 8 predefined metals via hardcoded N/K →
       F0, generic metal albedo); alpha → emission (255 ignored). F0 flows through a new `Payload.f0`
       into the GGX specular + the `gSpecAlbedo` RR guide. **Deferred:** blue channel (porosity/SSS).
-    - **P6.2b (NEXT) — `_n` normal map.** Needs a per-triangle TBN derived in the chit from the 3 vertex
-      positions + UVs (no new buffer). **P6.2c — entity `_n`/`_s`** via the existing bindless array.
-      Deferred refinements: LabPBR dielectric green-channel F0 (0–229), emission alpha, animated `_s`.
+    - **P6.2b — `_n` normal map for terrain (DONE in working tree; builds; not yet GPU-verified; needs a
+      FULL RESTART — device feature).** Uses `VK_KHR_ray_tracing_position_fetch` (enabled in
+      `RtDeviceBringup` + `ALLOW_DATA_ACCESS` on every BLAS via the shared `RtAccel.buildFlags`) so the
+      closest-hit reads the hit triangle's vertex positions (`gl_HitTriangleVertexPositionsEXT`) and
+      builds a per-triangle TBN from positions + UVs — no positions buffer / no geometry-table change.
+      A second parallel `_n` atlas (RtBlockMaterials, binding 9) is sampled at the albedo UV; `mat.w`
+      flags `_n`-backed prims. Decodes LabPBR normal (RG → tangent XY, Z reconstructed) → world normal;
+      blue → mild AO into albedo. Skips alpha (height/POM). Raises the device requirement to
+      position-fetch-capable (all RTX; non-RTX already can't run RT).
+    - **P6.2c (NEXT) — entity `_n`/`_s`** via the existing bindless array. Deferred refinements: `_n`
+      height/POM, `_s` blue porosity/SSS, animated maps (frame 0 only), position-fetch fallback.
 - **P7 — Perf & polish.** AS compaction, SER tuning, texture-LOD via ray cones,
   distant-geometry LOD or hybrid far-field, variable sample counts, settings UI.
+  - **Material architecture refactor (agreed direction; do here, not mid-P6).** (a) **CPU-bake LabPBR →
+    a canonical engine material format** (e.g. `{rough,metal,AO,emission}` + `{normalXY,F0}`) instead of
+    decoding LabPBR in `world.rchit`. Not for shader perf (the in-shader decode is cheap, hit-only) but
+    for: multi-format pack support (LabPBR/old-PBR/future branched on CPU, shader format-agnostic);
+    **roughness-aware mipmapping** (Toksvig / roughness-from-normal-variance) which must be baked and is
+    required for ray-cone texture-LOD to avoid specular aliasing; and steadier DLSS-RR guides at distance.
+    Nearly free to add (the CPU blit already visits every texel); awkward bit = colored metal F0 needs 3
+    channels. (b) **Bindless unification:** keep the terrain parallel-atlas (per-sprite bindless for
+    blocks is a regression — atlas-space UVs make per-prim slots/UV-remap unnecessary), but unify all
+    atlases/textures (block albedo/`_s`/`_n` + item atlas + entity textures) into ONE bindless
+    `sampler2D[]` indexed by a per-hit material-set id — collapses fixed bindings 2/8/9 + the set-1 entity
+    array, composes with the CPU-bake.
   - **Entity-path perf (deferred from P5.1, which prioritized correctness):** (1) pool + **refit**
     per-entity BLAS instead of rebuilding ~6 buffers + a fresh BLAS per entity per frame (biggest win;
     also relieves `maxMemoryAllocationCount`) — **DONE: step 1 pool/recycle (commit `9594939`) + step 2
