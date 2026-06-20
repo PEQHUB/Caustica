@@ -89,7 +89,11 @@ abstract class CompileShaders extends DefaultTask {
 		srcDir.get().asFile.listFiles().findAll { it.isFile() && it.name ==~ stages }.each { src ->
 			def spv = new File(outDirFile, "${src.name}.spv")
 			execOps.exec {
-				commandLine glslang.get(), "-V", "--target-env", "vulkan1.2", "-gVS", src.absolutePath, "-o", spv.absolutePath
+				// -g (OpLine/OpSource debug info), not -gVS: the NonSemantic.Shader.DebugInfo form (-gVS)
+				// emits OpExtInstWithForwardRefsKHR (SPV_KHR_relaxed_extended_instruction), which trips a
+				// validation error unless the shaderRelaxedExtendedInstruction device feature is enabled.
+				// -g keeps source-level debug info for Nsight/RenderDoc without needing that extension.
+				commandLine glslang.get(), "-V", "--target-env", "vulkan1.2", "-g", src.absolutePath, "-o", spv.absolutePath
 			}
 			execOps.exec {
 				commandLine spirvVal.get(), "--target-env", "vulkan1.2", spv.absolutePath
