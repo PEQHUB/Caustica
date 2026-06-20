@@ -8,15 +8,59 @@ layout(binding = 2, set = 0, r32f) uniform readonly image2D exposureImage; // 1x
 
 // Tonemap seam: map HDR RT radiance to displayable LDR before copying back to the main target.
 // P3.1 emits true HDR (sun NEE + multi-bounce can exceed 1), so exposure is applied here from the
-// compositor-owned 1x1 image before ACES. DLSS-RR still consumes HDR pre-tonemap.
+// compositor-owned 1x1 image before the AgX view transform. DLSS-RR still consumes HDR pre-tonemap.
 
-vec3 acesFilmic(vec3 x) {
-    const float a = 2.51, b = 0.03, c = 2.43, d = 0.59, e = 0.14;
-    return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
+const mat3 AGX_INSET = mat3(
+    0.842479062253094, 0.042328242261012, 0.042375654905705,
+    0.078433599999999, 0.878468636469772, 0.078433600000000,
+    0.079223745147764, 0.079166127460543, 0.879142973793104
+);
+
+const mat3 AGX_OUTSET = mat3(
+    1.196879005120170, -0.052896851757456, -0.052971635514443,
+    -0.098020881140137, 1.151903129904170, -0.098043450117124,
+    -0.099029744079720, -0.098961176844843, 1.151073672641160
+);
+
+const float AGX_MIN_EV = -12.47393;
+const float AGX_MAX_EV = 4.026069;
+
+vec3 agxDefaultContrast(vec3 x) {
+    vec3 x2 = x * x;
+    vec3 x4 = x2 * x2;
+    return 15.5 * x4 * x2
+        - 40.14 * x4 * x
+        + 31.96 * x4
+        - 6.868 * x2 * x
+        + 0.4298 * x2
+        + 0.1191 * x
+        - 0.00232;
+}
+
+vec3 applyLook(vec3 color) {
+    const float contrast = 1.05;   // try 1.15, 1.25, 1.4
+    const float saturation = 1.4; // try 1.05-1.15 if AgX feels grey
+
+    color = clamp((color - 0.5) * contrast + 0.5, 0.0, 1.0);
+
+    float luma = dot(color, vec3(0.2126, 0.7152, 0.0722));
+    color = mix(vec3(luma), color, saturation);
+
+    return color;
+}
+
+vec3 agx(vec3 color) {
+    color = AGX_INSET * max(color, vec3(0.0));
+    color = clamp(log2(max(color, vec3(1.0e-10))), AGX_MIN_EV, AGX_MAX_EV);
+    color = (color - AGX_MIN_EV) / (AGX_MAX_EV - AGX_MIN_EV);
+    color = agxDefaultContrast(color);
+    color = applyLook(color);
+    color = AGX_OUTSET * color;
+    return clamp(color, 0.0, 1.0);
 }
 
 vec3 tonemap(vec3 hdr, float exposure) {
-    return acesFilmic(max(hdr * exposure, vec3(0.0)));
+    return agx(hdr * exposure);
 }
 
 void main() {

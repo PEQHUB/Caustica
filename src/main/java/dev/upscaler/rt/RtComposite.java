@@ -77,6 +77,9 @@ public final class RtComposite {
     public static final boolean SOFT_SHADOWS = Boolean.parseBoolean(System.getProperty("upscaler.rt.softShadows", "true"));
     private static final float SUN_ANGULAR_RADIUS = (float) Math.toRadians(Double.parseDouble(System.getProperty("upscaler.rt.sunAngularRadius", "0.6")));
     private static final float MOON_ANGULAR_RADIUS = (float) Math.toRadians(Double.parseDouble(System.getProperty("upscaler.rt.moonAngularRadius", "1.5")));
+    private static final float SUN_NOON_SOUTH_TILT = (float) Math.toRadians(Double.parseDouble(System.getProperty("upscaler.rt.sunNoonSouthDeg", "0.0")));
+    private static final float SUN_NOON_Y = Mth.cos(SUN_NOON_SOUTH_TILT);
+    private static final float SUN_NOON_Z = Mth.sin(SUN_NOON_SOUTH_TILT);
     /**
      * P4.2b RT trace scale: the path tracer + guide buffers run at this fraction of display resolution
      * and DLSS-RR upscales to display. Only applied when {@link RtDlssRr#ENABLED}; the no-RR reference
@@ -510,9 +513,8 @@ public final class RtComposite {
      *       bright when high; dim cool moonlight at night.</li>
      * </ul>
      * 26.2 exposes the celestial angles via the camera's {@link EnvironmentAttributeProbe} (partial-tick
-     * interpolated). The sun render transform (YP(-90) then XP(sunAngle) applied to +Y) reduces to the
-     * world direction {@code (-sin a, cos a, 0)} — i.e. the sun arcs through the east-west vertical plane,
-     * straight up at noon (angle 0) and straight down at midnight. {@code dynamicSky=false} pins the
+     * interpolated). {@code upscaler.rt.sunNoonSouthDeg} tilts the east-west arc toward south (+Z) at
+     * noon while keeping sunrise/sunset on the east-west horizon. {@code dynamicSky=false} pins the
      * legacy fixed noon sun (P3.1a constants) for an exact A/B.
      */
     private void writeSky(ByteBuffer push) {
@@ -529,8 +531,10 @@ public final class RtComposite {
             var probe = mc.gameRenderer.mainCamera().attributeProbe();
             float sunAngle = probe.getValue(EnvironmentAttributes.SUN_ANGLE, partial) * (float) (Math.PI / 180.0);
             float moonAngle = probe.getValue(EnvironmentAttributes.MOON_ANGLE, partial) * (float) (Math.PI / 180.0);
-            sunX = -Mth.sin(sunAngle); sunY = Mth.cos(sunAngle); sunZ = 0f;
-            float mx = -Mth.sin(moonAngle), my = Mth.cos(moonAngle), mz = 0f;
+            float sunNoon = Mth.cos(sunAngle);
+            sunX = -Mth.sin(sunAngle); sunY = SUN_NOON_Y * sunNoon; sunZ = SUN_NOON_Z * sunNoon;
+            float moonNoon = Mth.cos(moonAngle);
+            float mx = -Mth.sin(moonAngle), my = SUN_NOON_Y * moonNoon, mz = SUN_NOON_Z * moonNoon;
             dayFactor = smoothstep(-0.08f, 0.10f, sunY);
             if (sunY > 0.0f) {
                 // Sun: fades out as it sets; warm at the horizon, white overhead.

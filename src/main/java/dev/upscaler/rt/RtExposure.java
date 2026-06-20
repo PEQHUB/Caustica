@@ -146,7 +146,7 @@ final class RtExposure {
                 + ", adaptUp=" + autoConfig.adaptUp + ", adaptDown=" + autoConfig.adaptDown
                 + ", evBias=" + autoConfig.evBias + ")"
                 : Float.toString(exposureScale());
-        UpscalerMod.LOGGER.info("RT display exposure: mode={}, exposure={}, tonemap=aces, DLSS-RR exposure=NGX auto",
+        UpscalerMod.LOGGER.info("RT display exposure: mode={}, exposure={}, tonemap=agx, DLSS-RR exposure=NGX auto",
                 mode.configName, exposureText);
     }
 
