@@ -20,8 +20,8 @@ struct Section {
     uint64_t primAddr;
     uint64_t idxAddr;
     uint64_t uvAddr;
-    uint opaqueTris; // any-hit opt: geom 0 (opaque) triangle count; the any-hit only runs for geom 1 (alpha)
-    uint pad;
+    uint triBase[3]; // per-geometry triangle offset; this any-hit only runs for the cutout + water geoms
+    uint waterGeom;  // gl_GeometryIndexEXT of the water geometry (>= geom count if the section has no water)
 };
 struct EntityGeom {
     uint64_t primAddr;
@@ -87,22 +87,22 @@ void main() {
     }
 
     Section sec = SectionTable(pc.tableAddr).s[gl_InstanceCustomIndexEXT];
-    // Any-hit opt: the opaque geometry (geom 0) is flagged OPAQUE, so this shader only ever runs for the
-    // alpha geometry (geom 1) on terrain. gl_PrimitiveID restarts at 0 per geometry, so re-add the opaque
-    // triangle count to index this section's packed (opaque-first) prim/index/uv arrays.
-    uint tri = gl_PrimitiveID + (gl_GeometryIndexEXT == 1u ? sec.opaqueTris : 0u);
 
-    // P5.2 water (per-prim tint.w == 1): a dielectric resolved in the closest-hit, so it must NOT be
-    // alpha-cutout-discarded here. Accept it for path rays (closest-hit does the Fresnel reflect/refract),
-    // but pass light through for shadow/visibility rays (SkipClosestHit set) so submerged terrain still
-    // receives direct sun rather than a hard water shadow.
-    if (Prims(sec.primAddr).p[tri].tint.w > 0.5) {
+    // P5.2 water (its own geometry now): a dielectric resolved in the closest-hit, so it must NOT be
+    // alpha-cutout-discarded here. Classify by geometry index — a free built-in — instead of loading the
+    // prim's tint.w, and do ZERO memory loads: accept for path rays (closest-hit does the Fresnel
+    // reflect/refract), but pass light through for shadow/visibility rays (SkipClosestHit set) so submerged
+    // terrain still receives direct sun rather than a hard water shadow.
+    if (gl_GeometryIndexEXT == sec.waterGeom) {
         if ((gl_IncomingRayFlagsEXT & gl_RayFlagsSkipClosestHitShaderEXT) != 0u) {
             ignoreIntersectionEXT;
         }
         return;
     }
 
+    // Cutout geometry: alpha-test the atlas. gl_PrimitiveID restarts at 0 per geometry, so re-add this
+    // geometry's triangle base to index the section's packed index/uv arrays.
+    uint tri = gl_PrimitiveID + sec.triBase[gl_GeometryIndexEXT];
     Indices indices = Indices(sec.idxAddr);
     UVs uvs = UVs(sec.uvAddr);
     uint i0 = indices.i[3u * tri + 0u];
