@@ -66,6 +66,9 @@ struct WorldPush {
     uint64_t lightBufAddr;     // 320 ReSTIR DI: global emissive area-light buffer (0 = no block lights)
     uint lightCount;           // 328 number of area lights in lightBufAddr
     uint risCandidates;        // 332 ReSTIR DI: RIS candidate count M per vertex (0 = ReSTIR off)
+    uint64_t restirPrevAddr;   // 336 ReSTIR Stage 2: per-pixel reservoir buffer to READ (previous frame), 0 = none
+    uint64_t restirCurAddr;    // 344 per-pixel reservoir buffer to WRITE (this frame)
+    vec4 restirRebase;         // 352 xyz = currentBlockOrigin - previousBlockOrigin (rebase shift for stored world pos), w unused
 };
 layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer WorldPushRef { WorldPush v; };
 
@@ -77,6 +80,18 @@ struct Light {
     vec4 le;        // rgb HDR radiance = albedo · emission · EMISSIVE_STRENGTH, w unused
 };
 layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer Lights { Light l[]; };
+
+// ReSTIR DI Stage 2: one per-pixel temporal reservoir (64 B). Persisted in a ping-pong device buffer,
+// reprojected through the motion vector each frame and merged with this frame's initial RIS reservoir.
+// The light sample point + the surface position are stored in the writing frame's REBASED space; the
+// reader rebase-corrects them by pc.restirRebase before use (the rebase origin shifts as the player moves).
+struct ReservoirRec {
+    vec4 a; // xyz light sample point (rebased), w area
+    vec4 b; // xyz light normal,                w M (effective sample count)
+    vec4 c; // xyz Le (radiance),               w W (unbiased contribution weight)
+    vec4 d; // x  surface normal (octahedral),  yzw surface hit position (rebased) — for disocclusion reject
+};
+layout(buffer_reference, std430, buffer_reference_align = 16) buffer Reservoirs { ReservoirRec r[]; };
 layout(push_constant) uniform PushAddr { uint64_t worldPushAddr; } pcAddr;
 WorldPush pc; // populated from the BDA buffer at the top of main()
 
@@ -428,8 +443,177 @@ void refractedGuideHit(vec3 surfacePos, vec3 incidentDir, vec3 surfaceNormal, bo
     motionPrev = (payload.material <= 0.5 || payload.material > 1.5) ? payload.motionPrev : vec3(0.0);
 }
 
-// One Monte Carlo path from (ro, rd). Returns accumulated radiance along the path.
-vec3 tracePath(vec3 ro, vec3 rd, inout uint seed) {
+// ===== ReSTIR DI Stage 2: temporal reservoir reuse =====================================================
+// Per-pixel reservoirs hold ONE resampled emitter sample, carried across frames via the motion vector.
+// Each frame: generate an initial RIS reservoir over pc.risCandidates uniform candidates (no shadow ray),
+// reproject the previous frame's reservoir, rebase-correct it, reject on disocclusion, then merge the two
+// (Bitterli 2020, Alg. 4) re-evaluating the target p̂ at the CURRENT pixel — so the kept sample is unbiased
+// for this surface. One shadow ray shades the survivor; visibility reuse zeroes an occluded survivor before
+// it is stored, so occluded samples don't persist. History M is capped to bound temporal lag/bias.
+const float TEMPORAL_M_CAP = 20.0; // previous reservoir's M is clamped to this × the current frame's M
+
+// A reservoir in registers. pos/lnrm/le/area describe the chosen emitter sample; W is its unbiased
+// contribution weight, M the effective sample count. wSum/phat are streaming scratch (not persisted).
+struct Reservoir {
+    vec3 pos;   // light sample point (current-frame rebased space)
+    vec3 lnrm;  // emitter outward normal
+    vec3 le;    // emitter radiance Le
+    float area; // emitter area (the area-light pdf factor)
+    float M;    // effective sample count
+    float W;    // unbiased contribution weight
+    float wSum; // streaming sum of resampling weights (transient)
+    float phat; // target p̂ of the chosen sample at the current pixel (transient)
+};
+
+Reservoir resEmpty() {
+    Reservoir r;
+    r.pos = vec3(0.0); r.lnrm = vec3(0.0); r.le = vec3(0.0);
+    r.area = 0.0; r.M = 0.0; r.W = 0.0; r.wSum = 0.0; r.phat = 0.0;
+    return r;
+}
+
+// Octahedral normal pack into a single 32-bit float lane (two unorm16). Used for the disocclusion test.
+vec2 octWrap(vec2 v) { return (1.0 - abs(v.yx)) * vec2(v.x >= 0.0 ? 1.0 : -1.0, v.y >= 0.0 ? 1.0 : -1.0); }
+float packNormal(vec3 n) {
+    n /= (abs(n.x) + abs(n.y) + abs(n.z) + 1.0e-8);
+    vec2 e = n.z >= 0.0 ? n.xy : octWrap(n.xy);
+    return uintBitsToFloat(packUnorm2x16(e * 0.5 + 0.5));
+}
+vec3 unpackNormal(float f) {
+    vec2 e = unpackUnorm2x16(floatBitsToUint(f)) * 2.0 - 1.0;
+    vec3 n = vec3(e.xy, 1.0 - abs(e.x) - abs(e.y));
+    float t = max(-n.z, 0.0);
+    n.xy += vec2(n.x >= 0.0 ? -t : t, n.y >= 0.0 ? -t : t);
+    return normalize(n);
+}
+
+// Permutation sampling (RTXDI). ReSTIR temporal reuse correlates samples across frames and neighbours: a
+// static camera reprojects each pixel onto ITSELF every frame, so it reuses the identical reservoir forever
+// and the residual noise freezes into a fixed spatial pattern — which DLSS-RR (assuming independent samples)
+// cannot denoise and bakes in as fixed-pattern grain. This shuffles the temporal READ location within a 4×4
+// block, re-keyed by the frame index, so neighbouring pixels pull DIFFERENT history each frame (max spatial
+// + temporal variation). The XOR-by-3 is its own inverse and bijective on 0..3, and the ±offset is a global
+// translation, so the whole map stays a bijection over the grid — each previous reservoir is read by exactly
+// one current pixel (no double-counting). The permuted pixel is a neighbour, so its surface may differ; the
+// stored-surface disocclusion test at the call site rejects mismatches, keeping reuse on-surface.
+ivec2 applyPermutation(ivec2 prevPix, uint frame) {
+    ivec2 offset = ivec2(int(frame & 3u), int((frame >> 2u) & 3u));
+    prevPix += offset;
+    prevPix.x ^= 3;
+    prevPix.y ^= 3;
+    prevPix -= offset;
+    return prevPix;
+}
+
+Reservoir loadReservoir(uint64_t addr, uint idx, out vec3 surfNormal, out vec3 surfPos) {
+    ReservoirRec rec = Reservoirs(addr).r[idx];
+    Reservoir r;
+    r.pos = rec.a.xyz; r.area = rec.a.w;
+    r.lnrm = rec.b.xyz; r.M = rec.b.w;
+    r.le = rec.c.xyz; r.W = rec.c.w;
+    r.wSum = 0.0; r.phat = 0.0;
+    surfNormal = unpackNormal(rec.d.x);
+    surfPos = rec.d.yzw;
+    return r;
+}
+
+void storeReservoir(uint64_t addr, uint idx, Reservoir r, vec3 surfNormal, vec3 surfPos) {
+    ReservoirRec rec;
+    rec.a = vec4(r.pos, r.area);
+    rec.b = vec4(r.lnrm, r.M);
+    rec.c = vec4(r.le, r.W);
+    rec.d = vec4(packNormal(surfNormal), surfPos);
+    Reservoirs(addr).r[idx] = rec;
+}
+
+// Unshadowed contribution f·Le·G·area of a fixed light sample point at surface (p,n,v); out p̂ = its
+// luminance (the resampling target). Same BRDF split + geometry term the Stage 1 candidate loop used.
+vec3 evalSampleContrib(vec3 sp, vec3 lnrm, vec3 le, float area, vec3 p, vec3 n, vec3 v,
+                       vec3 diffAlb, vec3 F0, float rough, bool pbr, out float phat) {
+    phat = 0.0;
+    vec3 toL = sp - p;
+    float dist2 = dot(toL, toL);
+    if (dist2 < 1.0e-6) { return vec3(0.0); }
+    float dist = sqrt(dist2);
+    vec3 wi = toL / dist;
+    float ndl = dot(n, wi);
+    if (ndl <= 0.0) { return vec3(0.0); }      // light below the surface horizon
+    float cosL = max(0.0, dot(lnrm, -wi));
+    if (cosL <= 0.0) { return vec3(0.0); }     // receiver behind the emitter face
+    float G = ndl * cosL / dist2;              // area-light geometry term (× area)
+    vec3 brdf = diffAlb * INV_PI;
+    if (pbr) {
+        vec3 h = normalize(wi + v);
+        float ndh = max(0.0, dot(n, h));
+        float ndv = max(1.0e-4, dot(n, v));
+        float vdh = max(0.0, dot(v, h));
+        float D = ggxD(ndh, rough);
+        float Gs = ggxG1(ndv, rough) * ggxG1(ndl, rough);
+        vec3 Fs = fresnelSchlick(vdh, F0);
+        brdf += (D * Gs) * Fs / (4.0 * ndv * ndl);
+    }
+    vec3 contrib = brdf * le * (G * area);
+    phat = luminance(contrib);
+    return contrib;
+}
+
+// Initial RIS over M uniform candidates → a reservoir holding one resampled sample (no shadow ray). The
+// chosen sample's W = wSum / (M · p̂); M counts every candidate (incl. zero-weight ones, as in Stage 1).
+Reservoir risInitial(vec3 p, vec3 n, vec3 v, vec3 diffAlb, vec3 F0, float rough, bool pbr, inout uint seed) {
+    Reservoir r = resEmpty();
+    Lights lightBuf = Lights(pc.lightBufAddr);
+    for (uint c = 0u; c < pc.risCandidates; c++) {
+        r.M += 1.0;
+        uint li = min(uint(rndf(seed) * float(pc.lightCount)), pc.lightCount - 1u);
+        Light lg = lightBuf.l[li];
+        // Soft shadows: sample a point on the emitter (equal-area disc); 1/area pdf is the `area` factor.
+        vec3 sp = sampleLightPoint(lg.posArea.xyz, lg.normalPad.xyz, lg.posArea.w, seed);
+        float phat;
+        evalSampleContrib(sp, lg.normalPad.xyz, lg.le.xyz, lg.posArea.w, p, n, v, diffAlb, F0, rough, pbr, phat);
+        if (phat <= 0.0) { continue; }
+        float w = phat * float(pc.lightCount); // source pdf is uniform 1/lightCount ⇒ weight = p̂ · lightCount
+        r.wSum += w;
+        if (rndf(seed) * r.wSum < w) {          // weighted reservoir update
+            r.pos = sp; r.lnrm = lg.normalPad.xyz; r.le = lg.le.xyz; r.area = lg.posArea.w; r.phat = phat;
+        }
+    }
+    r.W = r.phat > 0.0 ? (r.wSum / (r.M * r.phat)) : 0.0;
+    return r;
+}
+
+// Stream another reservoir (treated as one combined sample of weight p̂_cur·W·M) into the accumulator `s`,
+// re-evaluating the target p̂ at the current pixel. M always grows by Mi; selection only on positive weight.
+void resMerge(inout Reservoir s, vec3 pos, vec3 lnrm, vec3 le, float area,
+              float Mi, float Wi, float phatCur, inout uint seed) {
+    s.M += Mi;
+    float w = phatCur * Wi * Mi;
+    if (w <= 0.0) { return; }
+    s.wSum += w;
+    if (rndf(seed) * s.wSum < w) {
+        s.pos = pos; s.lnrm = lnrm; s.le = le; s.area = area; s.phat = phatCur;
+    }
+}
+
+// Shade a finalized reservoir: recompute the survivor's contribution at (p,n,v), cast ONE shadow ray, and
+// return throughput-free radiance contrib·vis·W. `vis` is reported back for visibility reuse on the store.
+vec3 shadeReservoir(Reservoir s, vec3 p, vec3 n, vec3 v, vec3 diffAlb, vec3 F0, float rough, bool pbr,
+                    out float vis) {
+    vis = 0.0;
+    if (s.W <= 0.0 || s.phat <= 0.0) { return vec3(0.0); }
+    float phat;
+    vec3 contrib = evalSampleContrib(s.pos, s.lnrm, s.le, s.area, p, n, v, diffAlb, F0, rough, pbr, phat);
+    if (phat <= 0.0) { return vec3(0.0); }
+    vec3 toL = s.pos - p;
+    float dist = length(toL);
+    // Stop just short of the sample point so the ray doesn't self-occlude on the emitter's own face.
+    vis = visibility(p, toL / dist, dist * 0.999);
+    return contrib * vis * s.W;
+}
+
+// One Monte Carlo path from (ro, rd). Returns accumulated radiance along the path. `pix`/`size` are the
+// launch pixel + render-target size (for the ReSTIR temporal reservoir reproject/store); `primarySample`
+// is true only for the first SPP sample, gating the once-per-pixel reservoir store.
+vec3 tracePath(vec3 ro, vec3 rd, inout uint seed, ivec2 pix, vec2 size, bool primarySample) {
     vec3 L = vec3(0.0);
     vec3 throughput = vec3(1.0);
     bool pbr = (pc.flags & 2u) != 0u; // P6.1: GGX BRDF + material guides (else legacy Lambertian)
@@ -619,67 +803,62 @@ vec3 tracePath(vec3 ro, vec3 rd, inout uint seed) {
             }
         }
 
-        // ReSTIR DI (Stage 1): RIS direct lighting from block emitters (lava/glowstone/torches/lanterns).
-        // Disjoint from the sun NEE above, so the two sum. Each emitter quad is an area light sampled at a
-        // random surface point (equal-area disc): unshadowed contribution = f · Le · (cosS · cosL / dist²) ·
-        // area. Draw M candidates uniformly over the light list, weighted-reservoir-select one by its
-        // unshadowed target p̂ = luminance(contribution), then cast ONE shadow ray to the sampled point. The
-        // RIS estimate is contrib · vis · W with W = (wSum / M) / p̂_selected; area point-sampling gives the
-        // soft penumbra (DLSS-RR averages frames). Temporal/spatial reservoir reuse comes later.
+        // ReSTIR DI: RIS direct lighting from block emitters (lava/glowstone/torches/lanterns). Disjoint
+        // from the sun NEE above, so the two sum. Stage 1 generates an initial reservoir over M uniform
+        // candidates; Stage 2 (bounce 0, primary sample) additionally reuses the previous frame's per-pixel
+        // reservoir via the motion vector before shading — far less noise for the same one shadow ray.
         if (risOn) {
-            Lights lightBuf = Lights(pc.lightBufAddr);
-            float wSum = 0.0;
-            vec3 selContrib = vec3(0.0); // unshadowed f·Le·G·area for the surviving candidate
-            vec3 selDir = vec3(0.0);
-            float selDist = 0.0;
-            float selPhat = 0.0;
-            for (uint c = 0u; c < pc.risCandidates; c++) {
-                uint li = min(uint(rndf(seed) * float(pc.lightCount)), pc.lightCount - 1u);
-                Light lg = lightBuf.l[li];
-                // Soft shadows: sample a point on the light's area (not the fixed centroid). G below uses
-                // this point; the 1/area sampling pdf is the `area` factor already in `contrib`.
-                vec3 toL = sampleLightPoint(lg.posArea.xyz, lg.normalPad.xyz, lg.posArea.w, seed) - p;
-                float dist2 = dot(toL, toL);
-                if (dist2 < 1.0e-6) { continue; }
-                float dist = sqrt(dist2);
-                vec3 wi = toL / dist;
-                float ndl2 = dot(n, wi);
-                if (ndl2 <= 0.0) { continue; }            // light is below the surface horizon
-                float cosL = max(0.0, dot(lg.normalPad.xyz, -wi));
-                if (cosL <= 0.0) { continue; }            // receiver is behind the emitter face
-                float G = ndl2 * cosL / dist2;            // area light geometry term (× area below)
-                vec3 brdf = diffAlb * INV_PI;             // same BRDF split as the sun NEE
-                if (pbr) {
-                    vec3 h = normalize(wi + v);
-                    float ndh = max(0.0, dot(n, h));
-                    float ndv = max(1.0e-4, dot(n, v));
-                    float vdh = max(0.0, dot(v, h));
-                    float D = ggxD(ndh, rough);
-                    float Gs = ggxG1(ndv, rough) * ggxG1(ndl2, rough);
-                    vec3 Fs = fresnelSchlick(vdh, F0);
-                    brdf += (D * Gs) * Fs / (4.0 * ndv * ndl2);
+            // Stage 2 temporal reuse runs only at the primary visible surface (the per-pixel reservoir maps
+            // to a screen pixel), only on the first SPP sample (the store is once-per-pixel), and only when
+            // the CPU armed it this frame (flags bit2: temporal on, history valid, MV/rebase available).
+            bool doTemporal = (pc.flags & 4u) != 0u && bounce == 0 && primarySample;
+            if (doTemporal) {
+                Reservoir cur = risInitial(p, n, v, diffAlb, F0, rough, pbr, seed);
+                Reservoir s = resEmpty();
+                resMerge(s, cur.pos, cur.lnrm, cur.le, cur.area, cur.M, cur.W, cur.phat, seed);
+
+                // Reproject this surface into the previous frame (the same reprojection the motion vector
+                // uses: de-camera by camDelta, de-animate by the per-vertex object displacement).
+                vec4 prevClip = pc.prevViewProj * vec4(gv_motionHitCamRel + pc.camDelta - gv_motionObjDisp, 1.0);
+                vec2 prevNdc = prevClip.xy / prevClip.w;
+                ivec2 prevPix = ivec2(floor((prevNdc * 0.5 + 0.5) * size));
+                // Permutation sampling (flags bit3): per-frame shuffle of the read location to decorrelate
+                // temporal reuse (avoid the frozen-noise pattern RR can't denoise). Disocclusion below
+                // rejects a permuted neighbour whose stored surface doesn't match the current one.
+                if ((pc.flags & 8u) != 0u) {
+                    prevPix = applyPermutation(prevPix, pc.frameIndex);
                 }
-                vec3 contrib = brdf * lg.le.xyz * (G * lg.posArea.w);
-                float phat = luminance(contrib);
-                if (phat <= 0.0) { continue; }
-                // Source pdf is uniform = 1/lightCount, so the resampling weight is p̂ · lightCount.
-                float w = phat * float(pc.lightCount);
-                wSum += w;
-                if (rndf(seed) * wSum < w) {              // weighted reservoir update
-                    selContrib = contrib;
-                    selDir = wi;
-                    selDist = dist;
-                    selPhat = phat;
+                if (pc.restirPrevAddr != 0ul && all(greaterThanEqual(prevPix, ivec2(0)))
+                        && all(lessThan(prevPix, ivec2(size)))) {
+                    vec3 pSurfN, pSurfPos;
+                    Reservoir prev = loadReservoir(pc.restirPrevAddr, uint(prevPix.y) * uint(size.x) + uint(prevPix.x),
+                            pSurfN, pSurfPos);
+                    // Rebase-correct the previous frame's stored world positions into this frame's space.
+                    prev.pos -= pc.restirRebase.xyz;
+                    pSurfPos -= pc.restirRebase.xyz;
+                    // Disocclusion reject: keep history only when the reprojected pixel's stored surface
+                    // matches this one in orientation and world position (catches edges/parallax/new geometry).
+                    float distThresh = max(0.1 * payload.hitT, 0.25);
+                    if (prev.M > 0.0 && prev.W > 0.0 && dot(pSurfN, n) > 0.9
+                            && distance(pSurfPos, hitPos) < distThresh) {
+                        float Mprev = min(prev.M, TEMPORAL_M_CAP * cur.M);
+                        float phatPrev;
+                        evalSampleContrib(prev.pos, prev.lnrm, prev.le, prev.area, p, n, v,
+                                diffAlb, F0, rough, pbr, phatPrev);
+                        resMerge(s, prev.pos, prev.lnrm, prev.le, prev.area, Mprev, prev.W, phatPrev, seed);
+                    }
                 }
-            }
-            if (selPhat > 0.0) {
-                // Shadow ray stops just short of the emitter centroid so it doesn't self-occlude on the
-                // emitter's own face. (Same cutout-aware visibility() the sun NEE uses.)
-                float vis = visibility(p, selDir, selDist * 0.999);
-                if (vis > 0.0) {
-                    float W = (wSum / float(pc.risCandidates)) / selPhat;
-                    L += throughput * selContrib * vis * W;
-                }
+
+                s.W = s.phat > 0.0 ? (s.wSum / (s.M * s.phat)) : 0.0;
+                float vis;
+                L += throughput * shadeReservoir(s, p, n, v, diffAlb, F0, rough, pbr, vis);
+                if (vis <= 0.0) { s.W = 0.0; } // visibility reuse: don't persist an occluded survivor
+                storeReservoir(pc.restirCurAddr, uint(pix.y) * uint(size.x) + uint(pix.x), s, n, hitPos);
+            } else {
+                // Single-frame RIS (Stage 1 behaviour): GI bounces, extra SPP samples, or temporal disabled.
+                Reservoir r = risInitial(p, n, v, diffAlb, F0, rough, pbr, seed);
+                float vis;
+                L += throughput * shadeReservoir(r, p, n, v, diffAlb, F0, rough, pbr, vis);
             }
         }
 
@@ -759,7 +938,7 @@ void main() {
     vec3 frameRadiance = vec3(0.0);
     for (uint s = 0u; s < spp; s++) {
         seed = pcg(seed); // decorrelate per-sample paths (shared camera ray, no AA jitter yet)
-        frameRadiance += min(tracePath(origin, dir, seed), vec3(FIREFLY_MAX));
+        frameRadiance += min(tracePath(origin, dir, seed, pix, size, s == 0u), vec3(FIREFLY_MAX));
     }
     frameRadiance /= float(spp);
 

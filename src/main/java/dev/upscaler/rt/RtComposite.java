@@ -59,7 +59,8 @@ public final class RtComposite {
     // + P6.3 dynamic sky (16-byte aligned vec4s): sunDir+dayFactor(@208) + lightDir(@224) + lightRadiance(@240)
     // + sky rewrite: moonDir+moonPhase(@256) + celestialAxis+starAngle(@272) + sunUv(@288) + moonUv(@304)
     // + ReSTIR DI: lightBufAddr(u64@320) + lightCount(u32@328) + risCandidates(u32@332)
-    private static final int WORLD_PUSH_SIZE = 336;
+    // + ReSTIR Stage 2: restirPrevAddr(u64@336) + restirCurAddr(u64@344) + restirRebase(vec4@352)
+    private static final int WORLD_PUSH_SIZE = 368;
     private static final int GUIDE_COUNT = 7; // P4/RR guide buffers bound at world-pipeline bindings 3..9
     // Frames a retired per-frame TLAS must outlive before it's freed (> frames-in-flight); matches
     // RtTerrain's deferred-free horizon. The frame TLAS is built + traced this frame, then freed once
@@ -88,6 +89,23 @@ public final class RtComposite {
      * is independent of this. {@code -Dupscaler.rt.risCandidates}.
      */
     public static final int RIS_CANDIDATES = Math.max(0, Integer.getInteger("upscaler.rt.risCandidates", 8));
+    /**
+     * ReSTIR DI Stage 2: temporal reservoir reuse. Each pixel keeps its resampled emitter sample across
+     * frames (reprojected via the motion vector) and merges it with the new initial RIS reservoir, so the
+     * same single shadow ray resolves far less block-light noise. Needs {@link #RIS_CANDIDATES} &gt; 0.
+     * {@code -Dupscaler.rt.restirTemporal=false} pins the per-frame Stage 1 estimate for a clean A/B.
+     */
+    public static final boolean RESTIR_TEMPORAL = Boolean.parseBoolean(System.getProperty("upscaler.rt.restirTemporal", "true"));
+    /**
+     * ReSTIR Stage 2 permutation sampling (RTXDI). Temporal reuse correlates each pixel's reservoir with its
+     * own and its neighbours' history, so the residual noise freezes into a fixed spatial pattern that
+     * DLSS-RR (which assumes independent samples) cannot denoise — it bakes in as fixed-pattern grain. This
+     * shuffles the temporal read location per frame (a bijection over a 4×4 block) to keep reuse decorrelated.
+     * {@code -Dupscaler.rt.restirPermutation=false} disables it for an A/B. No effect when temporal is off.
+     */
+    public static final boolean RESTIR_PERMUTATION = Boolean.parseBoolean(System.getProperty("upscaler.rt.restirPermutation", "true"));
+    /** Per-pixel reservoir record size (world.rgen {@code ReservoirRec}, 4×vec4). */
+    private static final int RESERVOIR_BYTES = 64;
     private static final float SUN_ANGULAR_RADIUS = (float) Math.toRadians(Double.parseDouble(System.getProperty("upscaler.rt.sunAngularRadius", "0.6")));
     private static final float MOON_ANGULAR_RADIUS = (float) Math.toRadians(Double.parseDouble(System.getProperty("upscaler.rt.moonAngularRadius", "1.5")));
     private static final float SUN_NOON_SOUTH_TILT = (float) Math.toRadians(Double.parseDouble(System.getProperty("upscaler.rt.sunNoonSouthDeg", "0.0")));
@@ -156,6 +174,18 @@ public final class RtComposite {
     // linear blit of `output` fills it when RR is off/unavailable (the no-RR reference / fallback).
     private RtImage rrOutput;
     private final RtExposure exposure = new RtExposure();
+    // ReSTIR DI Stage 2: ping-pong per-pixel reservoir buffers (device-local, renderW*renderH*RESERVOIR_BYTES).
+    // Indexed by frameCounter parity: this frame writes [frameCounter&1], reads the other (last frame's write).
+    // (Re)created with the render-res images; zero-cleared once after creation so a never-written slot reads M=0.
+    private RtBuffer[] restirReservoirs; // [2], or null when temporal reuse is off
+    private boolean restirNeedsClear;
+    // Previous frame's rebase origin (RtTerrain.blockX/Y/Z) and whether it (plus the reprojection) is valid;
+    // reset whenever the reservoir buffers are recreated. restirRebase = currentBlock - prevBlock corrects the
+    // stored world positions, which live in the writing frame's rebased space.
+    private int restirPrevBlockX;
+    private int restirPrevBlockY;
+    private int restirPrevBlockZ;
+    private boolean restirHasHistory;
 
     // P4.2b resolution split: the trace + guide buffers run at render res, the composite at display res.
     private int displayW = -1;
@@ -427,6 +457,40 @@ public final class RtComposite {
             rrOutput.destroy();
             rrOutput = null;
         }
+        destroyReservoirs();
+    }
+
+    /**
+     * (Re)create the ReSTIR Stage 2 ping-pong reservoir buffers at the current render resolution. Device-local
+     * BDA buffers (read + written only by the trace); marked for a one-time GPU zero-clear so a slot that is
+     * read before it has ever been written reads M=0 (no history) rather than garbage. No-op when temporal
+     * reuse is disabled. Resets the rebase/history validity, since reprojection across a resize is invalid.
+     */
+    private void ensureReservoirs(RtContext ctx) {
+        restirHasHistory = false;
+        if (!RESTIR_TEMPORAL || RIS_CANDIDATES <= 0) {
+            return;
+        }
+        long bytes = (long) renderW * renderH * RESERVOIR_BYTES;
+        int usage = VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK10.VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        restirReservoirs = new RtBuffer[]{
+                ctx.createBuffer(bytes, usage, false, "rt restir reservoir 0 " + renderW + "x" + renderH),
+                ctx.createBuffer(bytes, usage, false, "rt restir reservoir 1 " + renderW + "x" + renderH),
+        };
+        restirNeedsClear = true;
+    }
+
+    private void destroyReservoirs() {
+        if (restirReservoirs != null) {
+            for (RtBuffer b : restirReservoirs) {
+                if (b != null) {
+                    b.destroy();
+                }
+            }
+            restirReservoirs = null;
+        }
+        restirNeedsClear = false;
+        restirHasHistory = false;
     }
 
     private void ensureOutput(RtContext ctx, int width, int height) {
@@ -467,6 +531,7 @@ public final class RtComposite {
         // Display-res RT image the display mapper reads. Always present (DLSS-RR target, or blit-upscale fallback).
         rrOutput = ctx.createStorageImage(width, height, VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "DLSS-RR output " + width + "x" + height);
         exposure.ensureResources(ctx);
+        ensureReservoirs(ctx);
 
         mvHasPrev = false; // recreated images -> first MV frame is zero
         if (worldPipeline != null) {
@@ -547,6 +612,16 @@ public final class RtComposite {
             if (level != null && level.getFluidState(BlockPos.containing(camX, camY, camZ)).is(FluidTags.WATER)) {
                 flags |= 0b01;
             }
+            // ReSTIR Stage 2 temporal reuse is armed this frame only when there's a valid history (a previous
+            // frame at this resolution + its rebase origin), block lights exist, and we're not in a debug view.
+            boolean doTemporal = restirReservoirs != null && restirHasHistory && terrain.lightCount() > 0
+                    && RIS_CANDIDATES > 0 && DEBUG_VIEW == 0;
+            if (doTemporal) {
+                flags |= 0b100; // bit2: world.rgen does the per-pixel temporal reservoir merge + store
+                if (RESTIR_PERMUTATION) {
+                    flags |= 0b1000; // bit3: permutation-sample the temporal read (decorrelate for RR)
+                }
+            }
             push.putInt(192, flags);
             // P6.3: sun/moon direction + light radiance + sky day-factor, derived from the time of day.
             writeSky(push);
@@ -555,6 +630,35 @@ public final class RtComposite {
             push.putLong(320, terrain.lightBufferAddress());
             push.putInt(328, terrain.lightCount());
             push.putInt(332, RIS_CANDIDATES);
+            // ReSTIR Stage 2: this frame's read (previous) + write (current) reservoir buffers, picked by
+            // frameCounter parity so each frame reads what the last one wrote. The stored sample/surface
+            // positions are in the writing frame's rebased space; restirRebase = current - previous rebase
+            // origin lets the reader correct them (offsets 336/344 are u64 BDA addresses, 352 a vec4).
+            if (restirReservoirs != null) {
+                int cur = (int) (frameCounter & 1L);
+                push.putLong(336, restirReservoirs[cur ^ 1].deviceAddress); // previous frame's write
+                push.putLong(344, restirReservoirs[cur].deviceAddress);     // this frame's write
+                push.putFloat(352, restirHasHistory ? (float) (terrain.blockX - restirPrevBlockX) : 0f);
+                push.putFloat(356, restirHasHistory ? (float) (terrain.blockY - restirPrevBlockY) : 0f);
+                push.putFloat(360, restirHasHistory ? (float) (terrain.blockZ - restirPrevBlockZ) : 0f);
+                push.putFloat(364, 0f);
+            } else {
+                push.putLong(336, 0L);
+                push.putLong(344, 0L);
+                push.putFloat(352, 0f);
+                push.putFloat(356, 0f);
+                push.putFloat(360, 0f);
+                push.putFloat(364, 0f);
+            }
+            // One-time GPU zero-clear of freshly (re)created reservoir buffers, so an unwritten slot reads
+            // M=0 (no history) instead of garbage. Recorded before the trace; the post-TLAS barrier below
+            // makes it visible to the trace's reservoir reads.
+            if (restirNeedsClear && restirReservoirs != null) {
+                for (RtBuffer b : restirReservoirs) {
+                    VK10.vkCmdFillBuffer(cmd, b.handle, 0L, VK10.VK_WHOLE_SIZE, 0);
+                }
+                restirNeedsClear = false;
+            }
 
             // P5.1a/b: rebuild the TLAS this frame from the static section instances merged with
             // dynamic entity-box instances, bind it into the pipeline's descriptor ring, record the
@@ -639,6 +743,18 @@ public final class RtComposite {
             throw new IllegalStateException("vkEndCommandBuffer(rt composite) failed");
         }
         encoder.execute(cmd); // deferred into the frame's submission — correct for per-frame work
+
+        // ReSTIR Stage 2: record this frame's rebase origin so next frame can compute the rebase shift, and
+        // mark history valid (the reservoir buffer we just wrote becomes next frame's reprojection source).
+        if (restirReservoirs != null) {
+            RtTerrain terrain = RtTerrain.currentOrNull();
+            if (terrain != null) {
+                restirPrevBlockX = terrain.blockX;
+                restirPrevBlockY = terrain.blockY;
+                restirPrevBlockZ = terrain.blockZ;
+                restirHasHistory = true;
+            }
+        }
     }
 
     /**
