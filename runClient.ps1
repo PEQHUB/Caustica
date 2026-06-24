@@ -12,7 +12,7 @@ if (Test-Path -LiteralPath $ngxShim) {
 
 Push-Location $upscalerRoot
 try {
-	$env:JAVA_TOOL_OPTIONS='-Xmx8G -Dupscaler.renderScale=0.5 -Dupscaler.rt.composite=true -Dupscaler.rt.output=rt -Dupscaler.rt.dlssRr=true -Dupscaler.rt.exposure.key=0.12 -Dupscaler.rt.exposure.maxEv=2.0 -Dupscaler.rt.exposure.minEv=0.0 -Dupscaler.rt.cancelVanillaWorld=true -Dupscaler.rt.asyncTerrain=true -Dupscaler.rt.workerThreads=4 -Dupscaler.rt.sunNoonSouthDeg=30'
+	$env:JAVA_TOOL_OPTIONS='-Xmx8G -Dupscaler.renderScale=0.5 -Dupscaler.rt.composite=true -Dupscaler.rt.output=rt -Dupscaler.rt.dlssRr=true -Dupscaler.rt.exposure.key=0.12 -Dupscaler.rt.exposure.maxEv=2.0 -Dupscaler.rt.exposure.minEv=-1.0 -Dupscaler.rt.cancelVanillaWorld=true -Dupscaler.rt.asyncTerrain=true -Dupscaler.rt.workerThreads=4 -Dupscaler.rt.sunNoonSouthDeg=30 -Dupscaler.rt.logCapture=true -Dupscaler.rt.lightStats=true -Dupscaler.rt.risCandidates=8 -Dupscaler.rt.lightDump=true -Dupscaler.rt.lightDumpRadius=3 -Dupscaler.rt.lightMinFillRatio=0.18 -Dupscaler.rt.risNoShadow=false -Dupscaler.rt.lightSurfaceOffset=0.05'
 	.\gradlew.bat --stop
 	.\gradlew.bat runClient --args="--renderDebugLabels --graphicsBackend VULKAN"
 } finally {
