@@ -72,7 +72,7 @@ public final class RtComposite {
 
     // invViewProj(64) + camOffset(@64) + sectionTableAddr(@80) + debugView(@88) + frameIndex(@92)
     // + prevViewProj(@96) + camDelta(@160) + spp(@172) + jitter(@176) + entityTableAddr(@184)
-    // + flags(@192): bit 0 = camera submerged, bit 1 = PBR BRDF enabled, bit 3 = SSS translucency (P6.5), bit 4 = water waves
+    // + flags(@192): bit 0 = camera submerged, bit 1 = PBR BRDF enabled, bit 4 = water waves
     // + dynamic sky (16-byte aligned vec4s): sunDir+dayFactor(@208) + lightDir(@224) + lightRadiance(@240)
     // + sky rewrite: moonDir+moonPhase(@256) + celestialAxis+starAngle(@272) + sunUv(@288) + moonUv(@304)
     // + W1/W2 water: waterParams(@320) xyz=camera-biome tint, w=wave time; waterAnchor(@336) xy=wave anchor
@@ -87,28 +87,14 @@ public final class RtComposite {
     public static final int DEBUG_VIEW = Integer.getInteger("upscaler.rt.debugView", 0);
     /** Samples per pixel per frame. Default 1: DLSS-RR denoises ~1 spp; raise for the no-RR reference. */
     public static final int SPP = Math.max(1, Integer.getInteger("upscaler.rt.spp", 1));
-    /**
-     * Drive the sun/moon direction, light colour and sky gradient from the game's time of day.
-     * {@code -Dupscaler.rt.dynamicSky=false} pins a fixed noon sun.
-     */
-    public static final boolean DYNAMIC_SKY = Boolean.parseBoolean(System.getProperty("upscaler.rt.dynamicSky", "true"));
-    /**
-     * Give the sun/moon a finite angular size so NEE shadow rays sample the light's disk (soft,
-     * contact-hardening penumbrae). {@code -Dupscaler.rt.softShadows=false} → hard shadows.
-     * Radii in degrees; the real sun/moon are ~0.27° but a touch larger reads as a pleasant penumbra.
-     */
-    public static final boolean SOFT_SHADOWS = Boolean.parseBoolean(System.getProperty("upscaler.rt.softShadows", "true"));
-    public static final boolean SSS = Boolean.parseBoolean(System.getProperty("upscaler.rt.sss", "true"));
+    // Finite sun/moon angular sizes let NEE shadow rays sample the light disk (soft, contact-hardening
+    // penumbrae). Radii in degrees; the real sun/moon are ~0.27°, but a touch larger reads pleasantly.
     public static final boolean WATER_WAVES = Boolean.parseBoolean(System.getProperty("upscaler.rt.waterWaves", "true"));
     private static final float SUN_ANGULAR_RADIUS = (float) Math.toRadians(Double.parseDouble(System.getProperty("upscaler.rt.sunAngularRadius", "0.6")));
     private static final float MOON_ANGULAR_RADIUS = (float) Math.toRadians(Double.parseDouble(System.getProperty("upscaler.rt.moonAngularRadius", "1.5")));
     private static final float SUN_NOON_SOUTH_TILT = (float) Math.toRadians(Double.parseDouble(System.getProperty("upscaler.rt.sunNoonSouthDeg", "0.0")));
     private static final float SUN_NOON_Y = Mth.cos(SUN_NOON_SOUTH_TILT);
     private static final float SUN_NOON_Z = Mth.sin(SUN_NOON_SOUTH_TILT);
-    private static final float FIXED_SUN_INV_LEN = 1.0f / (float) Math.sqrt(0.35f * 0.35f + 0.9f * 0.9f + 0.25f * 0.25f);
-    private static final float FIXED_SUN_X = 0.35f * FIXED_SUN_INV_LEN;
-    private static final float FIXED_SUN_Y = 0.9f * FIXED_SUN_INV_LEN;
-    private static final float FIXED_SUN_Z = 0.25f * FIXED_SUN_INV_LEN;
     private static final int WATER_ANCHOR_MASK = 4095;
     private static final Identifier SUN_ID = Identifier.withDefaultNamespace("sun");
     private static final Identifier[] MOON_IDS = createMoonIds();
@@ -589,9 +575,6 @@ public final class RtComposite {
                     flags |= 0b01;
                 }
             }
-            if (SSS) {
-                flags |= 0b1000; // LabPBR SSS translucency
-            }
             if (WATER_WAVES) {
                 flags |= 0b10000; // W1: animated water wave normals
             }
@@ -708,63 +691,54 @@ public final class RtComposite {
      *       (0 night .. 1 day), used to cross-fade the sky gradient.</li>
      *   <li>{@code lightDir.xyz} — the active NEE light direction: the sun while it is above the horizon,
      *       otherwise the moon (so surfaces still get soft moonlight at night); {@code .w} = the light's
-     *       angular radius in radians ({@code softShadows=false} → 0).</li>
+     *       angular radius in radians.</li>
      *   <li>{@code lightRadiance.xyz} — that light's HDR colour: warm + dim near the horizon, white +
      *       bright when high; dim cool moonlight at night.</li>
      * </ul>
      * Celestial angles come from the camera's {@link EnvironmentAttributeProbe} (partial-tick
      * interpolated). {@code upscaler.rt.sunNoonSouthDeg} tilts the east-west arc toward south (+Z) at
-     * noon. {@code dynamicSky=false} pins a fixed noon sun.
+     * noon.
      */
     private void writeSky(ByteBuffer push) {
         float sunX, sunY, sunZ, dayFactor, lx, ly, lz, rr, rg, rb, lightRadius;
         float moonX, moonY, moonZ, moonPhase, starAngle, starBrightness;
         Minecraft mc = Minecraft.getInstance();
-        if (!DYNAMIC_SKY || mc.level == null) {
-            sunX = FIXED_SUN_X; sunY = FIXED_SUN_Y; sunZ = FIXED_SUN_Z; dayFactor = 1f;
+        float partial = mc.getDeltaTracker().getGameTimeDeltaPartialTick(false);
+        var probe = mc.gameRenderer.mainCamera().attributeProbe();
+        float sunAngle = probe.getValue(EnvironmentAttributes.SUN_ANGLE, partial) * (float) (Math.PI / 180.0);
+        float moonAngle = probe.getValue(EnvironmentAttributes.MOON_ANGLE, partial) * (float) (Math.PI / 180.0);
+        float sunNoon = Mth.cos(sunAngle);
+        sunX = -Mth.sin(sunAngle); sunY = SUN_NOON_Y * sunNoon; sunZ = SUN_NOON_Z * sunNoon;
+        float moonNoon = Mth.cos(moonAngle);
+        moonX = -Mth.sin(moonAngle); moonY = SUN_NOON_Y * moonNoon; moonZ = SUN_NOON_Z * moonNoon;
+        moonPhase = probe.getValue(EnvironmentAttributes.MOON_PHASE, partial).index(); // 0 full .. 4 new
+        // Stars: use Minecraft's actual celestial rotation + brightness (the same values vanilla's
+        // SkyRenderer uses), so the starfield wheels about the celestial pole tied to world time and
+        // fades in/out at dusk/dawn exactly like vanilla. STAR_ANGLE is in degrees -> radians.
+        starAngle = probe.getValue(EnvironmentAttributes.STAR_ANGLE, partial) * (float) (Math.PI / 180.0);
+        starBrightness = probe.getValue(EnvironmentAttributes.STAR_BRIGHTNESS, partial);
+        dayFactor = smoothstep(-0.08f, 0.10f, sunY);
+        if (sunY > 0.0f) {
+            // Sun: fades out as it sets; warm at the horizon, white overhead.
+            float strength = smoothstep(-0.06f, 0.18f, sunY);
+            float warmth = smoothstep(0.0f, 0.30f, sunY);
+            float sunPeak = 4.6f;
             lx = sunX; ly = sunY; lz = sunZ;
-            rr = 4.2f; rg = 4.0f; rb = 3.6f; // fixed noon sun radiance
-            lightRadius = SOFT_SHADOWS ? SUN_ANGULAR_RADIUS : 0f;
-            // Fixed-sky A/B: park the moon opposite the sun, full phase, no stars (daylit).
-            moonX = -sunX; moonY = -sunY; moonZ = -sunZ; moonPhase = 0f; starAngle = 0f; starBrightness = 0f;
+            rr = 1.00f * sunPeak * strength;
+            rg = Mth.lerp(warmth, 0.42f, 0.96f) * sunPeak * strength;
+            rb = Mth.lerp(warmth, 0.18f, 0.90f) * sunPeak * strength;
+            lightRadius = SUN_ANGULAR_RADIUS;
         } else {
-            float partial = mc.getDeltaTracker().getGameTimeDeltaPartialTick(false);
-            var probe = mc.gameRenderer.mainCamera().attributeProbe();
-            float sunAngle = probe.getValue(EnvironmentAttributes.SUN_ANGLE, partial) * (float) (Math.PI / 180.0);
-            float moonAngle = probe.getValue(EnvironmentAttributes.MOON_ANGLE, partial) * (float) (Math.PI / 180.0);
-            float sunNoon = Mth.cos(sunAngle);
-            sunX = -Mth.sin(sunAngle); sunY = SUN_NOON_Y * sunNoon; sunZ = SUN_NOON_Z * sunNoon;
-            float moonNoon = Mth.cos(moonAngle);
-            moonX = -Mth.sin(moonAngle); moonY = SUN_NOON_Y * moonNoon; moonZ = SUN_NOON_Z * moonNoon;
-            moonPhase = probe.getValue(EnvironmentAttributes.MOON_PHASE, partial).index(); // 0 full .. 4 new
-            // Stars: use Minecraft's actual celestial rotation + brightness (the same values vanilla's
-            // SkyRenderer uses), so the starfield wheels about the celestial pole tied to world time and
-            // fades in/out at dusk/dawn exactly like vanilla. STAR_ANGLE is in degrees → radians.
-            starAngle = probe.getValue(EnvironmentAttributes.STAR_ANGLE, partial) * (float) (Math.PI / 180.0);
-            starBrightness = probe.getValue(EnvironmentAttributes.STAR_BRIGHTNESS, partial);
-            dayFactor = smoothstep(-0.08f, 0.10f, sunY);
-            if (sunY > 0.0f) {
-                // Sun: fades out as it sets; warm at the horizon, white overhead.
-                float strength = smoothstep(-0.06f, 0.18f, sunY);
-                float warmth = smoothstep(0.0f, 0.30f, sunY);
-                float sunPeak = 4.6f;
-                lx = sunX; ly = sunY; lz = sunZ;
-                rr = 1.00f * sunPeak * strength;
-                rg = Mth.lerp(warmth, 0.42f, 0.96f) * sunPeak * strength;
-                rb = Mth.lerp(warmth, 0.18f, 0.90f) * sunPeak * strength;
-                lightRadius = SOFT_SHADOWS ? SUN_ANGULAR_RADIUS : 0f;
-            } else {
-                // Moon: dim cool light, fading in as the sun drops below the horizon. Scaled by the lit
-                // fraction so a new moon gives near-zero moonlight (matches the procedural disc shape).
-                float moonStrength = 1.0f - dayFactor;
-                float litFraction = 1.0f - Math.abs(moonPhase - 4.0f) / 4.0f; // 0 new .. 1 full
-                float moonPeak = 0.30f * (0.15f + 0.85f * litFraction);
-                lx = moonX; ly = moonY; lz = moonZ;
-                rr = 0.30f * moonPeak * moonStrength;
-                rg = 0.36f * moonPeak * moonStrength;
-                rb = 0.55f * moonPeak * moonStrength;
-                lightRadius = SOFT_SHADOWS ? MOON_ANGULAR_RADIUS : 0f;
-            }
+            // Moon: dim cool light, fading in as the sun drops below the horizon. Scaled by the lit
+            // fraction so a new moon gives near-zero moonlight (matches the procedural disc shape).
+            float moonStrength = 1.0f - dayFactor;
+            float litFraction = 1.0f - Math.abs(moonPhase - 4.0f) / 4.0f; // 0 new .. 1 full
+            float moonPeak = 0.30f * (0.15f + 0.85f * litFraction);
+            lx = moonX; ly = moonY; lz = moonZ;
+            rr = 0.30f * moonPeak * moonStrength;
+            rg = 0.36f * moonPeak * moonStrength;
+            rb = 0.55f * moonPeak * moonStrength;
+            lightRadius = MOON_ANGULAR_RADIUS;
         }
         push.putFloat(208, sunX); push.putFloat(212, sunY); push.putFloat(216, sunZ); push.putFloat(220, dayFactor);
         push.putFloat(224, lx); push.putFloat(228, ly); push.putFloat(232, lz); push.putFloat(236, lightRadius);

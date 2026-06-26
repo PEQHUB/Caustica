@@ -75,7 +75,7 @@ public final class RtEntities {
     // and its mesh hashed; the expensive BLAS is rebuilt ONLY when the mesh actually changed — so static
     // BEs cost no GPU work while animating ones (chest lid, spawner, …) rebuild every frame. New/changed
     // rebuilds are capped per frame so a burst of newly loaded chunks can't stall (over-budget BEs keep
-    // their last geometry / pop in over later frames, like terrain's SECTIONS_PER_TICK).
+    // their last geometry / pop in over later frames, like terrain's worker dispatch budget).
     private static final int BE_BUILDS_PER_FRAME = Integer.getInteger("upscaler.rt.beBuildsPerFrame", 8);
     // Entity geometry table entry: {u64 primAddr, u64 idxAddr, u64 uvAddr, u64 dispAddr, vec4 rigidDisp}
     // = 48 bytes (std430 vec4 forces 16-align/48-size). dispAddr points at a per-vertex world-space

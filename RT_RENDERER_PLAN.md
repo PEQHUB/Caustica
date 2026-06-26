@@ -368,8 +368,7 @@ to fill our own buffers — we do not consume its packed/culled render output.)
 - **P6.3 — Dynamic sky (day/night) (DONE in working tree; builds; not yet GPU-verified).** The sun was a
   hardcoded `SUN_DIR`/`SUN_RADIANCE` const and the sky a fixed gradient in `world.rmiss` — no day/night in
   the RT path at all. Now the celestial lighting is driven by the game's time of day, recomputed each frame
-  on the CPU and pushed to `world.rgen`. Gated `-Dupscaler.rt.dynamicSky` (default on; off = exact legacy
-  fixed-noon A/B). Independent of ReSTIR/P7 (no rework risk); chosen over entity `_n`/`_s` as the
+  on the CPU and pushed to `world.rgen`. Independent of ReSTIR/P7 (no rework risk); chosen over entity `_n`/`_s` as the
   higher-impact next feature.
   - **CPU (`RtComposite.writeSky`):** read the partial-tick `SUN_ANGLE`/`MOON_ANGLE` from the camera's
     26.2 `EnvironmentAttributeProbe`; the vanilla sun transform reduces to world dir `(-sin a, cos a, 0)`
@@ -389,8 +388,7 @@ to fill our own buffers — we do not consume its packed/culled render output.)
     -Dupscaler.rt.dlssRr=true`, `/time set` through a full cycle — shadows swing with the sun; warm low
     sun + reddened horizon halo at sunrise/sunset; dim blue moonlit night with shadows from the moon
     direction; sky gradient day↔night; one crisp sun disc, no fireflies from it (disc is primary-only);
-    GI ambient tints with the sky. A/B `-Dupscaler.rt.dynamicSky=false` = the old fixed-noon look. Watch:
-    light-direction pop at the sun/moon horizon switch (both dim there — acceptable; note if jarring).
+    GI ambient tints with the sky. Watch: light-direction pop at the sun/moon horizon switch (both dim there — acceptable; note if jarring).
   - **P6.3b — soft shadows (DONE in working tree; builds; not yet GPU-verified).** The sun/moon was a
     delta directional light → hard shadow edges. Now the light has a finite angular size: `world.rgen`'s
     NEE jitters the shadow-ray direction within a cone (`sampleCone`, uniform over the spherical cap,
@@ -399,10 +397,8 @@ to fill our own buffers — we do not consume its packed/culled render output.)
     that **widen with occluder distance for free** (contact-hardening), and energy is preserved (the
     light's irradiance is unchanged; only the visibility becomes a soft average — ideal noise for RR).
     CPU pushes the radius in `lightDir.w`: `-Dupscaler.rt.sunAngularRadius` (deg, default 0.6),
-    `-Dupscaler.rt.moonAngularRadius` (default 1.5; softer night shadows); `-Dupscaler.rt.softShadows=false`
-    pushes radius 0 → exact hard shadow (A/B, no separate shader flag). **VERIFY:** shadow edges soften with
-    distance from the caster (sharp at contact, blurry far away), no banding, night shadows softer than day;
-    A/B `softShadows=false`.
+    `-Dupscaler.rt.moonAngularRadius` (default 1.5; softer night shadows). **VERIFY:** shadow edges soften with
+    distance from the caster (sharp at contact, blurry far away), no banding, night shadows softer than day.
   - **Deferred:** weather (rain/overcast dimming the sun + greying the sky via `getRainLevel`); moon-phase
     brightness; stars/moon disc in the night sky; a physical (Hosek-Wilkie) sky model; nether/end skies.
 - **P7 — Perf & polish.** AS compaction, SER tuning, texture-LOD via ray cones,
@@ -435,7 +431,7 @@ to fill our own buffers — we do not consume its packed/culled render output.)
     so static BEs do zero GPU work while animating ones (chest lid, spawner) rebuild every frame and stay
     smooth (a handful of small cheap builds, never the old hundreds-at-once). Rebuilds capped at
     `-Dupscaler.rt.beBuildsPerFrame` (default 8) so a chunk-load burst can't spike — over-budget BEs keep
-    their last geometry / pop in over the next frames (like `SECTIONS_PER_TICK`). A changed BE gets a fresh
+    their last geometry / pop in over the next frames (like the terrain dispatch/drain caps). A changed BE gets a fresh
     AS (old one defer-freed) rather than an in-place refit, so no write races an in-flight trace. Reuses the
     entity `prepareUpdatableBlasBuild`/pool/deferred-free machinery; evicted (off-queue) out of the BE window.
     **Still per-frame:** the 289-chunk *scan* itself (cheap: chunk + `getBlockEntities` iteration, no GPU
@@ -528,7 +524,7 @@ volumetrics/multiple denoisers is months of work; we save the GL layer, not the 
 
 P0–P5 + P6.1/P6.2a/P6.2b are done; the renderer is DLSS-RR-only. **P6.3 — dynamic sky (day/night)** is
 DONE in the working tree (builds; sun/moon driven by the game's time of day, dynamic sky gradient + glow +
-disc; `-Dupscaler.rt.dynamicSky`) and needs **GPU verification** (`/time set` through a full cycle — see
+disc) and needs **GPU verification** (`/time set` through a full cycle — see
 P6.3 VERIFY). Entity PBR (P6.2c) is deferred. After P6.3 verifies, the next substantial features are
 **ReSTIR DI + SHARC GI** (P3.3 — the principled many-light/GI upgrade; overlaps P7 material work) and the
 smaller P5 close-outs (biome water tint, grass cross-model dedup, water sun glint).

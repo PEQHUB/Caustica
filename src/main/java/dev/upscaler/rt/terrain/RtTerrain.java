@@ -66,22 +66,15 @@ import java.util.concurrent.Future;
  * section table ({@code {primAddr, idxAddr, uvAddr, triBase[3], waterGeom}} per section) the hit shaders read.
  *
  * <p>Tessellation reads only an immutable snapshot ({@link RenderSectionRegion}, captured on the render
- * thread via {@link RenderRegionCache} exactly as vanilla's chunk compiler does), so under
- * {@code -Dupscaler.rt.asyncTerrain} the meshing runs on {@link RtWorkerPool}; the snapshot, GPU buffer
- * upload, BLAS prepare and queue submission all stay on the render thread. The BLAS build itself is an
- * async GPU submit, and frees are deferred frames-in-flight-safe (no {@code waitIdle} on the hot path).
+ * thread via {@link RenderRegionCache} exactly as vanilla's chunk compiler does). CPU meshing runs on
+ * {@link RtWorkerPool}; snapshotting, GPU upload, BLAS prepare and queue submission stay on the render
+ * thread. The BLAS build itself is an async GPU submit, and frees are deferred frames-in-flight-safe
+ * (no {@code waitIdle} on the hot path).
  */
 public final class RtTerrain {
-    public static final boolean ENABLED = Boolean.parseBoolean(System.getProperty("upscaler.rt.terrain", "true"));
     private static final int VIEW_SECTIONS_V = Integer.getInteger("upscaler.rt.viewSectionsV", 6);
-    private static final int SECTIONS_PER_TICK = Integer.getInteger("upscaler.rt.sectionsPerTick", 24);
-    // Async terrain: tessellate sections on RtWorkerPool instead of inline on the render thread. The
-    // snapshot (RenderSectionRegion) and all Vulkan still happen on the render thread; only the meshing
-    // moves off. SECTIONS_PER_TICK then caps dispatches/tick; SECTION_RESULTS_PER_TICK caps uploads/tick.
-    private static final boolean ASYNC = Boolean.parseBoolean(System.getProperty("upscaler.rt.asyncTerrain", "false"));
-    // Async caps run higher than the sync SECTIONS_PER_TICK because the work left on the render thread is
-    // only the GPU upload (buffer create + memcpy) — tessellation, the expensive part, is on the pool —
-    // so per-tick async batches are cheaper than one sync batch even when several times larger.
+    // CPU tessellation runs on RtWorkerPool. The render thread snapshots RenderSectionRegions, uploads
+    // completed meshes, prepares BLASes, and submits the GPU build.
     private static final int ASYNC_DISPATCH_PER_TICK = Integer.getInteger("upscaler.rt.asyncDispatchPerTick", 64);
     private static final int SECTION_RESULTS_PER_TICK = Integer.getInteger("upscaler.rt.sectionResultsPerTick", 64);
     // Backpressure cap: stop dispatching once this many sections are in flight. Bounds queue depth and
@@ -101,7 +94,7 @@ public final class RtTerrain {
     private final Set<Long> empty = new HashSet<>(); // loaded, in-window sections with no geometry
     private final Set<Long> dirty = java.util.concurrent.ConcurrentHashMap.newKeySet(); // edited sections to re-extract
     private final List<Deferred> deferred = new ArrayList<>(); // frames-in-flight-safe frees
-    // ASYNC tessellation bookkeeping (render-thread only). `inFlight` maps a dispatched section key to a
+    // Worker tessellation bookkeeping (render-thread only). `inFlight` maps a dispatched section key to a
     // monotonic token; a completed job whose token no longer matches (section re-dirtied / unloaded /
     // left the window since dispatch) is dropped. `jobs` holds the outstanding worker futures.
     private final Map<Long, Long> inFlight = new HashMap<>();
@@ -163,9 +156,7 @@ public final class RtTerrain {
 
     /** Per-tick residency update (windowing + incremental build/free + TLAS rebuild on change). */
     public static void update(RtContext ctx) {
-        if (ENABLED) {
-            INSTANCE.tick(ctx);
-        }
+        INSTANCE.tick(ctx);
     }
 
     public static void shutdown(RtContext ctx) {
@@ -186,9 +177,6 @@ public final class RtTerrain {
      * Interior edits stay within one section (±1 doesn't cross a 16-block boundary).
      */
     public static void markBlocksDirty(int minX, int minY, int minZ, int maxX, int maxY, int maxZ) {
-        if (!ENABLED) {
-            return;
-        }
         for (int scx = (minX - 1) >> 4; scx <= (maxX + 1) >> 4; scx++) {
             for (int scy = (minY - 1) >> 4; scy <= (maxY + 1) >> 4; scy++) {
                 for (int scz = (minZ - 1) >> 4; scz <= (maxZ + 1) >> 4; scz++) {
@@ -268,7 +256,7 @@ public final class RtTerrain {
         int hiY = Math.min(maxSecY, psy + VIEW_SECTIONS_V);
 
         List<SectionGeom> removed = new ArrayList<>();
-        List<int[]> reextract = new ArrayList<>(); // ASYNC: dirty sections to rebuild in place (kept resident)
+        List<int[]> reextract = new ArrayList<>(); // dirty sections to rebuild in place (kept resident)
 
         // Re-extract edited sections. Snapshot+removeAll drains without losing concurrent adds.
         if (!dirty.isEmpty()) {
@@ -277,20 +265,12 @@ public final class RtTerrain {
             for (long key : keys) {
                 empty.remove(key);
                 inFlight.remove(key); // invalidate any in-flight tessellation of the now-stale section
-                if (ASYNC) {
-                    // Keep the old geometry resident + traced; re-dispatch and swap when the new mesh is
-                    // ready (no eviction gap → no flicker). Non-resident dirty keys fall through to the
-                    // normal window/missing pass.
-                    SectionGeom g = resident.get(key);
-                    if (g != null) {
-                        reextract.add(new int[]{g.sx >> 4, g.sy >> 4, g.sz >> 4});
-                    }
-                } else {
-                    // Sync rebuilds in the same tick, so evicting now leaves no visible gap.
-                    SectionGeom g = resident.remove(key);
-                    if (g != null) {
-                        removed.add(g);
-                    }
+                // Keep the old geometry resident + traced; re-dispatch and swap when the new mesh is
+                // ready (no eviction gap -> no flicker). Non-resident dirty keys fall through to the
+                // normal window/missing pass.
+                SectionGeom g = resident.get(key);
+                if (g != null) {
+                    reextract.add(new int[]{g.sx >> 4, g.sy >> 4, g.sz >> 4});
                 }
             }
         }
@@ -334,44 +314,9 @@ public final class RtTerrain {
         if (!missing.isEmpty()) {
             missing.sort((a, b) -> Integer.compare(dist2(a, pcx, psy, pcz), dist2(b, pcx, psy, pcz)));
         }
-        if (ASYNC) {
-            dispatchReextract(level, reextract);
-            dispatchTessellation(level, missing);
-            drainTessellation(ctx, prepared, removed);
-        } else if (!missing.isEmpty()) {
-            ModelBlockRenderer renderer = new ModelBlockRenderer(false, true, mc.getBlockColors());
-            // Snapshot source. Tessellation reads only the captured RenderSectionRegion (block states,
-            // light, biome tint, block entities for the 18³ neighbourhood) — never the live ClientLevel —
-            // which is what makes moving the meshing to a worker pool safe. The cache reuses neighbour
-            // SectionCopies across the sections built this tick (mirrors vanilla's chunk compiler).
-            RenderRegionCache regionCache = new RenderRegionCache();
-            BlockStateModelSet modelSet = mc.getModelManager().getBlockStateModelSet();
-            QuadCapture capture = new QuadCapture();
-            capture.blockColors = mc.getBlockColors();
-            // Fluids (water/lava) have no baked model — they're meshed by FluidRenderer into a
-            // VertexConsumer. FluidCapture is both the Output and the capturing builder.
-            FluidRenderer fluidRenderer = new FluidRenderer(mc.getModelManager().getFluidStateModelSet());
-            FluidCapture fluidCapture = new FluidCapture();
-            BlockPos.MutableBlockPos m = new BlockPos.MutableBlockPos();
-            int budget = SECTIONS_PER_TICK;
-            for (int[] s : missing) {
-                if (budget <= 0) {
-                    break;
-                }
-                budget--;
-                long key = sectionKey(s[0], s[1], s[2]);
-                // Snapshot on the render thread (reads the live level); the resulting region is then
-                // a thread-safe BlockAndTintGetter the tessellation can run against off-thread.
-                RenderSectionRegion region = regionCache.createRegion(level, SectionPos.asLong(s[0], s[1], s[2]));
-                CpuSection cpu = buildCpuSection(region, modelSet, renderer, capture, fluidRenderer, fluidCapture, m, s[0], s[1], s[2]);
-                SectionMesh mesh = cpu.mesh();
-                if (mesh.isEmpty()) {
-                    empty.add(key);
-                } else {
-                    prepared.add(uploadSection(ctx, mesh, cpu.opacityMicromap(), key, s[0] << 4, s[1] << 4, s[2] << 4));
-                }
-            }
-        }
+        dispatchReextract(level, reextract);
+        dispatchTessellation(level, missing);
+        drainTessellation(ctx, prepared, removed);
 
         if (!removed.isEmpty() || !prepared.isEmpty()) {
             startBuild(ctx, prepared, removed, pb.getX(), pb.getY(), pb.getZ());
@@ -594,10 +539,10 @@ public final class RtTerrain {
 
 
     /**
-     * ASYNC: snapshot each missing section on the render thread and submit its tessellation to the worker
+     * Snapshot each missing section on the render thread and submit its tessellation to the worker
      * pool. The per-task meshing objects (renderer / captures / MutableBlockPos) are allocated inside the
      * job so nothing mutable is shared across threads; the captured {@code region}, model sets and block
-     * colors are read-only. Capped at {@link #SECTIONS_PER_TICK} dispatches per tick.
+     * colors are read-only. Capped at {@link #ASYNC_DISPATCH_PER_TICK} dispatches per tick.
      */
     private void dispatchTessellation(ClientLevel level, List<int[]> missing) {
         if (missing.isEmpty()) {
@@ -619,7 +564,7 @@ public final class RtTerrain {
     }
 
     /**
-     * ASYNC re-extraction of edited (dirty) sections that are still resident: dispatch a fresh
+     * Re-extraction of edited (dirty) sections that are still resident: dispatch a fresh
      * tessellation while leaving the old geometry resident and traced, so it's swapped — never evicted
      * with a gap — when the new mesh is built (see {@link #startBuild} retiring the replaced geom). This
      * is what prevents the visible flicker on block updates that plain eviction would cause.
@@ -662,7 +607,7 @@ public final class RtTerrain {
     }
 
     /**
-     * ASYNC: upload finished worker meshes (up to {@link #SECTION_RESULTS_PER_TICK} per tick) on the
+     * Upload finished worker meshes (up to {@link #SECTION_RESULTS_PER_TICK} per tick) on the
      * render thread. A job whose token no longer matches {@link #inFlight} is stale — its section was
      * re-dirtied / unloaded / left the window since dispatch — and is dropped without uploading.
      */
@@ -742,7 +687,7 @@ public final class RtTerrain {
         for (PreparedSection ps : prepared) {
             SectionGeom prev = resident.put(ps.key(), new SectionGeom(ps.positions(), ps.indices(), ps.uvs(), ps.material(), ps.blas().accel, ps.triBase(), ps.waterGeom(), ps.sx(), ps.sy(), ps.sz()));
             if (prev != null) {
-                // Re-extracted section (ASYNC in-place rebuild): the old geometry stayed traced until now;
+                // Re-extracted section (in-place rebuild): the old geometry stayed traced until now;
                 // retire it with the swap so there's no eviction gap and no leak.
                 removed.add(prev);
             }

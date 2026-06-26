@@ -124,11 +124,11 @@ public final class VanillaRenderController {
 	}
 
 	/**
-	 * Runtime work/output switch. Startup Vulkan RT feature negotiation is controlled
+	 * Runtime work/output switch for per-frame RT work. Startup Vulkan RT feature negotiation is controlled
 	 * separately by {@code upscaler.rt}, so VANILLA can be flipped back to RT later.
 	 */
 	public static boolean rtRuntimeWorkRequested() {
-		return currentOutputMode() == OutputMode.RT;
+		return currentOutputMode() == OutputMode.RT && RtComposite.ENABLED;
 	}
 
 	public static OutputMode currentOutputMode() {

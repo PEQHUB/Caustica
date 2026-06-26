@@ -55,7 +55,7 @@ struct WorldPush {
     uint spp;                  // 172 samples per pixel this frame (>=1); low for the RR-denoised path
     vec2 jitter;               // 176 P4.2b sub-pixel jitter, render px (+ on the ray, - reported to RR)
     uint64_t entityTableAddr;  // 184 P5.1b-2 entity geometry table (closest-hit/any-hit)
-    uint flags;                // 192 bit0 = camera submerged, bit1 = PBR BRDF enabled
+    uint flags;                // 192 bit0 = camera submerged, bit1 = PBR BRDF enabled, bit4 = water waves
     vec4 sunDir;               // 208 P6.3 xyz true sun direction (sky glow/disc), w dayFactor 0..1
     vec4 lightDir;             // 224 xyz active NEE light dir (sun above horizon else moon), w = square half-angle (rad)
     vec4 lightRadiance;        // 240 xyz HDR radiance of the active light (warm/dim low, white high)
@@ -461,7 +461,6 @@ vec3 tracePath(vec3 ro, vec3 rd, inout uint seed) {
     vec3 L = vec3(0.0);
     vec3 throughput = vec3(1.0);
     bool pbr = (pc.flags & 2u) != 0u; // P6.1: GGX BRDF + material guides (else legacy Lambertian)
-    bool sssOn = (pc.flags & 8u) != 0u; // P6.5: LabPBR SSS translucency (transmission NEE through thin surfaces)
     // P6.1: start submerged if the camera is in water (fixes the air->water first-segment orientation
     // + absorption when the eye is underwater; without it the first hit was treated as an air segment).
     bool inWater = (pc.flags & 1u) != 0u;
@@ -656,7 +655,7 @@ vec3 tracePath(vec3 ro, vec3 rd, inout uint seed) {
         // bounce <= MAX_SSS_BOUNCE for cost; the sss > 0 guard makes it free on non-SSS geometry.
         // cosT = dot(lightDir, rd): rd tracks the ray toward the sun when the sun is behind the slab,
         // giving cosT ≈ 1 → forward-scatter peak.
-        if (sssOn && sss > 0.0 && bounce <= MAX_SSS_BOUNCE) {
+        if (sss > 0.0 && bounce <= MAX_SSS_BOUNCE) {
             float backNdl = max(0.0, dot(-n, lightDir));
             if (backNdl > 0.0) {
                 float visB = visibility(hitPos - n * SURF_BIAS, lightDir, 10000.0);

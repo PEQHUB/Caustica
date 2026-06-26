@@ -6,8 +6,8 @@
 `UpscalerClient`'s `START_CLIENT_TICK`). The expensive part is **CPU
 tessellation**: for every newly-resident section it walks all 4096 blocks and
 calls vanilla `ModelBlockRenderer.tesselateBlock` + `FluidRenderer.tesselate`
-into a `SectionMesh` (`prepareSection`, `RtTerrain.java`). This is throttled to
-`SECTIONS_PER_TICK = 24` purely to bound the per-frame cost — i.e. we already
+into a `SectionMesh` (`prepareSection`, `RtTerrain.java`). This is throttled by
+`ASYNC_DISPATCH_PER_TICK` (default 64) purely to bound the per-frame cost — i.e. we already
 *know* it's too heavy to do unbounded on the render thread, and the cap just
 trades it for slow terrain fill-in.
 
@@ -83,8 +83,8 @@ tint/light semantics). Must carry, for the section + 1-block border (18³):
   generally does not; BE meshing lives in `RtEntities`, stays render-thread).
 
 Snapshot cost on the main thread should be ≪ tessellation cost; that's the whole
-point. Keep `SECTIONS_PER_TICK` as the *snapshot/dispatch* cap, add a separate
-*results-drained-per-tick* cap for the Vulkan side.
+point. Keep `ASYNC_DISPATCH_PER_TICK` as the *snapshot/dispatch* cap, with a separate
+`SECTION_RESULTS_PER_TICK` cap for the Vulkan side.
 
 ### Pool
 
@@ -122,8 +122,8 @@ submitting only from the render thread. Optional follow-up, separate knob.
    is deferred off the meshing path via `SectionMesh.triSprites` (one sprite per
    prim record, `null` for fluids) and resolved in `resolveMaterials()` at upload.
    **Verify: byte-for-byte identical terrain vs before (no visual change).**
-2. **[DONE — gated `-Dupscaler.rt.asyncTerrain`, default off]** `RtWorkerPool` +
-   async dispatch/drain with token-based staleness drop. All Vulkan stays on the
+2. **[DONE — always-on]** `RtWorkerPool` +
+   dispatch/drain with token-based staleness drop. All Vulkan stays on the
    render thread. Two bugs found and fixed during GPU testing:
    - **Fill latency**: `tick()` runs at 20 TPS and the `pending` early-return
      built only one batch every *other* tick. Fixed by falling through after
@@ -133,15 +133,13 @@ submitting only from the render thread. Optional follow-up, separate knob.
      in-place re-extraction — keep the old geom resident and traced until the new
      mesh swaps in (`dispatchReextract`; `startBuild`/drain retire the replaced
      geom). GPU-confirmed fixed.
-3. **[TODO] Tune** worker count + per-tick caps under sustained load, then flip
-   the default on. (Functionally correct + smooth in testing; left default-off
-   pending a longer soak and the throughput question below.)
+3. **[TODO] Tune** worker count + per-tick caps under sustained load.
 4. **[TODO] Generalize** to a typed job queue so LOD build and atlas stitching
    (`RtBlockMaterials`) reuse it.
 
-Knobs added: `-Dupscaler.rt.asyncTerrain` (off), `-Dupscaler.rt.workerThreads`
-(clamp(cores/2,1,4)), `-Dupscaler.rt.sectionResultsPerTick` (24),
-`-Dupscaler.rt.maxInflightSections` (64).
+Knobs added: `-Dupscaler.rt.workerThreads` (clamp(cores/2,1,4)),
+`-Dupscaler.rt.asyncDispatchPerTick` (64), `-Dupscaler.rt.sectionResultsPerTick` (64),
+`-Dupscaler.rt.maxInflightSections` (192).
 
 ## Out of scope / explicitly render-thread
 

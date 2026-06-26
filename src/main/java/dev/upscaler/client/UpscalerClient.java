@@ -46,9 +46,7 @@ public final class UpscalerClient implements ClientModInitializer {
 					// material flags resolve from the first section (PBR on join, no re-extract). No-op
 					// until we're in a world with the block atlas loaded, or once already created.
 					RtComposite.INSTANCE.ensureResourcesReady(ctx);
-					if (RtTerrain.ENABLED) {
-						RtTerrain.update(ctx);
-					}
+					RtTerrain.update(ctx);
 				}
 			}
 		});
