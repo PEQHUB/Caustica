@@ -312,12 +312,19 @@ public final class RtTerrain {
                 if (!level.getChunkSource().hasChunk(scx, scz)) {
                     continue;
                 }
+                boolean checkedNeighbors = false;
+                boolean neighborsReady = false;
                 for (int scy = loY; scy <= hiY; scy++) {
                     long key = sectionKey(scx, scy, scz);
                     desired.add(key);
-                    if (!resident.containsKey(key) && !empty.contains(key)
-                            && !inFlight.containsKey(key)
-                            && neighborChunksReady(level, scx, scz)) {
+                    if (resident.containsKey(key) || empty.contains(key) || inFlight.containsKey(key)) {
+                        continue;
+                    }
+                    if (!checkedNeighbors) {
+                        neighborsReady = neighborChunksReady(level, scx, scz);
+                        checkedNeighbors = true;
+                    }
+                    if (neighborsReady) {
                         missing.add(key);
                     }
                 }
