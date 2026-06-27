@@ -1,5 +1,6 @@
 package dev.upscaler.rt.material;
 
+import dev.upscaler.UpscalerConfig;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.SoundType;
@@ -19,7 +20,9 @@ public final class RtMaterials {
     private RtMaterials() {}
 
     /** Master toggle for the GGX BRDF + material guides in the path tracer (pushed to the shader). */
-    public static final boolean ENABLED = Boolean.parseBoolean(System.getProperty("upscaler.rt.pbr", "true"));
+    public static boolean enabled() {
+        return UpscalerConfig.Rt.PBR.value();
+    }
 
     private static final float DEFAULT_ROUGH = 0.9f;
     private static final float METAL_ROUGH = 0.3f;

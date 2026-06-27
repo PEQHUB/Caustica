@@ -1,5 +1,6 @@
 package dev.upscaler.rt.terrain;
 
+import dev.upscaler.UpscalerConfig;
 import dev.upscaler.UpscalerMod;
 
 import java.util.concurrent.Callable;
@@ -24,19 +25,17 @@ import java.util.concurrent.atomic.AtomicInteger;
 public final class RtWorkerPool {
     public static final RtWorkerPool INSTANCE = new RtWorkerPool();
 
-    private static final int THREADS = resolveThreads();
-
     private ThreadPoolExecutor exec;
 
     private RtWorkerPool() {}
 
     private static int resolveThreads() {
-        int def = Math.clamp(Runtime.getRuntime().availableProcessors() / 2, 1, 4);
-        return Math.max(1, Integer.getInteger("upscaler.rt.workerThreads", def));
+        return UpscalerConfig.Rt.WORKER_THREADS.value();
     }
 
     private synchronized ThreadPoolExecutor executor() {
         if (exec == null) {
+            int threads = resolveThreads();
             ThreadFactory factory = new ThreadFactory() {
                 private final AtomicInteger n = new AtomicInteger();
                 @Override
@@ -47,11 +46,11 @@ public final class RtWorkerPool {
                     return t;
                 }
             };
-            ThreadPoolExecutor e = new ThreadPoolExecutor(THREADS, THREADS, 30, TimeUnit.SECONDS,
+            ThreadPoolExecutor e = new ThreadPoolExecutor(threads, threads, 30, TimeUnit.SECONDS,
                     new LinkedBlockingQueue<>(), factory);
             e.allowCoreThreadTimeOut(true);
             exec = e;
-            UpscalerMod.LOGGER.info("RT worker pool started with {} thread(s)", THREADS);
+            UpscalerMod.LOGGER.info("RT worker pool started with {} thread(s)", threads);
         }
         return exec;
     }

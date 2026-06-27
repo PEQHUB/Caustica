@@ -4,6 +4,7 @@ import com.mojang.blaze3d.vulkan.VulkanBackend;
 import com.mojang.blaze3d.vulkan.VulkanPhysicalDevice;
 import com.mojang.blaze3d.vulkan.init.VulkanFeature;
 import com.mojang.blaze3d.vulkan.init.VulkanPNextStruct;
+import dev.upscaler.UpscalerConfig;
 import dev.upscaler.UpscalerMod;
 import org.lwjgl.system.MemoryStack;
 import org.lwjgl.vulkan.VKCapabilitiesDevice;
@@ -54,8 +55,9 @@ import static org.lwjgl.vulkan.EXTOpacityMicromap.VK_STRUCTURE_TYPE_PHYSICAL_DEV
  * while the device features must be present before that toggle can be flipped to RT later.
  */
 public final class RtDeviceBringup {
-    public static final boolean ENABLED_BY_PROPERTY =
-            Boolean.parseBoolean(System.getProperty("upscaler.rt", "true"));
+    public static boolean enabledByProperty() {
+        return UpscalerConfig.Rt.ENABLED.value();
+    }
 
     /**
      * The device extensions RT needs (BDA/descriptor-indexing/SPIR-V 1.4 are core on 1.4).
@@ -77,8 +79,6 @@ public final class RtDeviceBringup {
      * triangles, so the alpha-test any-hit runs only on the foliage silhouette. Hardware-accelerated on RTX
      * 40-series and Blackwell; absent / software elsewhere, hence optional.
      */
-    public static final boolean ENABLE_OMM =
-            Boolean.parseBoolean(System.getProperty("upscaler.rt.omm", "true"));
     public static final List<String> OPTIONAL_RT_EXTENSIONS = List.of(
             VK_EXT_OPACITY_MICROMAP_EXTENSION_NAME);
 
@@ -107,10 +107,14 @@ public final class RtDeviceBringup {
 
     /** Optional extensions the gate wants AND the device supports — added but never required. */
     private static List<String> supportedOptionalExtensions(VulkanPhysicalDevice physicalDevice) {
-        if (!ENABLE_OMM) {
+        if (!ommRequested()) {
             return List.of();
         }
         return OPTIONAL_RT_EXTENSIONS.stream().filter(physicalDevice::hasDeviceExtension).toList();
+    }
+
+    private static boolean ommRequested() {
+        return UpscalerConfig.Rt.Omm.ENABLED.value();
     }
 
     private static String firstUnsupported(VulkanPhysicalDevice physicalDevice) {
@@ -124,7 +128,7 @@ public final class RtDeviceBringup {
 
     /** Standalone path: add RT extension names to the (mutable) arg0 list. */
     public static void addExtensions(List<String> augmentedExtensions, VulkanPhysicalDevice physicalDevice) {
-        if (!ENABLED_BY_PROPERTY || firstUnsupported(physicalDevice) != null) {
+        if (!enabledByProperty() || firstUnsupported(physicalDevice) != null) {
             return;
         }
         for (String ext : RT_EXTENSIONS) {
@@ -142,7 +146,7 @@ public final class RtDeviceBringup {
     /** Add the RT VulkanFeatures to arg2 after the matching extension names have been requested. */
     @SuppressWarnings("unchecked")
     public static void addFeatures(Args args, VulkanPhysicalDevice physicalDevice) {
-        if (!ENABLED_BY_PROPERTY) {
+        if (!enabledByProperty()) {
             return;
         }
         String missing = firstUnsupported(physicalDevice);
@@ -191,7 +195,7 @@ public final class RtDeviceBringup {
 
         // Optional: opacity micromaps (any-hit opt). Only when the gate is on AND the device advertises the
         // extension — its absence must not disable RT, so it is kept out of the mandatory feature set above.
-        ommEnabled = ENABLE_OMM && physicalDevice.hasDeviceExtension(VK_EXT_OPACITY_MICROMAP_EXTENSION_NAME);
+        ommEnabled = ommRequested() && physicalDevice.hasDeviceExtension(VK_EXT_OPACITY_MICROMAP_EXTENSION_NAME);
         if (ommEnabled) {
             VulkanPNextStruct ommStruct = new VulkanPNextStruct(
                     VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_OPACITY_MICROMAP_FEATURES_EXT,

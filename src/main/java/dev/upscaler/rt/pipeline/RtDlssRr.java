@@ -2,6 +2,7 @@ package dev.upscaler.rt.pipeline;
 
 import com.mojang.blaze3d.systems.RenderSystem;
 import com.mojang.blaze3d.vulkan.VulkanDevice;
+import dev.upscaler.UpscalerConfig;
 import dev.upscaler.UpscalerMod;
 import dev.upscaler.rt.accel.RtImage;
 import dev.upscaler.mixin.GpuDeviceAccessor;
@@ -26,11 +27,12 @@ import java.nio.file.Path;
  */
 public final class RtDlssRr {
     public static final RtDlssRr INSTANCE = new RtDlssRr();
-    public static final boolean ENABLED = Boolean.parseBoolean(System.getProperty("upscaler.rt.dlssRr", "false"));
+    public static boolean enabled() {
+        return UpscalerConfig.Rt.DlssRr.ENABLED.value();
+    }
 
     private static final String SHIM_DLL = "ngxshim.dll";
     private static final String RR_DLL = "nvngx_dlssd.dll";
-    private static final int QUALITY_MAX_PERF = 0; // NVSDK_NGX_PerfQuality_Value_MaxPerf
     // DLSS feature flags. IsHDR (bit 0): color is linear HDR (rgba16f) — RR requires it ("HDR Color
     // required"). MVLowRes (bit 1): motion vectors are at render/input resolution, not display — RR
     // requires it ("Low resolution Motion Vectors required"). AutoExposure (bit 6): in HDR mode DLSS
@@ -42,9 +44,13 @@ public final class RtDlssRr {
     private static final int FEATURE_FLAG_AUTO_EXPOSURE = 1 << 6;
     private static final int FEATURE_FLAGS = FEATURE_FLAG_IS_HDR | FEATURE_FLAG_MV_LOW_RES | FEATURE_FLAG_AUTO_EXPOSURE;
     // 0 = let the RR DLL pick its per-mode default preset.
-    private static final int RENDER_PRESET = Integer.getInteger("upscaler.rt.dlssRr.preset", 0);
+    private static int renderPreset() {
+        return UpscalerConfig.Rt.DlssRr.PRESET.value();
+    }
 
-    private final int quality = Integer.getInteger("upscaler.rt.dlssRr.quality", QUALITY_MAX_PERF);
+    private static int quality() {
+        return UpscalerConfig.Rt.DlssRr.QUALITY.value();
+    }
 
     private NgxLibrary lib;
     private MemorySegment feature = MemorySegment.NULL;
@@ -57,6 +63,8 @@ public final class RtDlssRr {
     private int featureRenderHeight = -1;
     private int featureDisplayWidth = -1;
     private int featureDisplayHeight = -1;
+    private int featureQuality = Integer.MIN_VALUE;
+    private int featurePreset = Integer.MIN_VALUE;
 
     private boolean resetHistory;
     private long lastFrameNanos;
@@ -128,7 +136,7 @@ public final class RtDlssRr {
      * caller falls back to the non-RR path.
      */
     public boolean ensureFeature(long cmd, int renderWidth, int renderHeight, int displayWidth, int displayHeight) {
-        if (!ENABLED || failed) {
+        if (!enabled() || failed) {
             return false;
         }
         if (!(((GpuDeviceAccessor) RenderSystem.getDevice()).upscaler$getBackend() instanceof VulkanDevice device)) {
@@ -136,12 +144,15 @@ public final class RtDlssRr {
         }
         try {
             ensureInitialized(device);
+            int quality = quality();
+            int preset = renderPreset();
             if (featureRenderWidth != renderWidth || featureRenderHeight != renderHeight
                     || featureDisplayWidth != displayWidth || featureDisplayHeight != displayHeight
+                    || featureQuality != quality || featurePreset != preset
                     || isNull(feature)) {
                 releaseFeature(device);
                 feature = lib.createDlssd(cmd, renderWidth, renderHeight, displayWidth, displayHeight,
-                        quality, FEATURE_FLAGS, RENDER_PRESET);
+                        quality, FEATURE_FLAGS, preset);
                 if (isNull(feature)) {
                     throw new IllegalStateException("ngxshim_create_dlssd failed: last=0x"
                             + Integer.toHexString(lib.lastResult()));
@@ -150,9 +161,11 @@ public final class RtDlssRr {
                 featureRenderHeight = renderHeight;
                 featureDisplayWidth = displayWidth;
                 featureDisplayHeight = displayHeight;
+                featureQuality = quality;
+                featurePreset = preset;
                 resetHistory = true; // a fresh feature has no temporal history
-                UpscalerMod.LOGGER.info("DLSS-RR feature created: {}x{} -> {}x{} (quality {})",
-                        renderWidth, renderHeight, displayWidth, displayHeight, quality);
+                UpscalerMod.LOGGER.info("DLSS-RR feature created: {}x{} -> {}x{} (quality {}, preset {})",
+                        renderWidth, renderHeight, displayWidth, displayHeight, quality, preset);
             }
             return true;
         } catch (Throwable t) {
@@ -232,6 +245,8 @@ public final class RtDlssRr {
         featureRenderHeight = -1;
         featureDisplayWidth = -1;
         featureDisplayHeight = -1;
+        featureQuality = Integer.MIN_VALUE;
+        featurePreset = Integer.MIN_VALUE;
     }
 
     private static boolean isNull(MemorySegment segment) {
@@ -275,7 +290,7 @@ public final class RtDlssRr {
     }
 
     private static Path locate(String name) {
-        String override = System.getProperty("upscaler.ngx.path");
+        String override = UpscalerConfig.Ngx.PATH.get();
         if (override != null && name.equals(SHIM_DLL)) {
             Path p = Path.of(override);
             return Files.isRegularFile(p) ? p : null;

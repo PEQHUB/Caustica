@@ -3,6 +3,7 @@ package dev.upscaler.rt.entity;
 import com.mojang.blaze3d.platform.NativeImage;
 import com.mojang.blaze3d.textures.GpuTextureView;
 import com.mojang.blaze3d.vulkan.VulkanGpuTextureView;
+import dev.upscaler.UpscalerConfig;
 import dev.upscaler.UpscalerMod;
 import dev.upscaler.mixin.RenderSetupAccessor;
 import dev.upscaler.mixin.RenderTypeAccessor;
@@ -20,7 +21,6 @@ import net.minecraft.server.packs.resources.Resource;
 import java.io.InputStream;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -44,12 +44,16 @@ import java.util.WeakHashMap;
  */
 public final class RtEntityTextures {
     /** Bindless array capacity (slot 0 reserved as a fallback texture). {@code -Dupscaler.rt.maxEntityTextures}. */
-    public static final int MAX_TEXTURES = Integer.getInteger("upscaler.rt.maxEntityTextures", 256);
+    public static int maxTextures() {
+        return UpscalerConfig.Rt.EntityTextures.MAX_TEXTURES.value();
+    }
+
     /** Resolve + bind per-type LabPBR {@code _n}/{@code _s} for entities. Toggle off to skip entity material
      *  branches (prim flags stay 0). {@code -Dupscaler.rt.entityPbr}. */
-    public static final boolean ENTITY_PBR = Boolean.parseBoolean(System.getProperty("upscaler.rt.entityPbr", "true"));
-    // Declared AFTER MAX_TEXTURES: the constructor sizes per-slot arrays to MAX_TEXTURES, so that constant
-    // must be initialized first (static fields init in textual order; a length-0 array would result otherwise).
+    public static boolean entityPbr() {
+        return UpscalerConfig.Rt.EntityTextures.PBR.value();
+    }
+
     public static final RtEntityTextures INSTANCE = new RtEntityTextures();
 
     // RenderType identity → resolved primary image-view handle. WEAK: some render types are rebuilt
@@ -71,6 +75,9 @@ public final class RtEntityTextures {
     // Atlas slots whose parallel LabPBR _s/_n (RtEntityMaterials, for block entities) have been bound into
     // bindless bindings 1/2 — bind once per atlas slot. Cleared on reset (the bindless set is recreated).
     private final java.util.Set<Integer> atlasMaterialBound = new java.util.HashSet<>();
+    // Descriptor array capacity of the currently alive world pipeline. A higher config value applies after
+    // reset/recreate; a lower value stops allocating new slots immediately without invalidating old ones.
+    private int capacity = maxTextures();
     private int nextSlot = 1;
     private boolean loggedFailure;
     private boolean loggedMaterialFailure;
@@ -79,9 +86,9 @@ public final class RtEntityTextures {
     // on reset(). Per-slot presence (→ prim mat.w/mat.z) + a guard so a slot's _n/_s are resolved once
     // (slots can be re-seen via the same shared texture handle every frame).
     private final Map<Identifier, DynamicTexture> materialCache = new HashMap<>();
-    private final boolean[] slotHasN = new boolean[MAX_TEXTURES];
-    private final boolean[] slotHasS = new boolean[MAX_TEXTURES];
-    private final boolean[] materialResolved = new boolean[MAX_TEXTURES];
+    private boolean[] slotHasN = new boolean[capacity];
+    private boolean[] slotHasS = new boolean[capacity];
+    private boolean[] materialResolved = new boolean[capacity];
     // Cached RenderSetup.TextureBinding#location() (the class is package-private, the method public).
     private Method locationMethod;
 
@@ -104,7 +111,7 @@ public final class RtEntityTextures {
         // Resolve this per-type texture's LabPBR _n/_s siblings into the parallel bindless arrays the
         // first time the slot is seen (slots can recur every frame via the same shared handle). Marked
         // resolved up front so a one-off resolution miss isn't retried every frame.
-        if (ENTITY_PBR && slot > 0 && !materialResolved[slot]) {
+        if (entityPbr() && slot > 0 && slot < materialResolved.length && !materialResolved[slot]) {
             materialResolved[slot] = true;
             resolveEntityMaterials(slot, renderType);
         }
@@ -113,12 +120,12 @@ public final class RtEntityTextures {
 
     /** Whether the slot has a LabPBR {@code _n} (normal) map bound → the entity prim's {@code mat.w}. */
     public boolean slotHasNormal(int slot) {
-        return slot > 0 && slot < MAX_TEXTURES && slotHasN[slot];
+        return slot > 0 && slot < slotHasN.length && slotHasN[slot];
     }
 
     /** Whether the slot has a LabPBR {@code _s} (specular) map bound → the entity prim's {@code mat.z}. */
     public boolean slotHasSpec(int slot) {
-        return slot > 0 && slot < MAX_TEXTURES && slotHasS[slot];
+        return slot > 0 && slot < slotHasS.length && slotHasS[slot];
     }
 
     /** Load the per-type {@code _n}/{@code _s} siblings of {@code renderType}'s texture into bindless
@@ -178,7 +185,7 @@ public final class RtEntityTextures {
      */
     public int slotForBlockEntityAtlas(Identifier atlasLocation) {
         int slot = slotForAtlas(atlasLocation);
-        if (ENTITY_PBR && slot > 0 && !atlasMaterialBound.contains(slot)) {
+        if (entityPbr() && slot > 0 && !atlasMaterialBound.contains(slot)) {
             RtParallelAtlas pa = RtEntityMaterials.INSTANCE.atlasFor(atlasLocation);
             if (pa != null) {
                 atlasMaterialBound.add(slot);
@@ -209,7 +216,7 @@ public final class RtEntityTextures {
         if (cached != null) {
             return cached;
         }
-        if (nextSlot >= MAX_TEXTURES) {
+        if (nextSlot >= slotLimit()) {
             return 0;
         }
         int slot = nextSlot++;
@@ -231,6 +238,12 @@ public final class RtEntityTextures {
 
     /** Drop the registry (call when the world pipeline / bindless set is recreated, or textures reload). */
     public void reset() {
+        reset(maxTextures());
+    }
+
+    /** Drop the registry for a pipeline whose bindless descriptor arrays have this capacity. */
+    public void reset(int descriptorCapacity) {
+        capacity = Math.max(1, descriptorCapacity);
         viewCache.clear();
         viewSlotCache.clear();
         atlasSlotCache.clear();
@@ -245,9 +258,13 @@ public final class RtEntityTextures {
             }
         }
         materialCache.clear();
-        Arrays.fill(slotHasN, false);
-        Arrays.fill(slotHasS, false);
-        Arrays.fill(materialResolved, false);
+        slotHasN = new boolean[capacity];
+        slotHasS = new boolean[capacity];
+        materialResolved = new boolean[capacity];
+    }
+
+    private int slotLimit() {
+        return Math.min(capacity, maxTextures());
     }
 
     /**

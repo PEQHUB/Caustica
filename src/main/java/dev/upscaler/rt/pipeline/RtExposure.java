@@ -1,6 +1,7 @@
 package dev.upscaler.rt.pipeline;
 
 import com.mojang.blaze3d.vulkan.VulkanCommandEncoder;
+import dev.upscaler.UpscalerConfig;
 import dev.upscaler.UpscalerMod;
 import dev.upscaler.rt.RtContext;
 import dev.upscaler.rt.RtDebugLabels;
@@ -15,19 +16,6 @@ import org.lwjgl.vulkan.VkImageSubresourceRange;
 
 /** Owns the display exposure value shared by the RT compositor's display-mapping passes. */
 public final class RtExposure {
-    private static final float DEFAULT_FIXED_EXPOSURE = 1.1f;
-
-    private final Mode mode = Mode.parse(System.getProperty("upscaler.rt.exposure.mode", "auto"));
-    private final float fixedExposure = positiveFloat("upscaler.rt.exposure.fixed", DEFAULT_FIXED_EXPOSURE);
-    private final float manualEv = finiteFloat("upscaler.rt.exposure.manualEv", 0.0f);
-    private final AutoConfig autoConfig = new AutoConfig(
-            positiveFloat("upscaler.rt.exposure.key", 0.18f),
-            finiteFloat("upscaler.rt.exposure.minEv", -0.5f),
-            finiteFloat("upscaler.rt.exposure.maxEv", 2.5f),
-            positiveFloat("upscaler.rt.exposure.adaptUp", 0.12f),
-            positiveFloat("upscaler.rt.exposure.adaptDown", 0.35f),
-            manualEv);
-
     private RtImage image;
     private RtBuffer histogram;
     private RtBuffer state;
@@ -47,7 +35,7 @@ public final class RtExposure {
         if (image == null) {
             image = ctx.createStorageImage(1, 1, VK10.VK_FORMAT_R32_SFLOAT, "display exposure");
         }
-        if (mode == Mode.AUTO) {
+        if (mode() == Mode.AUTO) {
             if (histogram == null) {
                 histogram = ctx.createBuffer(256L * Integer.BYTES,
                         VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK10.VK_BUFFER_USAGE_TRANSFER_DST_BIT, false,
@@ -68,7 +56,7 @@ public final class RtExposure {
         if (image == null) {
             throw new IllegalStateException("RT exposure image not created");
         }
-        if (mode == Mode.AUTO) {
+        if (mode() == Mode.AUTO) {
             recordAuto(ctx, cmd, stack, traceColor);
             return;
         }
@@ -102,10 +90,10 @@ public final class RtExposure {
     }
 
     private float exposureScale() {
-        return switch (mode) {
-            case MANUAL -> clampExposure((float) Math.pow(2.0, manualEv));
-            case FIXED -> fixedExposure;
-            case AUTO -> fixedExposure;
+        return switch (mode()) {
+            case MANUAL -> UpscalerConfig.Rt.Exposure.clampScale((float) Math.pow(2.0, manualEv()));
+            case FIXED -> fixedExposure();
+            case AUTO -> fixedExposure();
         };
     }
 
@@ -120,7 +108,7 @@ public final class RtExposure {
         VulkanCommandEncoder.memoryBarrier(cmd, stack);
         pipeline.dispatchHistogram(cmd, traceColor.width, traceColor.height);
         VulkanCommandEncoder.memoryBarrier(cmd, stack);
-        pipeline.dispatchResolve(cmd, Math.max(1, traceColor.width * traceColor.height), autoConfig, frameTimeSeconds());
+        pipeline.dispatchResolve(cmd, Math.max(1, traceColor.width * traceColor.height), autoConfig(), frameTimeSeconds());
     }
 
     private float frameTimeSeconds() {
@@ -135,7 +123,7 @@ public final class RtExposure {
         if (state == null || state.mapped == 0L) {
             return;
         }
-        MemoryUtil.memPutFloat(state.mapped, fixedExposure);
+        MemoryUtil.memPutFloat(state.mapped, fixedExposure());
         MemoryUtil.memPutInt(state.mapped + 4, 0);
         lastFrameNanos = 0L;
     }
@@ -145,6 +133,8 @@ public final class RtExposure {
             return;
         }
         logged = true;
+        Mode mode = mode();
+        AutoConfig autoConfig = autoConfig();
         String exposureText = mode == Mode.AUTO
                 ? "auto(key=" + autoConfig.key + ", minEv=" + autoConfig.minEv + ", maxEv=" + autoConfig.maxEv
                 + ", adaptUp=" + autoConfig.adaptUp + ", adaptDown=" + autoConfig.adaptDown
@@ -154,31 +144,29 @@ public final class RtExposure {
                 mode.configName, exposureText);
     }
 
-    private static float positiveFloat(String key, float fallback) {
-        return clampExposure(finiteFloat(key, fallback));
+    private static Mode mode() {
+        return Mode.parse(UpscalerConfig.Rt.Exposure.MODE.get());
     }
 
-    private static float finiteFloat(String key, float fallback) {
-        try {
-            float value = Float.parseFloat(System.getProperty(key, Float.toString(fallback)));
-            return Float.isFinite(value) ? value : fallback;
-        } catch (NumberFormatException e) {
-            return fallback;
-        }
+    private static float fixedExposure() {
+        return UpscalerConfig.Rt.Exposure.FIXED.value();
     }
 
-    private static float clampExposure(float value) {
-        return Math.clamp(value, 1.0e-4f, 1.0e4f);
+    private static float manualEv() {
+        return UpscalerConfig.Rt.Exposure.MANUAL_EV.value();
+    }
+
+    private static AutoConfig autoConfig() {
+        return new AutoConfig(
+                UpscalerConfig.Rt.Exposure.KEY.value(),
+                UpscalerConfig.Rt.Exposure.minEv(),
+                UpscalerConfig.Rt.Exposure.maxEv(),
+                UpscalerConfig.Rt.Exposure.ADAPT_UP.value(),
+                UpscalerConfig.Rt.Exposure.ADAPT_DOWN.value(),
+                manualEv());
     }
 
     record AutoConfig(float key, float minEv, float maxEv, float adaptUp, float adaptDown, float evBias) {
-        AutoConfig {
-            if (maxEv < minEv) {
-                float t = minEv;
-                minEv = maxEv;
-                maxEv = t;
-            }
-        }
     }
 
     private enum Mode {

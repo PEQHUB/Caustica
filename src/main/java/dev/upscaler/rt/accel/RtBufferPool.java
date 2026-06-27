@@ -1,5 +1,6 @@
 package dev.upscaler.rt.accel;
 
+import dev.upscaler.UpscalerConfig;
 import dev.upscaler.UpscalerMod;
 import dev.upscaler.rt.RtContext;
 
@@ -20,7 +21,6 @@ import java.util.Map;
  * overwrite. Single-threaded (render thread).
  */
 public final class RtBufferPool {
-    private static final boolean STATS = Boolean.parseBoolean(System.getProperty("upscaler.rt.poolStats", "false"));
     private static final int STATS_INTERVAL = 600; // frames between stat dumps
     private static final long MIN_BUCKET = 256;
     // Cap free-list depth per key so a transient entity spike can't strand unbounded VRAM.
@@ -73,7 +73,7 @@ public final class RtBufferPool {
 
     /** Periodic stat dump (opt-in via {@code -Dupscaler.rt.poolStats}); call once per frame. */
     public void maybeLogStats() {
-        if (!STATS || (statsCounter++ % STATS_INTERVAL) != 0) {
+        if (!UpscalerConfig.Rt.BufferPool.STATS.value() || (statsCounter++ % STATS_INTERVAL) != 0) {
             return;
         }
         long freeBytes = 0;

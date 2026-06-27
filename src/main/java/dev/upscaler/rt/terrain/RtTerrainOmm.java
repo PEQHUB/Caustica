@@ -1,5 +1,6 @@
 package dev.upscaler.rt.terrain;
 
+import dev.upscaler.UpscalerConfig;
 import dev.upscaler.UpscalerMod;
 import dev.upscaler.mixin.SpriteContentsAccessor;
 import dev.upscaler.rt.RtDeviceBringup;
@@ -27,7 +28,6 @@ final class RtTerrainOmm {
     // 4-state encoding: unknown-opaque still invokes the any-hit alpha test; fully-opaque
     // micro-triangles skip it in traversal. Level 4 → a 16×16 micro-grid aligning 1:1 with
     // MC's 16×16 texel grid so each micro-triangle covers (half of) a single texel.
-    private static final int OMM_SUBDIVISION = Integer.getInteger("upscaler.rt.ommSubdivision", 4);
     private static final int OMM_FULLY_TRANSPARENT = 0;
     private static final int OMM_FULLY_OPAQUE = 1;
     private static final int OMM_UNKNOWN_OPAQUE = 3;
@@ -36,7 +36,6 @@ final class RtTerrainOmm {
     private static final int OMM_ALPHA_CUTOFF = 128; // any-hit uses alpha >= 0.5 as visible
     private static final byte OMM_UNKNOWN_OPAQUE_BYTE = (byte) (OMM_UNKNOWN_OPAQUE | (OMM_UNKNOWN_OPAQUE << 2)
             | (OMM_UNKNOWN_OPAQUE << 4) | (OMM_UNKNOWN_OPAQUE << 6));
-    private static final boolean OMM_STATS = Boolean.getBoolean("upscaler.rt.ommStats");
     // Position-independent key: same cutout face across any section/re-extract reuses one result.
     // Cleared on resource reload (markAllDirty) when the atlas changes sprite identities/pixels.
     private static final Map<OmmTriangleKey, OmmTriangleResult> CACHE = new ConcurrentHashMap<>();
@@ -57,6 +56,14 @@ final class RtTerrainOmm {
     private static final AtomicLong OMM_STATS_LAST_LOG = new AtomicLong();
 
     private RtTerrainOmm() {}
+
+    private static int ommSubdivision() {
+        return UpscalerConfig.Rt.Omm.SUBDIVISION.value();
+    }
+
+    private static boolean ommStats() {
+        return UpscalerConfig.Rt.Omm.STATS.value();
+    }
 
     /** Drop all cached triangle classifications; call on resource reload when sprite pixels may change. */
     static void clearCache() {
@@ -132,7 +139,7 @@ final class RtTerrainOmm {
     }
 
     private static void recordOmmStatsDisabled() {
-        if (!OMM_STATS) {
+        if (!ommStats()) {
             return;
         }
         OMM_STATS_SECTIONS.incrementAndGet();
@@ -144,7 +151,7 @@ final class RtTerrainOmm {
                                        int transparentMicroTriangles, int mixedMicroTriangles,
                                        int unsafeMicroTriangles, int nullSpriteMicroTriangles,
                                        int animatedTris, int nullSpriteTris, boolean emitted) {
-        if (!OMM_STATS) {
+        if (!ommStats()) {
             return;
         }
         OMM_STATS_SECTIONS.incrementAndGet();
@@ -199,8 +206,8 @@ final class RtTerrainOmm {
     }
 
     private static int opacityMicromapSubdivisionLevel() {
-        int max = Math.max(0, Math.min(12, RtDeviceBringup.maxOpacity4StateSubdivisionLevel()));
-        return Math.max(0, Math.min(OMM_SUBDIVISION, max));
+        int max = Math.max(0, RtDeviceBringup.maxOpacity4StateSubdivisionLevel());
+        return Math.min(ommSubdivision(), max);
     }
 
     private record OmmMicroCounts(int opaque, int transparent, int mixed, int unsafe) {}

@@ -6,6 +6,7 @@ import com.mojang.blaze3d.textures.GpuTextureView;
 import com.mojang.blaze3d.vulkan.VulkanCommandEncoder;
 import com.mojang.blaze3d.vulkan.VulkanGpuTexture;
 import com.mojang.blaze3d.vulkan.VulkanGpuTextureView;
+import dev.upscaler.UpscalerConfig;
 import dev.upscaler.UpscalerMod;
 import dev.upscaler.client.UpscalerJitter;
 import dev.upscaler.mixin.CommandEncoderAccessor;
@@ -56,7 +57,7 @@ import java.util.List;
  * copy of the world color, and copy the result back to the world target at the
  * end-of-world seam. Gated by {@code -Dupscaler.rt.composite=true}.
  *
- * <p>The path tracer and its guide buffers run at {@link #RENDER_SCALE} of display res with a per-frame
+ * <p>The path tracer and its guide buffers run at the configured render scale of display res with a per-frame
  * sub-pixel camera jitter; DLSS-RR ({@link RtDlssRr}) reconstructs the display-res image. With RR
  * disabled the trace runs at 1:1 and a linear blit stands in for the upscale (a raw, noisy reference).
  * Output selection: {@code -Dupscaler.rt.output=rt|vanilla}.
@@ -67,7 +68,10 @@ import java.util.List;
  */
 public final class RtComposite {
     public static final RtComposite INSTANCE = new RtComposite();
-    public static final boolean ENABLED = Boolean.parseBoolean(System.getProperty("upscaler.rt.composite", "false"));
+
+    public static boolean enabled() {
+        return UpscalerConfig.Rt.Composite.ENABLED.value();
+    }
 
     // invViewProj(64) + camOffset(@64) + sectionTableAddr(@80) + debugView(@88) + frameIndex(@92)
     // + prevViewProj(@96) + camDelta(@160) + spp(@172) + jitter(@176) + entityTableAddr(@184)
@@ -82,43 +86,63 @@ public final class RtComposite {
     // the composite frame counter has advanced this far past it (so no in-flight frame still reads it).
     private static final int KEEP_FRAMES = 4;
 
-    /** Debug guide-buffer view: 0 = normal render, 1 = normals, 2 = albedo, 3 = depth, 4 = roughness, 5 = motion, 6 = specular, 7 = spec hit, 8 = spec motion. */
-    public static final int DEBUG_VIEW = Integer.getInteger("upscaler.rt.debugView", 0);
-    /** Samples per pixel per frame. Default 1: DLSS-RR denoises ~1 spp; raise for the no-RR reference. */
-    public static final int SPP = Math.max(1, Integer.getInteger("upscaler.rt.spp", 1));
+    private static int debugView() {
+        return UpscalerConfig.Rt.Composite.DEBUG_VIEW.value();
+    }
+
+    private static int spp() {
+        return UpscalerConfig.Rt.Composite.SPP.value();
+    }
+
+    private static boolean waterWaves() {
+        return UpscalerConfig.Rt.Composite.WATER_WAVES.value();
+    }
+
     // Finite sun/moon angular sizes let NEE shadow rays sample the light disk (soft, contact-hardening
     // penumbrae). Radii in degrees; the real sun/moon are ~0.27°, but a touch larger reads pleasantly.
-    public static final boolean WATER_WAVES = Boolean.parseBoolean(System.getProperty("upscaler.rt.waterWaves", "true"));
-    private static final float SUN_ANGULAR_RADIUS = (float) Math.toRadians(Double.parseDouble(System.getProperty("upscaler.rt.sunAngularRadius", "0.6")));
-    private static final float MOON_ANGULAR_RADIUS = (float) Math.toRadians(Double.parseDouble(System.getProperty("upscaler.rt.moonAngularRadius", "1.5")));
-    private static final float SUN_NOON_SOUTH_TILT = (float) Math.toRadians(Double.parseDouble(System.getProperty("upscaler.rt.sunNoonSouthDeg", "0.0")));
-    private static final float SUN_NOON_Y = Mth.cos(SUN_NOON_SOUTH_TILT);
-    private static final float SUN_NOON_Z = Mth.sin(SUN_NOON_SOUTH_TILT);
     private static final int WATER_ANCHOR_MASK = 4095;
     private static final Identifier SUN_ID = Identifier.withDefaultNamespace("sun");
     private static final Identifier[] MOON_IDS = createMoonIds();
     // Celestial rotation axis (the pole the sun/moon arc about): perpendicular to the east-west arc,
     // tilted by SUN_NOON_SOUTH_TILT. Pushed so the sky shader can build the sun/moon square's tangent
     // frame (right = travel direction) and wheel the starfield. = normalize(noonDir x sunriseDir).
-    private static final float CELESTIAL_AXIS_Y = -SUN_NOON_Z;
-    private static final float CELESTIAL_AXIS_Z = SUN_NOON_Y;
     /**
      * RT trace scale: the path tracer + guide buffers run at this fraction of display resolution and
-     * DLSS-RR upscales to display. Only applied when {@link RtDlssRr#ENABLED}; the no-RR reference traces
+     * DLSS-RR upscales to display. Only applied when DLSS-RR is enabled; the no-RR reference traces
      * at 1.0 (a 1:1 blit). Default 1/1.5 matches DLSS MaxQuality. {@code -Dupscaler.rt.renderScale}.
      */
-    public static final float RENDER_SCALE = parseRenderScale();
     // Sign of the sub-pixel jitter as reported to DLSS-RR + applied to the primary ray, mirroring the
     // validated DLSS-SR convention (Vulkan flipped clip space wants Y negated).
-    private static final float JITTER_SIGN_X = Float.parseFloat(System.getProperty("upscaler.rt.jitterSignX", "1"));
-    private static final float JITTER_SIGN_Y = Float.parseFloat(System.getProperty("upscaler.rt.jitterSignY", "-1"));
+    private static float renderScale() {
+        return UpscalerConfig.Rt.Composite.RENDER_SCALE.value();
+    }
 
-    private static float parseRenderScale() {
-        try {
-            return Math.clamp(Float.parseFloat(System.getProperty("upscaler.rt.renderScale", "0.5")), 0.25f, 1f);
-        } catch (NumberFormatException e) {
-            return 0.5f;
-        }
+    private static float jitterSignX() {
+        return UpscalerConfig.Rt.Composite.JITTER_SIGN_X.value();
+    }
+
+    private static float jitterSignY() {
+        return UpscalerConfig.Rt.Composite.JITTER_SIGN_Y.value();
+    }
+
+    private static float sunNoonTilt() {
+        return UpscalerConfig.Rt.Composite.SUN_NOON_SOUTH_TILT.value();
+    }
+
+    private static float sunNoonY() {
+        return Mth.cos(sunNoonTilt());
+    }
+
+    private static float sunNoonZ() {
+        return Mth.sin(sunNoonTilt());
+    }
+
+    private static float celestialAxisY() {
+        return -sunNoonZ();
+    }
+
+    private static float celestialAxisZ() {
+        return sunNoonY();
     }
 
     // Monotonic per-composite frame counter, used by RtTerrain to time frames-in-flight-safe frees.
@@ -137,6 +161,9 @@ public final class RtComposite {
     private volatile boolean reloadRebindRequested;
     // The block-atlas view handle currently bound into the world pipeline (set by bindWorldTextures).
     private long boundAtlasHandle;
+    private int bindlessTextureCapacity;
+    // True after the LabPBR atlases have been resolved/bound for the currently alive world pipeline.
+    private boolean materialBindingsReady;
     // World push data (256 B) lives in a host-visible BDA ring; only the 8-byte slot address is pushed
     // inline (256-byte NVIDIA push constant ceiling is otherwise exhausted by the world push struct).
     // One slot per in-flight frame, cycled per frame so an in-flight slot is never overwritten.
@@ -265,7 +292,9 @@ public final class RtComposite {
                 }
             }
             ensureOutput(ctx, width, height);
+            refreshPipelineShapeIfNeeded(ctx);
             RtPipeline active = ensureWorld(ctx);
+            refreshMaterialBindingsIfNeeded(ctx);
             updateMotion();
             recordFrame(ctx, active, nativeColor);
             if (!loggedActive) {
@@ -306,9 +335,10 @@ public final class RtComposite {
 
     private RtPipeline ensureWorld(RtContext ctx) {
         if (worldPipeline == null) {
+            bindlessTextureCapacity = RtEntityTextures.maxTextures();
             worldPipeline = RtPipeline.create(ctx, "world.rgen.spv",
                     new String[]{"world.rmiss.spv", "shadow.rmiss.spv"}, "world.rchit.spv", "world.rahit.spv",
-                    Long.BYTES, true, GUIDE_COUNT, RtEntityTextures.MAX_TEXTURES, RtMaterials.ENABLED, true);
+                    Long.BYTES, true, GUIDE_COUNT, bindlessTextureCapacity, true, true);
             // Per-frame push data lives in this BDA ring; the pipeline only pushes its address.
             if (pushRing == null) {
                 pushRing = new RtBuffer[PUSH_RING];
@@ -329,6 +359,21 @@ public final class RtComposite {
         return worldPipeline;
     }
 
+    private void refreshPipelineShapeIfNeeded(RtContext ctx) {
+        if (worldPipeline == null || reloadRebindRequested) {
+            return;
+        }
+        int desiredBindlessCapacity = RtEntityTextures.maxTextures();
+        if (desiredBindlessCapacity <= bindlessTextureCapacity) {
+            return;
+        }
+        ctx.waitIdle();
+        worldPipeline.destroy();
+        worldPipeline = null;
+        bindlessTextureCapacity = 0;
+        materialBindingsReady = false;
+    }
+
     /**
      * Resolve + bind every world-pipeline texture: the block atlas (binding 2 + bindless fallback slot 0)
      * and the LabPBR {@code _s}/{@code _n} parallel atlases (bindings 8/9). Shared by first creation and
@@ -345,21 +390,28 @@ public final class RtComposite {
         worldPipeline.setAtlasSampler(atlasView, sampler);
         // Bindless slot 0 = fallback texture (the block atlas) so an entity whose texture can't be
         // resolved samples something defined rather than an unbound (partially-bound) descriptor.
-        RtEntityTextures.INSTANCE.reset();
+        RtEntityTextures.INSTANCE.reset(bindlessTextureCapacity);
         worldPipeline.setBindlessTexture(0, 0, atlasView, sampler); // binding 0 (albedo), slot 0 fallback
         // LabPBR _s + _n parallel atlases. Bind the (block-atlas-sized) atlases; their pixels fill
         // lazily as terrain extraction encounters sprites and refresh via flush(). Fall back to the block
         // atlas view if an atlas didn't initialize so bindings 8/9 always hold a valid descriptor —
         // the shader only samples them when a prim is flagged (mat.z/mat.w), so the fallback is never read.
-        if (RtMaterials.ENABLED) {
-            RtBlockMaterials.INSTANCE.reset();
-            // Build the full _s/_n atlases now (parallel decode + blit), before terrain tessellates, so
-            // ensure() is a pure lookup on the build path instead of decoding each sprite's maps lazily.
-            RtBlockMaterials.INSTANCE.prepareAll();
-            long specView = RtBlockMaterials.INSTANCE.viewS();
-            long normalView = RtBlockMaterials.INSTANCE.viewN();
-            worldPipeline.setBlockSpecAtlas(specView != 0L ? specView : atlasView, sampler);
-            worldPipeline.setBlockNormalAtlas(normalView != 0L ? normalView : atlasView, sampler);
+        if (worldPipeline.hasBlockMaterialAtlases()) {
+            if (RtMaterials.enabled()) {
+                RtBlockMaterials.INSTANCE.reset();
+                // Build the full _s/_n atlases now (parallel decode + blit), before terrain tessellates, so
+                // ensure() is a pure lookup on the build path instead of decoding each sprite's maps lazily.
+                RtBlockMaterials.INSTANCE.prepareAll();
+                long specView = RtBlockMaterials.INSTANCE.viewS();
+                long normalView = RtBlockMaterials.INSTANCE.viewN();
+                worldPipeline.setBlockSpecAtlas(specView != 0L ? specView : atlasView, sampler);
+                worldPipeline.setBlockNormalAtlas(normalView != 0L ? normalView : atlasView, sampler);
+                materialBindingsReady = true;
+            } else {
+                worldPipeline.setBlockSpecAtlas(atlasView, sampler);
+                worldPipeline.setBlockNormalAtlas(atlasView, sampler);
+                materialBindingsReady = false;
+            }
         }
         // Sky rewrite: bind the vanilla celestials atlas (sun + moon phases) for world.rmiss. The view
         // handle is stable across frames; the shader only samples it inside the sun/moon discs (sky
@@ -370,6 +422,19 @@ public final class RtComposite {
         }
         setCelestialUvAtlas(celView);
         RtTerrain.markAllDirty();
+    }
+
+    private void refreshMaterialBindingsIfNeeded(RtContext ctx) {
+        if (worldPipeline == null || reloadRebindRequested) {
+            return;
+        }
+        if (RtMaterials.enabled()) {
+            if (!materialBindingsReady) {
+                bindWorldTextures(ctx);
+            }
+        } else {
+            materialBindingsReady = false;
+        }
     }
 
     /** Vulkan image-view of the vanilla celestials atlas (sun + moon-phase sprites), or 0 if unavailable. */
@@ -396,12 +461,14 @@ public final class RtComposite {
      */
     public void onResourceReloadStart() {
         reloadRebindRequested = true;
+        materialBindingsReady = false;
         setCelestialUvAtlas(0L);
         RtContext ctx = RtContext.currentOrNull();
         if (ctx != null && worldPipeline != null) {
             ctx.waitIdle();
             worldPipeline.destroy();
             worldPipeline = null;
+            bindlessTextureCapacity = 0;
         }
     }
 
@@ -472,7 +539,7 @@ public final class RtComposite {
         displayH = height;
         // The path tracer + its guide buffers run at render res; DLSS-RR (or a fallback blit) upscales
         // to display res. With RR off there is no upscaler, so trace at 1:1 for a faithful reference.
-        float scale = RtDlssRr.ENABLED ? RENDER_SCALE : 1.0f;
+        float scale = RtDlssRr.enabled() ? renderScale() : 1.0f;
         renderW = Math.max(1, Math.round(width * scale));
         renderH = Math.max(1, Math.round(height * scale));
 
@@ -534,13 +601,14 @@ public final class RtComposite {
         try (MemoryStack stack = MemoryStack.stackPush(); RtDebugLabels.Scope frameLabel = RtDebugLabels.scope(ctx, cmd, "composite frame")) {
             // RR drives the upscale: trace + jitter at render res, DLSS-RR denoises+upscales to display.
             // Jitter is suppressed for the no-RR reference and for the debug guide views (raw inspection).
-            boolean rrPath = RtDlssRr.ENABLED && DEBUG_VIEW == 0;
+            int debugView = debugView();
+            boolean rrPath = RtDlssRr.enabled() && debugView == 0;
             float jitterX = 0f;
             float jitterY = 0f;
             if (rrPath) {
                 UpscalerJitter.INSTANCE.prepare(renderW, renderH, displayW);
-                jitterX = UpscalerJitter.INSTANCE.jitterPixelsX() * JITTER_SIGN_X;
-                jitterY = UpscalerJitter.INSTANCE.jitterPixelsY() * JITTER_SIGN_Y;
+                jitterX = UpscalerJitter.INSTANCE.jitterPixelsX() * jitterSignX();
+                jitterY = UpscalerJitter.INSTANCE.jitterPixelsY() * jitterSignY();
             }
 
             boolean rrDone = false;
@@ -555,18 +623,18 @@ public final class RtComposite {
             push.putFloat(68, (float) (camY - terrain.blockY));
             push.putFloat(72, (float) (camZ - terrain.blockZ));
             push.putLong(80, terrain.tableAddress());
-            push.putInt(88, DEBUG_VIEW);
+            push.putInt(88, debugView);
             push.putInt(92, (int) frameCounter); // per-frame RNG variation for the denoiser
             mvPushMatrix.get(96, push);
             push.putFloat(160, mvCamDeltaX);
             push.putFloat(164, mvCamDeltaY);
             push.putFloat(168, mvCamDeltaZ);
-            push.putInt(172, SPP);
+            push.putInt(172, spp());
             push.putFloat(176, jitterX);
             push.putFloat(180, jitterY);
             // flags: PBR BRDF toggle + camera-in-water (so the path tracer starts in the water medium
             // when the eye is submerged, fixing the air→water first-segment orientation).
-            int flags = RtMaterials.ENABLED ? 0b10 : 0;
+            int flags = RtMaterials.enabled() ? 0b10 : 0;
             var level = Minecraft.getInstance().level;
             if (level != null) {
                 cameraBlockPos.set(Mth.floor(camX), Mth.floor(camY), Mth.floor(camZ));
@@ -574,7 +642,7 @@ public final class RtComposite {
                     flags |= 0b01;
                 }
             }
-            if (WATER_WAVES) {
+            if (waterWaves()) {
                 flags |= 0b10000; // W1: animated water wave normals
             }
             push.putInt(192, flags);
@@ -614,7 +682,7 @@ public final class RtComposite {
             RtEntityTextures.INSTANCE.uploadPending(active, atlasSampler(ctx));
             // Re-upload the LabPBR _s atlas if extraction added sprites since the last frame (the
             // view handle is stable, so no re-bind needed). Before the trace records, like uploadPending.
-            if (RtMaterials.ENABLED) {
+            if (RtMaterials.enabled()) {
                 RtBlockMaterials.INSTANCE.flush();
                 RtEntityMaterials.INSTANCE.flushAll(); // block-entity parallel _s/_n blitted during capture
             }
@@ -707,9 +775,9 @@ public final class RtComposite {
         float sunAngle = probe.getValue(EnvironmentAttributes.SUN_ANGLE, partial) * (float) (Math.PI / 180.0);
         float moonAngle = probe.getValue(EnvironmentAttributes.MOON_ANGLE, partial) * (float) (Math.PI / 180.0);
         float sunNoon = Mth.cos(sunAngle);
-        sunX = -Mth.sin(sunAngle); sunY = SUN_NOON_Y * sunNoon; sunZ = SUN_NOON_Z * sunNoon;
+        sunX = -Mth.sin(sunAngle); sunY = sunNoonY() * sunNoon; sunZ = sunNoonZ() * sunNoon;
         float moonNoon = Mth.cos(moonAngle);
-        moonX = -Mth.sin(moonAngle); moonY = SUN_NOON_Y * moonNoon; moonZ = SUN_NOON_Z * moonNoon;
+        moonX = -Mth.sin(moonAngle); moonY = sunNoonY() * moonNoon; moonZ = sunNoonZ() * moonNoon;
         moonPhase = probe.getValue(EnvironmentAttributes.MOON_PHASE, partial).index(); // 0 full .. 4 new
         // Stars: use Minecraft's actual celestial rotation + brightness (the same values vanilla's
         // SkyRenderer uses), so the starfield wheels about the celestial pole tied to world time and
@@ -726,7 +794,7 @@ public final class RtComposite {
             rr = 1.00f * sunPeak * strength;
             rg = Mth.lerp(warmth, 0.42f, 0.96f) * sunPeak * strength;
             rb = Mth.lerp(warmth, 0.18f, 0.90f) * sunPeak * strength;
-            lightRadius = SUN_ANGULAR_RADIUS;
+            lightRadius = UpscalerConfig.Rt.Composite.SUN_ANGULAR_RADIUS.value();
         } else {
             // Moon: dim cool light, fading in as the sun drops below the horizon. Scaled by the lit
             // fraction so a new moon gives near-zero moonlight (matches the procedural disc shape).
@@ -737,14 +805,14 @@ public final class RtComposite {
             rr = 0.30f * moonPeak * moonStrength;
             rg = 0.36f * moonPeak * moonStrength;
             rb = 0.55f * moonPeak * moonStrength;
-            lightRadius = MOON_ANGULAR_RADIUS;
+            lightRadius = UpscalerConfig.Rt.Composite.MOON_ANGULAR_RADIUS.value();
         }
         push.putFloat(208, sunX); push.putFloat(212, sunY); push.putFloat(216, sunZ); push.putFloat(220, dayFactor);
         push.putFloat(224, lx); push.putFloat(228, ly); push.putFloat(232, lz); push.putFloat(236, lightRadius);
         push.putFloat(240, rr); push.putFloat(244, rg); push.putFloat(248, rb); push.putFloat(252, starBrightness);
         // Sky rewrite: moon direction + phase, celestial axis + star rotation angle (real world time).
         push.putFloat(256, moonX); push.putFloat(260, moonY); push.putFloat(264, moonZ); push.putFloat(268, moonPhase);
-        push.putFloat(272, 0f); push.putFloat(276, CELESTIAL_AXIS_Y); push.putFloat(280, CELESTIAL_AXIS_Z); push.putFloat(284, starAngle);
+        push.putFloat(272, 0f); push.putFloat(276, celestialAxisY()); push.putFloat(280, celestialAxisZ()); push.putFloat(284, starAngle);
         writeCelestialUv(push, moonPhase); // sunUv@288 + moonUv@304 (vanilla celestials-atlas sprite rects)
     }
 
@@ -820,7 +888,7 @@ public final class RtComposite {
             d.tlas().destroyAll();
         }
         deferredTlas.clear();
-        if (RtDlssRr.ENABLED) {
+        if (RtDlssRr.enabled()) {
             RtDlssRr.INSTANCE.destroy();
         }
         if (displayImage != null) {
@@ -841,6 +909,8 @@ public final class RtComposite {
             worldPipeline.destroy();
             worldPipeline = null;
         }
+        bindlessTextureCapacity = 0;
+        materialBindingsReady = false;
         if (pushRing != null) {
             for (RtBuffer b : pushRing) {
                 if (b != null) {

@@ -2,6 +2,7 @@ package dev.upscaler.rt.terrain;
 
 import com.mojang.blaze3d.vertex.QuadInstance;
 import com.mojang.blaze3d.vertex.VertexConsumer;
+import dev.upscaler.UpscalerConfig;
 import dev.upscaler.UpscalerMod;
 import dev.upscaler.mixin.SpriteContentsAccessor;
 import dev.upscaler.rt.RtComposite;
@@ -78,18 +79,34 @@ import java.util.concurrent.Future;
  * (no {@code waitIdle} on the hot path).
  */
 public final class RtTerrain {
-    private static final int VIEW_SECTIONS_V = Integer.getInteger("upscaler.rt.viewSectionsV", 6);
+    private static int viewSectionsV() {
+        return UpscalerConfig.Rt.Terrain.VIEW_SECTIONS_V.value();
+    }
+
     // CPU tessellation runs on RtWorkerPool. The render thread snapshots RenderSectionRegions, uploads
     // completed meshes, prepares BLASes, and submits the GPU build.
-    private static final int ASYNC_DISPATCH_PER_TICK = Integer.getInteger("upscaler.rt.asyncDispatchPerTick", 32);
-    private static final int SECTION_RESULTS_PER_TICK = Integer.getInteger("upscaler.rt.sectionResultsPerTick", 32);
-    private static final int ASYNC_DISPATCH_MOVING_PER_TICK = Integer.getInteger("upscaler.rt.asyncDispatchMovingPerTick",
-            Math.min(ASYNC_DISPATCH_PER_TICK, 16));
-    private static final int SECTION_RESULTS_MOVING_PER_TICK = Integer.getInteger("upscaler.rt.sectionResultsMovingPerTick",
-            Math.min(SECTION_RESULTS_PER_TICK, 16));
+    private static int asyncDispatchPerTick() {
+        return UpscalerConfig.Rt.Terrain.ASYNC_DISPATCH_PER_TICK.value();
+    }
+
+    private static int sectionResultsPerTick() {
+        return UpscalerConfig.Rt.Terrain.SECTION_RESULTS_PER_TICK.value();
+    }
+
+    private static int asyncDispatchMovingPerTick() {
+        return UpscalerConfig.Rt.Terrain.ASYNC_DISPATCH_MOVING_PER_TICK.value();
+    }
+
+    private static int sectionResultsMovingPerTick() {
+        return UpscalerConfig.Rt.Terrain.SECTION_RESULTS_MOVING_PER_TICK.value();
+    }
+
     // Backpressure cap: stop dispatching once this many sections are in flight. Bounds queue depth and
     // snapshot memory (each RenderSectionRegion holds 27 SectionCopies) when flying through the world.
-    private static final int MAX_INFLIGHT = Integer.getInteger("upscaler.rt.maxInflightSections", 192);
+    private static int maxInflight() {
+        return UpscalerConfig.Rt.Terrain.MAX_INFLIGHT_SECTIONS.value();
+    }
+
     private static final int SECTION_ENTRY_BYTES = 40; // {u64 primAddr, u64 idxAddr, u64 uvAddr, u32 triBase[3], u32 waterGeom}
     // Sentinel for "this section has no water geometry": no gl_GeometryIndexEXT (0..2) can equal it.
     private static final int NO_WATER_GEOM = 0xFFFFFFFF;
@@ -97,8 +114,14 @@ public final class RtTerrain {
     // advances per composite; old TLAS/table/sections are freed this many frames after the swap.
     private static final int KEEP_FRAMES = 4;
     private static final long NO_TESS_TOKEN = Long.MIN_VALUE;
-    private static final int SECTION_TABLE_INITIAL_CAPACITY = Integer.getInteger("upscaler.rt.sectionTableInitialCapacity", 512);
-    private static final int REBASE_DISTANCE_BLOCKS = Integer.getInteger("upscaler.rt.rebaseDistanceBlocks", 128);
+
+    private static int sectionTableInitialCapacity() {
+        return UpscalerConfig.Rt.Terrain.SECTION_TABLE_INITIAL_CAPACITY.value();
+    }
+
+    private static int rebaseDistanceBlocks() {
+        return UpscalerConfig.Rt.Terrain.REBASE_DISTANCE_BLOCKS.value();
+    }
 
     private static final RtTerrain INSTANCE = new RtTerrain();
 
@@ -304,8 +327,9 @@ public final class RtTerrain {
         ClientChunkCache chunkSource = level.getChunkSource();
         int minSecY = level.getMinY() >> 4;
         int maxSecY = (level.getMinY() + level.getHeight() - 1) >> 4;
-        int loY = Math.max(minSecY, psy - VIEW_SECTIONS_V);
-        int hiY = Math.min(maxSecY, psy + VIEW_SECTIONS_V);
+        int viewSectionsV = viewSectionsV();
+        int loY = Math.max(minSecY, psy - viewSectionsV);
+        int hiY = Math.min(maxSecY, psy + viewSectionsV);
 
         List<SectionGeom> removed = this.removed;
         removed.clear();
@@ -326,9 +350,9 @@ public final class RtTerrain {
 
         // Tessellate + upload new sections (BLAS build deferred to rebuild's single batched submission).
         DispatchContext dispatch = null;
-        int dispatchCap = movedWindow ? ASYNC_DISPATCH_MOVING_PER_TICK : ASYNC_DISPATCH_PER_TICK;
-        int resultCap = movedWindow ? SECTION_RESULTS_MOVING_PER_TICK : SECTION_RESULTS_PER_TICK;
-        int dispatchSlots = Math.min(dispatchCap, Math.max(0, MAX_INFLIGHT - inFlight.size()));
+        int dispatchCap = movedWindow ? asyncDispatchMovingPerTick() : asyncDispatchPerTick();
+        int resultCap = movedWindow ? sectionResultsMovingPerTick() : sectionResultsPerTick();
+        int dispatchSlots = Math.min(dispatchCap, Math.max(0, maxInflight() - inFlight.size()));
         if (dispatchSlots > 0 && !reextract.isEmpty()) {
             dispatch = dispatchContext(level);
             dispatchSlots -= dispatchReextract(dispatch, chunkSource, dispatchSlots);
@@ -753,7 +777,7 @@ public final class RtTerrain {
      * Snapshot each missing section on the render thread and submit its tessellation to the worker
      * pool. The per-task meshing objects (renderer / captures / MutableBlockPos) are allocated inside the
      * job so nothing mutable is shared across threads; the captured {@code region}, model sets and block
-     * colors are read-only. Capped at {@link #ASYNC_DISPATCH_PER_TICK} dispatches per tick.
+     * colors are read-only. Capped by the configured dispatch budget.
      */
     private static DispatchContext dispatchContext(ClientLevel level) {
         Minecraft mc = Minecraft.getInstance();
@@ -858,7 +882,7 @@ public final class RtTerrain {
     }
 
     /**
-     * Upload finished worker meshes (up to {@link #SECTION_RESULTS_PER_TICK} per tick) on the
+     * Upload finished worker meshes (up to the configured result budget per tick) on the
      * render thread. A job whose token no longer matches {@link #inFlight} is stale — its section was
      * re-dirtied / unloaded / left the window since dispatch — and is dropped without uploading.
      */
@@ -986,9 +1010,9 @@ public final class RtTerrain {
 
     private boolean shouldRebase(int rbx, int rby, int rbz) {
         return !ready || sectionTable == null || staticInstances == null
-                || Math.abs(rbx - blockX) > REBASE_DISTANCE_BLOCKS
-                || Math.abs(rby - blockY) > REBASE_DISTANCE_BLOCKS
-                || Math.abs(rbz - blockZ) > REBASE_DISTANCE_BLOCKS;
+                || Math.abs(rbx - blockX) > rebaseDistanceBlocks()
+                || Math.abs(rby - blockY) > rebaseDistanceBlocks()
+                || Math.abs(rbz - blockZ) > rebaseDistanceBlocks();
     }
 
     private void applyBuildChanges(RtContext ctx, List<PreparedSection> prepared, List<SectionGeom> removed,
@@ -1075,7 +1099,7 @@ public final class RtTerrain {
     }
 
     private void ensureSectionTableCapacity(RtContext ctx, int minCapacity, long freeAt) {
-        int capacity = Math.max(SECTION_TABLE_INITIAL_CAPACITY, 1);
+        int capacity = sectionTableInitialCapacity();
         capacity = Math.max(capacity, sectionTableCapacity);
         while (capacity < minCapacity) {
             capacity <<= 1;
@@ -1456,7 +1480,7 @@ public final class RtTerrain {
             q.metal = RtMaterials.metalness(state);
             TextureAtlasSprite sprite = quad.materialInfo().sprite();
             q.sprite = sprite;
-            q.materialSprite = RtMaterials.ENABLED ? sprite : null;
+            q.materialSprite = RtMaterials.enabled() ? sprite : null;
         }
 
         /** Acquire a pooled PendingQuad for the current block (grown on demand, count reset by flushBlock). */

@@ -1,6 +1,7 @@
 package dev.upscaler.rt.entity;
 
 import com.mojang.blaze3d.vertex.PoseStack;
+import dev.upscaler.UpscalerConfig;
 import dev.upscaler.mixin.ParticleEngineAccessor;
 import dev.upscaler.mixin.ParticleGroupAccessor;
 import net.minecraft.client.Camera;
@@ -60,7 +61,10 @@ import java.util.Queue;
  */
 public final class RtEntities {
     public static final RtEntities INSTANCE = new RtEntities();
-    public static final boolean ENABLED = Boolean.parseBoolean(System.getProperty("upscaler.rt.entities", "true"));
+    public static boolean enabled() {
+        return UpscalerConfig.Rt.Entities.ENABLED.value();
+    }
+
     /** Custom-index flag bit (bit 23 of the 24-bit instanceCustomIndex) marking an entity instance. */
     public static final int ENTITY_BIT = 0x800000;
     /** Custom-index flag (bit 22) marking a particle billboard instance (shares the entity geom table). */
@@ -68,19 +72,40 @@ public final class RtEntities {
     /** TLAS instance mask for particles: bit 1 only, so the 0x01 secondary cull mask skips them — particles
      *  are seen by the primary (camera) ray only (no shadows / GI / reflections; the v1 scope). */
     private static final int PARTICLE_MASK = 0x02;
-    public static final boolean PARTICLES_ENABLED = Boolean.parseBoolean(System.getProperty("upscaler.rt.particles", "true"));
-    private static final int MAX_ENTITIES = Integer.getInteger("upscaler.rt.maxEntities", 1024);
-    private static final int ENTITY_LIST_CAPACITY = Math.max(16, MAX_ENTITIES);
-    private static final int ENTITY_BUFFER_LIST_CAPACITY = (int) Math.min(Integer.MAX_VALUE, (long) ENTITY_LIST_CAPACITY * 5L);
-    private static final int ENTITY_MAP_CAPACITY = (int) Math.min(Integer.MAX_VALUE, Math.max(16L, (long) MAX_ENTITIES * 2L));
+    public static boolean particlesEnabled() {
+        return UpscalerConfig.Rt.Entities.PARTICLES_ENABLED.value();
+    }
+
+    private static int maxEntities() {
+        return UpscalerConfig.Rt.Entities.MAX_ENTITIES.value();
+    }
+
+    private static int entityListCapacity() {
+        return UpscalerConfig.Rt.Entities.entityListCapacity();
+    }
+
+    private static int entityBufferListCapacity() {
+        return UpscalerConfig.Rt.Entities.entityBufferListCapacity();
+    }
+
+    private static int entityMapCapacity() {
+        return UpscalerConfig.Rt.Entities.entityMapCapacity();
+    }
+
     // Chunk radius around the player to scan for block entities (chests/signs/…) each frame.
-    private static final int BE_VIEW_CHUNKS = Integer.getInteger("upscaler.rt.beViewChunks", 8);
+    private static int beViewChunks() {
+        return UpscalerConfig.Rt.Entities.BE_VIEW_CHUNKS.value();
+    }
+
     // Block entities keep a cached mesh + BLAS keyed by BlockPos. Each frame the BE is re-meshed (cheap)
     // and its mesh hashed; the expensive BLAS is rebuilt ONLY when the mesh actually changed — so static
     // BEs cost no GPU work while animating ones (chest lid, spawner, …) rebuild every frame. New/changed
     // rebuilds are capped per frame so a burst of newly loaded chunks can't stall (over-budget BEs keep
     // their last geometry / pop in over later frames, like terrain's worker dispatch budget).
-    private static final int BE_BUILDS_PER_FRAME = Integer.getInteger("upscaler.rt.beBuildsPerFrame", 8);
+    private static int beBuildsPerFrame() {
+        return UpscalerConfig.Rt.Entities.BE_BUILDS_PER_FRAME.value();
+    }
+
     // Entity geometry table entry: {u64 primAddr, u64 idxAddr, u64 uvAddr, u64 dispAddr, vec4 rigidDisp}
     // = 48 bytes (std430 vec4 forces 16-align/48-size). dispAddr points at a per-vertex world-space
     // displacement buffer; when it is 0, rigidDisp.xyz carries whole-object motion (or zero).
@@ -93,13 +118,19 @@ public final class RtEntities {
     private static final int FRAME_LIST_RING = KEEP_FRAMES;
     // Refit (UPDATE-mode) BLAS: persistent per-entity AS, refit in place each frame (cheap) while
     // topology is stable, instead of a full BUILD. Block entities always use the pooled-BUILD path.
-    private static final boolean REFIT = Boolean.parseBoolean(System.getProperty("upscaler.rt.entityRefit", "true"));
+    private static boolean refit() {
+        return UpscalerConfig.Rt.Entities.REFIT.value();
+    }
+
     // Per-entity ring depth: a slot is reused every REFIT_RING frames, so it must be off all queues by
     // then. = KEEP_FRAMES (the established frames-in-flight-safe horizon). Each slot holds one persistent AS.
     private static final int REFIT_RING = KEEP_FRAMES;
     // Force a periodic full rebuild of a slot's AS to bound BVH-quality degradation from repeated refits
     // (an entity that deforms a lot would otherwise refit the same BVH topology forever). Per-slot count.
-    private static final int REFIT_REBUILD_INTERVAL = Integer.getInteger("upscaler.rt.refitRebuildInterval", 120);
+    private static int refitRebuildInterval() {
+        return UpscalerConfig.Rt.Entities.REFIT_REBUILD_INTERVAL.value();
+    }
+
     // Treat per-vertex displacements as rigid when every vertex agrees within this tolerance, avoiding a
     // transient disp buffer for plain whole-entity translation.
     private static final float RIGID_DISP_EPS = 1.0e-5f;
@@ -129,6 +160,7 @@ public final class RtEntities {
     }
 
     private RtBuffer[] tableRing;
+    private int tableCapacity;
     private int tableSlot;
 
     // Recycle per-frame entity mesh buffers + BLAS backing/scratch instead of alloc/free churning
@@ -139,8 +171,8 @@ public final class RtEntities {
     // Previous frame's captured (rebase-space) vertex positions + that frame's rebase origin, keyed by
     // entity id. Maps are swapped/reused each frame: entries not seen this frame fall out, while visible
     // entities keep their float[] backing to avoid steady-state allocation churn.
-    private Map<Integer, EntityPrev> prevVerts = new HashMap<>(ENTITY_MAP_CAPACITY);
-    private Map<Integer, EntityPrev> curVerts = new HashMap<>(ENTITY_MAP_CAPACITY);
+    private Map<Integer, EntityPrev> prevVerts = new HashMap<>(entityMapCapacity());
+    private Map<Integer, EntityPrev> curVerts = new HashMap<>(entityMapCapacity());
 
     /** Last frame's posed mesh for one entity: rebase-space vertex positions + the rebase origin they were
      *  captured against (needed to convert the inter-frame delta to world space when the rebase moved). */
@@ -221,7 +253,7 @@ public final class RtEntities {
     /** Read-only base terrain instances plus this frame's appended dynamic instances. */
     private static final class FrameInstanceList extends AbstractList<RtAccel.Instance> {
         private List<RtAccel.Instance> base = List.of();
-        private final ArrayList<RtAccel.Instance> dynamic = new ArrayList<>(ENTITY_LIST_CAPACITY);
+        private final ArrayList<RtAccel.Instance> dynamic = new ArrayList<>(entityListCapacity());
 
         void reset(List<RtAccel.Instance> base) {
             this.base = base;
@@ -255,10 +287,10 @@ public final class RtEntities {
     /** Reused per-frame lists; one slot is retired before it can be selected again. */
     private static final class FrameLists {
         final FrameInstanceList instances = new FrameInstanceList();
-        final ArrayList<RtAccel.PreparedBlas> blas = new ArrayList<>(ENTITY_LIST_CAPACITY);
-        final ArrayList<RtAccel.PreparedBlas> pooledBlas = new ArrayList<>(ENTITY_LIST_CAPACITY);
-        final ArrayList<RtBuffer> refitScratch = new ArrayList<>(ENTITY_LIST_CAPACITY);
-        final ArrayList<RtBuffer> buffers = new ArrayList<>(ENTITY_BUFFER_LIST_CAPACITY);
+        final ArrayList<RtAccel.PreparedBlas> blas = new ArrayList<>(entityListCapacity());
+        final ArrayList<RtAccel.PreparedBlas> pooledBlas = new ArrayList<>(entityListCapacity());
+        final ArrayList<RtBuffer> refitScratch = new ArrayList<>(entityListCapacity());
+        final ArrayList<RtBuffer> buffers = new ArrayList<>(entityBufferListCapacity());
 
         void reset(List<RtAccel.Instance> base) {
             instances.reset(base);
@@ -304,7 +336,7 @@ public final class RtEntities {
         }
 
         boolean full() {
-            return count >= MAX_ENTITIES;
+            return count >= maxEntities();
         }
     }
 
@@ -318,7 +350,7 @@ public final class RtEntities {
                                     double camX, double camY, double camZ, Matrix4f projection, Matrix4f viewRotation) {
         processDeferred();
         pool.maybeLogStats();
-        if (!ENABLED) {
+        if (!enabled()) {
             return new FrameEntities(base, List.of(), 0L);
         }
         Minecraft mc = Minecraft.getInstance();
@@ -491,7 +523,7 @@ public final class RtEntities {
      */
     private void captureParticles(RtContext ctx, FrameBuild build, Minecraft mc, float partial,
                                   int rbx, int rby, int rbz, Matrix4f projection, Matrix4f viewRotation) {
-        if (!PARTICLES_ENABLED || build.full()) {
+        if (!particlesEnabled() || build.full()) {
             particlePrev.clear();
             particleCur.clear();
             return;
@@ -620,8 +652,9 @@ public final class RtEntities {
         Vec3 cam = cameraState.pos;
         List<BeCandidate> candidates = beCandidates;
         candidates.clear();
-        for (int cx = pcx - BE_VIEW_CHUNKS; cx <= pcx + BE_VIEW_CHUNKS; cx++) {
-            for (int cz = pcz - BE_VIEW_CHUNKS; cz <= pcz + BE_VIEW_CHUNKS; cz++) {
+        int viewChunks = beViewChunks();
+        for (int cx = pcx - viewChunks; cx <= pcx + viewChunks; cx++) {
+            for (int cz = pcz - viewChunks; cz <= pcz + viewChunks; cz++) {
                 if (!level.getChunkSource().hasChunk(cx, cz) || !(level.getChunk(cx, cz) instanceof LevelChunk chunk)) {
                     continue;
                 }
@@ -682,7 +715,7 @@ public final class RtEntities {
         if (entry == null || entry.meshHash != hash) {
             // Geometry changed (or new BE) → rebuild, but only within this frame's budget. Over budget: keep
             // showing the previous geometry; a brand-new BE simply pops in over the next frames.
-            if (beBuildsThisFrame >= BE_BUILDS_PER_FRAME) {
+            if (beBuildsThisFrame >= beBuildsPerFrame()) {
                 if (entry != null) {
                     emitBe(ctx, build, entry, null, rbx, rby, rbz); // over budget: keep last geometry, no MV
                 }
@@ -873,7 +906,7 @@ public final class RtEntities {
 
         // Non-opaque so world.rahit alpha-tests the texture (cutout). Opaque texels pass to the chit.
         RtAccel accel;
-        if (REFIT && entityId >= 0) {
+        if (refit() && entityId >= 0) {
             accel = refitOrBuild(ctx, build, entityId, positions, indices, vertCount, idxCount, label);
         } else {
             RtAccel.PreparedBlas blas = RtAccel.prepareTrianglesBlasPooled(ctx, pool, positions, vertCount, indices, idxCount, false,
@@ -936,7 +969,7 @@ public final class RtEntities {
         EntitySlot slot = ea.ring[s];
         boolean canUpdate = slot != null && slot.accel != null
                 && slot.vertCount == vertCount && slot.triCount == triCount
-                && slot.updatesSinceBuild < REFIT_REBUILD_INTERVAL;
+                && slot.updatesSinceBuild < refitRebuildInterval();
         if (canUpdate) {
             RtBuffer scratch = pool.acquire(ctx, slot.updateScratchSize, storage, false, label + " refit scratch");
             build.blas.add(RtAccel.refitUpdate(slot.accel, scratch, positions.deviceAddress, indices.deviceAddress, vertCount, idxCount, false,
@@ -1007,15 +1040,27 @@ public final class RtEntities {
     }
 
     private void ensureResources(RtContext ctx) {
-        if (tableRing != null) {
+        int requiredCapacity = maxEntities();
+        if (tableRing != null && tableCapacity >= requiredCapacity) {
             return;
+        }
+        if (tableRing != null) {
+            RtBuffer[] oldRing = tableRing;
+            deferred.add(new Deferred(RtComposite.frameCounter() + KEEP_FRAMES, () -> {
+                for (RtBuffer b : oldRing) {
+                    b.destroy();
+                }
+            }));
+            tableRing = null;
+            tableCapacity = 0;
         }
         int storage = org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
         tableRing = new RtBuffer[TABLE_RING];
         for (int i = 0; i < TABLE_RING; i++) {
-            tableRing[i] = ctx.createBuffer((long) MAX_ENTITIES * TABLE_ENTRY_BYTES, storage, true,
+            tableRing[i] = ctx.createBuffer((long) requiredCapacity * TABLE_ENTRY_BYTES, storage, true,
                     "entity geometry table ring " + i);
         }
+        tableCapacity = requiredCapacity;
     }
 
     private void processDeferred() {
@@ -1065,6 +1110,7 @@ public final class RtEntities {
                 b.destroy();
             }
             tableRing = null;
+            tableCapacity = 0;
         }
         prevVerts.clear();
     }

@@ -1,6 +1,7 @@
 package dev.upscaler.client;
 
 import com.mojang.blaze3d.pipeline.RenderTarget;
+import dev.upscaler.UpscalerConfig;
 import dev.upscaler.UpscalerMod;
 import dev.upscaler.rt.RtComposite;
 import dev.upscaler.rt.RtContext;
@@ -8,9 +9,6 @@ import dev.upscaler.rt.terrain.RtTerrain;
 
 public final class VanillaRenderController {
 	public static final VanillaRenderController INSTANCE = new VanillaRenderController();
-
-	private static final boolean CANCEL_WORLD = Boolean.parseBoolean(System.getProperty("upscaler.rt.cancelVanillaWorld", "false"));
-	private static final boolean LOG = Boolean.parseBoolean(System.getProperty("upscaler.rt.cancelVanillaWorld.log", "true"));
 
 	public enum OutputMode {
 		RT,
@@ -50,19 +48,19 @@ public final class VanillaRenderController {
 		this.inactiveReason = null;
 		this.outputMode = currentOutputMode();
 
-		if (LOG && this.outputMode != this.lastLoggedOutputMode) {
+		if (logEnabled() && this.outputMode != this.lastLoggedOutputMode) {
 			this.lastLoggedOutputMode = this.outputMode;
 			UpscalerMod.LOGGER.info("RT output mode: {}", this.outputMode == OutputMode.RT ? "rt" : "vanilla");
 		}
 
-		if (!CANCEL_WORLD || this.outputMode == OutputMode.VANILLA) {
+		if (!cancelWorld() || this.outputMode == OutputMode.VANILLA) {
 			return;
 		}
 
 		this.inactiveReason = findInactiveReason(mainTarget);
 		this.baseReady = this.inactiveReason == null;
 		if (this.baseReady) {
-			if (LOG && !this.loggedActive) {
+			if (logEnabled() && !this.loggedActive) {
 				this.loggedActive = true;
 				UpscalerMod.LOGGER.info("Vanilla world rendering cancellation active; using existing RT composite seam");
 			}
@@ -80,7 +78,7 @@ public final class VanillaRenderController {
 	}
 
 	public boolean shouldCancelLevelRenderer(boolean waitingForRtPlayerSection) {
-		if (!CANCEL_WORLD) {
+		if (!cancelWorld()) {
 			return false;
 		}
 		if (this.outputMode == OutputMode.VANILLA) {
@@ -97,7 +95,7 @@ public final class VanillaRenderController {
 			logInactive("level projection was not captured");
 			return false;
 		}
-		if (waitingForRtPlayerSection && LOG && !this.loggedWaitingForRtPlayerSection) {
+		if (waitingForRtPlayerSection && logEnabled() && !this.loggedWaitingForRtPlayerSection) {
 			this.loggedWaitingForRtPlayerSection = true;
 			UpscalerMod.LOGGER.info("Keeping vanilla LevelRenderer canceled while waiting for RT player section residency");
 		}
@@ -105,7 +103,7 @@ public final class VanillaRenderController {
 	}
 
 	public void markRtPlayerSectionReady() {
-		if (LOG && !this.loggedRtPlayerSectionReady) {
+		if (logEnabled() && !this.loggedRtPlayerSectionReady) {
 			this.loggedRtPlayerSectionReady = true;
 			UpscalerMod.LOGGER.info("Satisfied vanilla terrain-load callback from RT player section residency");
 		}
@@ -120,7 +118,7 @@ public final class VanillaRenderController {
 	}
 
 	public boolean shouldCompositeRt() {
-		return this.outputMode == OutputMode.RT && RtComposite.ENABLED;
+		return this.outputMode == OutputMode.RT && RtComposite.enabled();
 	}
 
 	/**
@@ -128,7 +126,7 @@ public final class VanillaRenderController {
 	 * separately by {@code upscaler.rt}, so VANILLA can be flipped back to RT later.
 	 */
 	public static boolean rtRuntimeWorkRequested() {
-		return currentOutputMode() == OutputMode.RT && RtComposite.ENABLED;
+		return currentOutputMode() == OutputMode.RT && RtComposite.enabled();
 	}
 
 	public static OutputMode currentOutputMode() {
@@ -166,7 +164,7 @@ public final class VanillaRenderController {
 		if (this.failureLatched || RtComposite.INSTANCE.hasFailed()) {
 			return "RT composite failure latch is set";
 		}
-		if (!RtComposite.ENABLED) {
+		if (!RtComposite.enabled()) {
 			return "upscaler.rt.composite is false";
 		}
 		if (RtContext.currentOrNull() == null) {
@@ -182,7 +180,7 @@ public final class VanillaRenderController {
 	}
 
 	private void latchFailure(String reason) {
-		if (!this.failureLatched && LOG) {
+		if (!this.failureLatched && logEnabled()) {
 			UpscalerMod.LOGGER.warn("Disabling vanilla world cancellation: {}", reason);
 		}
 		this.failureLatched = true;
@@ -191,7 +189,7 @@ public final class VanillaRenderController {
 	}
 
 	private void logInactive(String reason) {
-		if (!LOG || reason == null || reason.equals(this.lastLoggedInactiveReason)) {
+		if (!logEnabled() || reason == null || reason.equals(this.lastLoggedInactiveReason)) {
 			return;
 		}
 		UpscalerMod.LOGGER.info("Vanilla world cancellation inactive: {}", reason);
@@ -199,6 +197,14 @@ public final class VanillaRenderController {
 	}
 
 	private static OutputMode readOutputMode() {
-		return OutputMode.parse(System.getProperty("upscaler.rt.output", "rt"));
+		return OutputMode.parse(UpscalerConfig.Rt.OUTPUT_MODE.get());
+	}
+
+	private static boolean cancelWorld() {
+		return UpscalerConfig.Rt.CANCEL_VANILLA_WORLD.value();
+	}
+
+	private static boolean logEnabled() {
+		return UpscalerConfig.Rt.CANCEL_VANILLA_WORLD_LOG.value();
 	}
 }
