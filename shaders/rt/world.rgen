@@ -422,15 +422,16 @@ vec2 specularReflectionMotion(vec3 surfacePos, vec3 primaryDir, vec2 currentNdc,
 }
 
 // One-interface refraction for the water guide buffers: trace the refracted ray from the surface into
-// (or out of) the water and report the hit it lands on. The MV then tracks this hit as its own feature
-// (its reprojection delta), and depth uses its distance — so refracted floor content stops ghosting.
-// `refracted` is false on total internal reflection (no refracted hit exists); a sky miss returns a far
-// point along the refracted direction, which the self-delta MV handles uniformly.
+// (or out of) the water and report the content it lands on. Diffuse albedo and MV then track that hit as
+// its own feature, while depth/specular stay on the water surface. `refracted` is false on total internal
+// reflection (no refracted hit exists); a sky miss returns a far point along the refracted direction,
+// which the self-delta MV handles uniformly.
 void refractedGuideHit(vec3 surfacePos, vec3 incidentDir, vec3 surfaceNormal, bool inWaterAtSurface,
-                       out vec3 hitCamRel, out vec3 motionPrev, out bool refracted) {
+                       out vec3 hitCamRel, out vec3 motionPrev, out bool refracted, out vec3 diffuseAlbedo) {
     hitCamRel = surfacePos - pc.camOffset;
     motionPrev = vec3(0.0);
     refracted = false;
+    diffuseAlbedo = vec3(0.0);
 
     float etaI = inWaterAtSurface ? WATER_IOR : 1.0;
     float etaT = inWaterAtSurface ? 1.0 : WATER_IOR;
@@ -448,12 +449,17 @@ void refractedGuideHit(vec3 surfacePos, vec3 incidentDir, vec3 surfaceNormal, bo
     if (payload.hitT < 0.0) {
         hitCamRel = (ro + refractedDir * 1.0e6) - pc.camOffset; // sky through the surface, at infinity
         motionPrev = vec3(0.0);
+        diffuseAlbedo = vec3(0.5); // sky guide: keep radiance out of the demodulation albedo
         return;
     }
 
     vec3 hitPos = ro + refractedDir * payload.hitT;
     hitCamRel = hitPos - pc.camOffset;
     motionPrev = (payload.material <= 0.5 || payload.material > 1.5) ? payload.motionPrev : vec3(0.0);
+    if (payload.material <= 0.5) {
+        bool pbr = (pc.flags & 2u) != 0u;
+        diffuseAlbedo = pbr ? payload.albedo * (1.0 - clamp(payload.metalness, 0.0, 1.0)) : payload.albedo;
+    }
 }
 
 // One Monte Carlo path from (ro, rd). Returns accumulated radiance along the path.
@@ -550,18 +556,16 @@ vec3 tracePath(vec3 ro, vec3 rd, inout uint seed) {
             waterExt = waterExtinction(payload.albedo);
             float cosI = clamp(dot(-rd, n), 0.0, 1.0);
             if (bounce == 0) { // primary water hit: feed RR a smooth dielectric specular surface
-                // P6.1: no diffuse albedo (clear water), low roughness, and side-aware specular albedo.
-                // Underwater water-air hits can be total internal reflection, so this guide uses the same
-                // dielectric Fresnel orientation as the path instead of a fixed air-side F0 approximation.
                 gv_normal = n;
-                gv_albedo = vec3(0.0);
                 gv_rough = WATER_GUIDE_ROUGH;
                 gv_specAlb = rrWaterSpecularAlbedo(cosI, gv_rough, inWater);
                 gv_hitCamRel = hitPos - pc.camOffset; // depth + reflection start at the water surface
-                // MV tracks the refracted hit (floor seen through the surface) so refracted content
-                // stops ghosting; depth stays on the surface.
+                // Diffuse albedo + MV track the refracted hit (floor/shore seen through the surface) so
+                // refracted content stops ghosting; depth/specular stay on the water surface.
+                vec3 refractedAlbedo;
                 refractedGuideHit(hitPos, rd, n, inWater, gv_motionHitCamRel, gv_motionObjDisp,
-                        gv_motionUseRefracted);
+                        gv_motionUseRefracted, refractedAlbedo);
+                gv_albedo = refractedAlbedo;
             }
             float etaI = inWater ? WATER_IOR : 1.0;
             float etaT = inWater ? 1.0 : WATER_IOR;
