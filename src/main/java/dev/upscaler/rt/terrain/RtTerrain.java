@@ -600,8 +600,10 @@ public final class RtTerrain {
         if (mesh.isEmpty()) {
             return new CpuSection(null, null);
         }
+        Geom cutout = mesh.cutoutOrEmpty();
         RtAccel.OpacityMicromapInput ommInput =
-                RtTerrainOmm.buildInput(mesh.cutout.triCount(), mesh.cutout.cornerUv.elements(), mesh.cutout.ommSprites);
+                RtTerrainOmm.buildInput(cutout.triCount(), cutout.cornerUv.elements(),
+                        cutout.ommSprites.elements(), cutout.ommSprites.size());
         return new CpuSection(packSection(mesh), ommInput);
     }
 
@@ -633,23 +635,26 @@ public final class RtTerrain {
             }
             int vertSize = geom.verts.size();
             System.arraycopy(geom.verts.elements(), 0, positions, posOff, vertSize);
+            int idxSize = geom.idx.size();
             int[] gi = geom.idx.elements();
-            for (int i = 0, n = geom.idx.size(); i < n; i++) {
-                indices[idxOff + i] = gi[i] + vertBase;
+            if (vertBase == 0) {
+                System.arraycopy(gi, 0, indices, idxOff, idxSize);
+            } else {
+                for (int i = 0; i < idxSize; i++) {
+                    indices[idxOff + i] = gi[i] + vertBase;
+                }
             }
             int uvSize = geom.cornerUv.size();
             System.arraycopy(geom.cornerUv.elements(), 0, uvs, uvOff, uvSize);
             int matSize = geom.prim.size();
             System.arraycopy(geom.prim.elements(), 0, material, matOff, matSize);
-            for (int i = 0, n = geom.materialSprites.size(); i < n; i++) {
-                materialSprites[spriteOff + i] = geom.materialSprites.get(i);
-            }
+            geom.materialSprites.copyInto(materialSprites, spriteOff);
             triBase[g] = triAcc;
             if (b == RtAccel.BUCKET_WATER) {
                 waterGeom = g;
             }
             posOff += vertSize;
-            idxOff += geom.idx.size();
+            idxOff += idxSize;
             uvOff += uvSize;
             matOff += matSize;
             spriteOff += bucketTris[b];
@@ -878,7 +883,26 @@ public final class RtTerrain {
         });
         job.future = future;
         inFlight.put(key, token);
+        addJob(job);
+    }
+
+    private void addJob(TessJob job) {
+        job.jobIndex = jobs.size();
         jobs.add(job);
+    }
+
+    private void removeJob(TessJob job) {
+        int index = job.jobIndex;
+        if (index < 0 || index >= jobs.size() || jobs.get(index) != job) {
+            return; // already canceled/removed; stale completed result
+        }
+        int lastIndex = jobs.size() - 1;
+        TessJob last = jobs.remove(lastIndex);
+        if (index != lastIndex) {
+            jobs.set(index, last);
+            last.jobIndex = index;
+        }
+        job.jobIndex = -1;
     }
 
     /**
@@ -895,7 +919,7 @@ public final class RtTerrain {
                 break;
             }
             TessJob job = result.job();
-            jobs.remove(job);
+            removeJob(job);
             if (result.failure() != null) {
                 inFlight.remove(job.key);
                 if (!loggedTessFailure) {
@@ -961,6 +985,7 @@ public final class RtTerrain {
         final int soy;
         final int soz;
         Future<?> future;
+        int jobIndex = -1;
 
         TessJob(long key, long token, int sox, int soy, int soz) {
             this.key = key;
@@ -1207,6 +1232,7 @@ public final class RtTerrain {
             if (job.future != null) {
                 job.future.cancel(true);
             }
+            job.jobIndex = -1;
         }
         jobs.clear();
         completedJobs.clear();
@@ -1372,39 +1398,113 @@ public final class RtTerrain {
      * triangles occupy a contiguous range (see {@link RtAccel#prepareTerrainBlas} + the section table).
      */
     private static final class SectionMesh {
+        // Conservative worker-side starting capacities. These trade a little transient RAM for avoiding the
+        // repeated grow/copy ladder on normal terrain sections.
+        private static final int OPAQUE_TRI_CAP = 768;
+        private static final int CUTOUT_TRI_CAP = 256;
+        private static final int WATER_TRI_CAP = 128;
         // One bucket per RtAccel terrain geometry, in BUCKET_SOLID / BUCKET_CUTOUT / BUCKET_WATER order.
         // solid = opaque (any-hit skipped); cutout = alpha-tested foliage/glass; water = shadow passthrough
         // only (no alpha test — the any-hit classifies it by geometry index, no memory load).
-        final Geom opaque = new Geom();
-        final Geom cutout = new Geom();
-        final Geom water = new Geom();
+        private static final Geom EMPTY_GEOM = new Geom(0);
+        Geom opaque;
+        Geom cutout;
+        Geom water;
+        private final Geom[] buckets = new Geom[RtAccel.TERRAIN_BUCKETS];
 
         Geom[] buckets() {
-            return new Geom[]{opaque, cutout, water}; // index == RtAccel.BUCKET_*
+            buckets[RtAccel.BUCKET_SOLID] = geomOrEmpty(opaque);
+            buckets[RtAccel.BUCKET_CUTOUT] = geomOrEmpty(cutout);
+            buckets[RtAccel.BUCKET_WATER] = geomOrEmpty(water);
+            return buckets;
+        }
+
+        Geom cutoutOrEmpty() {
+            return geomOrEmpty(cutout);
+        }
+
+        Geom opaque() {
+            return opaque != null ? opaque : (opaque = new Geom(OPAQUE_TRI_CAP));
+        }
+
+        Geom cutout() {
+            return cutout != null ? cutout : (cutout = new Geom(CUTOUT_TRI_CAP));
+        }
+
+        Geom water() {
+            return water != null ? water : (water = new Geom(WATER_TRI_CAP));
+        }
+
+        private static Geom geomOrEmpty(Geom geom) {
+            return geom != null ? geom : EMPTY_GEOM;
         }
 
         boolean isEmpty() {
-            return opaque.idx.isEmpty() && cutout.idx.isEmpty() && water.idx.isEmpty();
+            return (opaque == null || opaque.idx.isEmpty())
+                    && (cutout == null || cutout.idx.isEmpty())
+                    && (water == null || water.idx.isEmpty());
         }
     }
 
     /** One geometry bucket's packed, section-local mesh data. */
     private static final class Geom {
-        final FloatArrayList verts = new FloatArrayList();
-        final IntArrayList idx = new IntArrayList();
+        final FloatArrayList verts;
+        final IntArrayList idx;
         // Lever B: per-triangle corner UVs in primitive order — 6 floats/triangle (3 corners x u,v),
         // aligned with `idx`'s triangle order so the hit shader reads cornerUv[3*pid + k] directly with no
         // index->vertex-UV gather. The index buffer is still emitted (above) for the BLAS build.
-        final FloatArrayList cornerUv = new FloatArrayList();
-        final FloatArrayList prim = new FloatArrayList();   // 12 floats/triangle: normal.xyz+emission, tint.rgb+material, mat.{rough,metal,hasS,hasN}
+        final FloatArrayList cornerUv;
+        final FloatArrayList prim;   // 12 floats/triangle: normal.xyz+emission, tint.rgb+material, mat.{rough,metal,hasS,hasN}
         // One sprite per prim record (per triangle), aligned with `prim`. Resolved on the render thread
         // because RtBlockMaterials.ensure can lazy-load material maps.
-        final List<TextureAtlasSprite> materialSprites = new ArrayList<>();
+        final SpriteList materialSprites;
         // One sprite per triangle for opacity micromap classification.
-        final List<TextureAtlasSprite> ommSprites = new ArrayList<>();
+        final SpriteList ommSprites;
+
+        Geom(int triCapacity) {
+            int cap = Math.max(2, triCapacity);
+            int quadCapacity = (cap + 1) >>> 1;
+            verts = new FloatArrayList(quadCapacity * 12); // 4 xyz vertices per quad
+            idx = new IntArrayList(cap * 3);
+            cornerUv = new FloatArrayList(cap * 6);
+            prim = new FloatArrayList(cap * 12);
+            materialSprites = new SpriteList(cap);
+            ommSprites = new SpriteList(cap);
+        }
 
         int triCount() {
             return idx.size() / 3;
+        }
+    }
+
+    /** Minimal growable sprite array for the worker path; avoids ArrayList object churn and per-copy gets. */
+    private static final class SpriteList {
+        private TextureAtlasSprite[] elements;
+        private int size;
+
+        SpriteList(int capacity) {
+            elements = new TextureAtlasSprite[Math.max(2, capacity)];
+        }
+
+        void add(TextureAtlasSprite sprite) {
+            if (size == elements.length) {
+                TextureAtlasSprite[] grown = new TextureAtlasSprite[elements.length + (elements.length >>> 1)];
+                System.arraycopy(elements, 0, grown, 0, elements.length);
+                elements = grown;
+            }
+            elements[size++] = sprite;
+        }
+
+        TextureAtlasSprite[] elements() {
+            return elements;
+        }
+
+        int size() {
+            return size;
+        }
+
+        void copyInto(TextureAtlasSprite[] dst, int offset) {
+            System.arraycopy(elements, 0, dst, offset, size);
         }
     }
 
@@ -1430,7 +1530,7 @@ public final class RtTerrain {
         private static final float TRANSLUCENT_INSET = 2.0e-4f; // inward recess (blocks) for glass/ice vs coplanar neighbours
         private static final float COINCIDENT_EPS = 1.0e-4f; // verts this close are "the same" point
         private static final int RESOLVE_CAP = 128;          // skip the O(n^2) resolve for pathological blocks
-        private final List<PendingQuad> pending = new ArrayList<>();
+        private final List<PendingQuad> pending = new ArrayList<>(8);
         private int pendingCount;
         private int[] gidScratch = new int[0];
 
@@ -1602,7 +1702,7 @@ public final class RtTerrain {
             if (q.translucent) {
                 offset(q, -TRANSLUCENT_INSET);
             }
-            Geom g = q.cutout ? cur.cutout : cur.opaque;
+            Geom g = q.cutout ? cur.cutout() : cur.opaque();
             int base = g.verts.size() / 3;
             for (int k = 0; k < 4; k++) {
                 g.verts.add(q.x[k]);
@@ -1718,7 +1818,7 @@ public final class RtTerrain {
             // Water gets its own geometry → water bucket: its any-hit only passes shadow rays through (the
             // closest-hit does the dielectric), classified by geometry index with no memory load. Lava is an
             // opaque emitter → opaque bucket (no any-hit at all).
-            Geom g = water ? cur.water : cur.opaque;
+            Geom g = water ? cur.water() : cur.opaque();
             FloatArrayList verts = g.verts;
             IntArrayList idx = g.idx;
             int base = verts.size() / 3;

@@ -9,7 +9,6 @@ import net.minecraft.client.renderer.texture.SpriteContents;
 import net.minecraft.client.renderer.texture.TextureAtlasSprite;
 import net.minecraft.util.ARGB;
 
-import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
@@ -77,15 +76,16 @@ final class RtTerrainOmm {
      *
      * @param triCount   number of triangles ({@code idx.size() / 3})
      * @param cornerUv   per-triangle corner UVs in primitive order (6 floats/triangle)
-     * @param ommSprites one sprite per triangle (null = unknown/fluid, uses UNKNOWN_OPAQUE)
+     * @param ommSprites one sprite per triangle (null = unknown/fluid, uses UNKNOWN_OPAQUE), valid up to
+     *                   {@code ommSpriteCount}
      */
     static RtAccel.OpacityMicromapInput buildInput(int triCount, float[] cornerUv,
-                                                   List<TextureAtlasSprite> ommSprites) {
+                                                   TextureAtlasSprite[] ommSprites, int ommSpriteCount) {
         if (!RtDeviceBringup.ommEnabled()) {
             recordOmmStatsDisabled();
             return null;
         }
-        if (triCount == 0 || ommSprites.size() != triCount) {
+        if (triCount == 0 || ommSpriteCount != triCount) {
             recordOmmStats(triCount, 0, 0, 0, 0, 0, 0, 0, 0, 0, false);
             return null;
         }
@@ -103,7 +103,7 @@ final class RtTerrainOmm {
         int animatedTris = 0;
         int nullSpriteTris = 0;
         for (int t = 0; t < triCount; t++) {
-            TextureAtlasSprite sprite = ommSprites.get(t);
+            TextureAtlasSprite sprite = ommSprites[t];
             if (sprite == null) {
                 nullSpriteTris++;
                 nullSpriteMicroTriangles += microCount;

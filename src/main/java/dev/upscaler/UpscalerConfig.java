@@ -483,15 +483,15 @@ public final class UpscalerConfig {
         public static final class Terrain {
             public static final IntSetting VIEW_SECTIONS_V = intAtLeast("upscaler.rt.viewSectionsV", 6, 0);
             public static final IntSetting ASYNC_DISPATCH_PER_TICK =
-                    intAtLeast("upscaler.rt.asyncDispatchPerTick", 32, 0);
+                    intAtLeast("upscaler.rt.asyncDispatchPerTick", 64, 0);
             public static final IntSetting SECTION_RESULTS_PER_TICK =
-                    intAtLeast("upscaler.rt.sectionResultsPerTick", 32, 0);
+                    intAtLeast("upscaler.rt.sectionResultsPerTick", 64, 0);
             public static final IntSetting ASYNC_DISPATCH_MOVING_PER_TICK =
                     intAtLeast("upscaler.rt.asyncDispatchMovingPerTick",
-                            Math.min(ASYNC_DISPATCH_PER_TICK.value(), 16), 0);
+                            Math.min(ASYNC_DISPATCH_PER_TICK.value(), 24), 0);
             public static final IntSetting SECTION_RESULTS_MOVING_PER_TICK =
                     intAtLeast("upscaler.rt.sectionResultsMovingPerTick",
-                            Math.min(SECTION_RESULTS_PER_TICK.value(), 16), 0);
+                            Math.min(SECTION_RESULTS_PER_TICK.value(), 24), 0);
             public static final IntSetting MAX_INFLIGHT_SECTIONS =
                     intAtLeast("upscaler.rt.maxInflightSections", 192, 0);
             public static final IntSetting SECTION_TABLE_INITIAL_CAPACITY =
