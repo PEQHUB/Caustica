@@ -59,6 +59,9 @@ public final class RtUiOverlay {
     private static TextureTarget overlay;
     private static boolean usedThisFrame;
     private static boolean compositeFailed;
+    // The overlay is cleared once per frame, before the first thing that renders into it (the hand in HDR
+    // mode, otherwise the GUI). Reset at the start of GameRenderer.render via beginFrame().
+    private static boolean overlayClearedThisFrame;
 
     private RtUiOverlay() {
     }
@@ -113,15 +116,48 @@ public final class RtUiOverlay {
      * {@code GuiRendererMixin} redirect on the render thread.
      */
     public static RenderTarget beginAndRedirect(RenderTarget main) {
+        return prepare(main);
+    }
+
+    /** Reset the per-frame clear latch. Called at the start of {@code GameRenderer.render} (every frame). */
+    public static void beginFrame() {
+        overlayClearedThisFrame = false;
+    }
+
+    /**
+     * Ensure the overlay exists, sized to {@code main}, and cleared (transparent + depth 0.0) exactly once
+     * this frame, then mark it used. Both the hand redirect and the GUI redirect funnel through here so the
+     * overlay is cleared before the hand (which renders first) and not wiped before the GUI.
+     */
+    private static TextureTarget prepare(RenderTarget main) {
         TextureTarget target = ensureSized(main);
-        CommandEncoder enc = RenderSystem.getDevice().createCommandEncoder();
-        if (target.useDepth && target.getDepthTexture() != null) {
-            enc.clearColorAndDepthTextures(target.getColorTexture(), TRANSPARENT, target.getDepthTexture(), 0.0);
-        } else {
-            enc.clearColorTexture(target.getColorTexture(), TRANSPARENT);
+        if (!overlayClearedThisFrame) {
+            CommandEncoder enc = RenderSystem.getDevice().createCommandEncoder();
+            if (target.useDepth && target.getDepthTexture() != null) {
+                enc.clearColorAndDepthTextures(target.getColorTexture(), TRANSPARENT, target.getDepthTexture(), 0.0);
+            } else {
+                enc.clearColorTexture(target.getColorTexture(), TRANSPARENT);
+            }
+            overlayClearedThisFrame = true;
         }
         usedThisFrame = true;
         return target;
+    }
+
+    /**
+     * HDR mode: redirect the held-item/hand render output into the overlay (so it composites over the HDR
+     * world at paper white) via the render-system output overrides honoured by {@code PreparedRenderType}.
+     * Must be paired with {@link #endHandRedirect()}.
+     */
+    public static void beginHandRedirect(RenderTarget main) {
+        TextureTarget target = prepare(main);
+        RenderSystem.outputColorTextureOverride = target.getColorTextureView();
+        RenderSystem.outputDepthTextureOverride = target.getDepthTextureView();
+    }
+
+    public static void endHandRedirect() {
+        RenderSystem.outputColorTextureOverride = null;
+        RenderSystem.outputDepthTextureOverride = null;
     }
 
     /**

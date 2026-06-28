@@ -1,12 +1,17 @@
 package dev.upscaler.mixin;
 
+import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
+import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
 import com.mojang.blaze3d.pipeline.RenderTarget;
 import dev.upscaler.client.VanillaRenderController;
 import dev.upscaler.client.WorldRenderScaler;
 import dev.upscaler.rt.RtComposite;
+import dev.upscaler.rt.RtUiOverlay;
 import net.minecraft.client.DeltaTracker;
 import net.minecraft.client.renderer.GameRenderer;
+import net.minecraft.client.renderer.state.level.CameraRenderState;
 import org.joml.Matrix4f;
+import org.joml.Matrix4fc;
 import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
@@ -28,11 +33,40 @@ public abstract class GameRendererMixin {
 	@Final
 	private RenderTarget mainRenderTarget;
 
+	// Reset the UI overlay's per-frame clear latch at the very start of the frame (before the world, hand,
+	// or GUI render into it).
+	@Inject(method = "render(Lnet/minecraft/client/DeltaTracker;Z)V", at = @At("HEAD"))
+	private void upscaler$beginOverlayFrame(DeltaTracker deltaTracker, boolean advanceGameTime, CallbackInfo ci) {
+		RtUiOverlay.beginFrame();
+	}
+
 	@Inject(method = "render(Lnet/minecraft/client/DeltaTracker;Z)V",
 			at = @At(value = "INVOKE",
 					target = "Lnet/minecraft/client/renderer/GameRenderer;renderLevel(Lnet/minecraft/client/DeltaTracker;)V"))
 	private void upscaler$beginWorldScale(DeltaTracker deltaTracker, boolean advanceGameTime, CallbackInfo ci) {
 		WorldRenderScaler.INSTANCE.begin(this.mainRenderTarget);
+	}
+
+	// HDR mode: redirect the held-item/hand render into the UI overlay so it composites over the HDR world
+	// (at paper white) instead of the SDR main target that the HDR present bypasses. try/finally guarantees
+	// the output overrides are cleared even if the hand render throws (a leak would route everything after
+	// into the overlay). Non-HDR frames are untouched.
+	@WrapOperation(method = "renderLevel(Lnet/minecraft/client/DeltaTracker;)V",
+			at = @At(value = "INVOKE",
+					target = "Lnet/minecraft/client/renderer/GameRenderer;renderItemInHand(Lnet/minecraft/client/renderer/state/level/CameraRenderState;FLorg/joml/Matrix4fc;)V"))
+	private void upscaler$redirectHandToOverlay(GameRenderer self, CameraRenderState cameraState, float deltaPartialTick,
+			Matrix4fc modelViewMatrix, Operation<Void> original) {
+		boolean hdr = RtComposite.INSTANCE.isHdrPresentActive();
+		if (hdr) {
+			RtUiOverlay.beginHandRedirect(this.mainRenderTarget);
+		}
+		try {
+			original.call(self, cameraState, deltaPartialTick, modelViewMatrix);
+		} finally {
+			if (hdr) {
+				RtUiOverlay.endHandRedirect();
+			}
+		}
 	}
 
 	// Safety net only: the primary end-of-window is upscaler$endWorldScaleBeforeHand
