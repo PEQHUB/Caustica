@@ -89,7 +89,7 @@ public final class RtDlssRr {
      */
     public boolean evaluate(long cmd, RtImage color, RtImage depth, RtImage motion,
                             RtImage diffuseAlbedo, RtImage specularAlbedo, RtImage normals,
-                            RtImage specularMotion, RtImage specularHitDistance, RtImage out,
+                            RtImage specularMotion, RtImage out,
                             int renderWidth, int renderHeight, int displayWidth, int displayHeight,
                             float jitterX, float jitterY, Matrix4fc worldToView, Matrix4fc viewToClip) {
         if (!isReady()) {
@@ -115,7 +115,7 @@ public final class RtDlssRr {
                         specularAlbedo.view, specularAlbedo.image, VK10.VK_FORMAT_R16G16B16A16_SFLOAT,
                         normals.view, normals.image, VK10.VK_FORMAT_R16G16B16A16_SFLOAT,
                         specularMotion.view, specularMotion.image, VK10.VK_FORMAT_R16G16_SFLOAT,
-                        specularHitDistance.view, specularHitDistance.image, VK10.VK_FORMAT_R32_SFLOAT,
+                        0L, 0L, 0,
                         out.view, out.image, VK10.VK_FORMAT_R16G16B16A16_SFLOAT,
                         renderWidth, renderHeight, displayWidth, displayHeight,
                         // jitter in render pixels; MVs are already in render-pixel units, so MV scale = 1.

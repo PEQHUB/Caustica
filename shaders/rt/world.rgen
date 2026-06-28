@@ -37,8 +37,7 @@ layout(binding = 4, set = 0, rgba16f) uniform image2D gAlbedo; // rgb diffuse al
 layout(binding = 5, set = 0, r32f)    uniform image2D gDepth;  // r linear hit distance (<0 = sky)
 layout(binding = 6, set = 0, rg16f)   uniform image2D gMotion;    // xy screen-space motion (render pixels)
 layout(binding = 7, set = 0, rgba16f) uniform image2D gSpecAlbedo; // specular albedo (0 — diffuse-only)
-layout(binding = 8, set = 0, r32f)    uniform image2D gSpecHitDistance; // disabled RR input; debug only
-layout(binding = 9, set = 0, rg16f)   uniform image2D gSpecMotion; // reflection motion vectors for RR
+layout(binding = 8, set = 0, rg16f)   uniform image2D gSpecMotion; // reflection motion vectors for RR
 
 // P6.4: the per-frame push data moved out of inline push constants (the 256-byte block hit the 256-byte
 // NVIDIA push-constant ceiling) into a host-visible BDA buffer; only its 8-byte address is pushed. The
@@ -48,7 +47,7 @@ struct WorldPush {
     mat4 invViewProj;          // 0
     vec3 camOffset;            // 64
     uint64_t tableAddr;        // 80  closest-hit/any-hit section table (raygen ignores it)
-    uint debugView;            // 88  0=render,1=normals,2=albedo,3=depth,4=roughness,5=motion,6=specular,7=spec hit,8=spec motion
+    uint debugView;            // 88  0=render,1=normals,2=albedo,3=depth,4=roughness,5=motion,6=specular,7=spec motion
     uint frameIndex;           // 92  per-frame RNG variation for the denoiser's temporal reuse
     mat4 prevViewProj;         // 96  P4.0b motion vectors: previous-frame camera-relative view-projection
     vec3 camDelta;             // 160 curCam - prevCam
@@ -76,7 +75,6 @@ vec3 gv_normal;
 vec3 gv_albedo;
 vec3 gv_specAlb; // P6.1: specular albedo fed to DLSS-RR for specular demodulation (0 = pure diffuse).
 float gv_rough;
-float gv_specHitDistance;
 // Linear VIEW-SPACE depth (perpendicular distance from the camera plane), computed in main() from
 // gv_hitCamRel · camForward — this is what DLSS-RR's Depth_Type_Linear wants, not the slant ray
 // length. Always >= 0; sky resolves to a large far value (no negative sentinel).
@@ -365,17 +363,6 @@ vec3 visibility(vec3 origin, vec3 dir, float tmax) {
                 gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsSkipClosestHitShaderEXT,
                 CULL_SECONDARY, SBT_SHADOW, SBT_STRIDE_BUCKET, 1u, origin, RAY_TMIN, dir, tmax, 1);
     return shadowVis.a > 0.5 ? shadowVis.rgb : vec3(0.0);
-}
-
-float specularHitDistance(vec3 hitPos, vec3 primaryDir) {
-    if (length(gv_normal) < 0.5 || max(gv_specAlb.r, max(gv_specAlb.g, gv_specAlb.b)) <= 0.001 || gv_rough > 0.75) {
-        return 0.0;
-    }
-    vec3 specDir = reflect(primaryDir, gv_normal);
-    payload.hitT = -1.0;
-    traceRayEXT(topLevelAS, gl_RayFlagsNoneEXT, CULL_SECONDARY,
-                SBT_RADIANCE, SBT_STRIDE_BUCKET, 0u, hitPos + gv_normal * SURF_BIAS, RAY_TMIN, specDir, 10000.0, 0);
-    return payload.hitT > 0.0 ? payload.hitT : 0.0;
 }
 
 vec2 projectPrevNdc(vec3 worldPos) {
@@ -817,10 +804,6 @@ void main() {
     imageStore(gAlbedo, pix, vec4(gv_albedo, 1.0));
     imageStore(gDepth, pix, vec4(gv_depth, 0.0, 0.0, 0.0));
     imageStore(gSpecAlbedo, pix, vec4(gv_specAlb, 1.0)); // P6.1: specular albedo for RR demodulation
-    // Specular hit distance is intentionally disabled as a DLSS-RR input in favour of reflection MVs.
-    // Keep writing it only for debug view 7 so the old guide remains inspectable without its per-frame cost.
-    gv_specHitDistance = pc.debugView == 7u ? specularHitDistance(gv_hitCamRel + pc.camOffset, dir) : 0.0;
-    imageStore(gSpecHitDistance, pix, vec4(gv_specHitDistance, 0.0, 0.0, 0.0));
 
     // P4.0b motion vector: reproject this guide point through the previous frame's view-projection.
     // The primary ray was cast through the JITTERED ndc (jndc), so this hit's current screen position is
@@ -863,8 +846,6 @@ void main() {
         } else if (pc.debugView == 6u) {
             dbg = gv_specAlb;                       // specular albedo
         } else if (pc.debugView == 7u) {
-            dbg = vec3(min(gv_specHitDistance / 64.0, 1.0)); // reflection hit distance
-        } else if (pc.debugView == 8u) {
             dbg = vec3(clamp(0.5 + specMotion * 0.05, 0.0, 1.0), 0.5); // reflection motion
         } else {
             dbg = vec3(clamp(0.5 + motion * 0.05, 0.0, 1.0), 0.5); // motion: red=+x, green=+y

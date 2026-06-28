@@ -85,7 +85,7 @@ public final class RtComposite {
     // + sky rewrite: moonDir+moonPhase(@256) + celestialAxis+starAngle(@272) + sunUv(@288) + moonUv(@304)
     // + W1/W2 water: waterParams(@320) xyz=camera-biome tint, w=wave time; waterAnchor(@336) xy=wave anchor
     private static final int WORLD_PUSH_SIZE = 352;
-    private static final int GUIDE_COUNT = 7; // RR guide buffers bound at world-pipeline bindings 3..9
+    private static final int GUIDE_COUNT = 6; // RR guide buffers bound at world-pipeline bindings 3..8
     // Frames a retired per-frame TLAS must outlive before it's freed (> frames-in-flight); matches
     // RtTerrain's deferred-free horizon. The frame TLAS is built + traced this frame, then freed once
     // the composite frame counter has advanced this far past it (so no in-flight frame still reads it).
@@ -189,13 +189,12 @@ public final class RtComposite {
     private RtHdrCompositePipeline hdrCompositePipeline;
     private long hdrUiSampler;
     // Guide buffers (first-hit attributes for DLSS-RR): normal+roughness, albedo, depth, motion,
-    // specular albedo, disabled specular hit distance, and reflection motion.
+    // specular albedo, and reflection motion.
     private RtImage gNormal;
     private RtImage gAlbedo;
     private RtImage gDepth;
     private RtImage gMotion;
     private RtImage gSpecAlbedo;
-    private RtImage gSpecHitDistance;
     private RtImage gSpecMotion;
     // Display-res RT image the display mapper reads: DLSS-RR writes it (render -> display denoise+upscale), or a
     // linear blit of `output` fills it when RR is off/unavailable (the no-RR reference / fallback).
@@ -392,7 +391,7 @@ public final class RtComposite {
 
     /**
      * Resolve + bind every world-pipeline texture: the block atlas (binding 2 + bindless fallback slot 0)
-     * and the LabPBR {@code _s}/{@code _n} parallel atlases (bindings 8/9). Shared by first creation and
+     * and the LabPBR {@code _s}/{@code _n} parallel atlases (bindings 9/10). Shared by first creation and
      * the post-reload rebind. Resets the entity bindless registry and recreates the {@code _s}/{@code _n}
      * atlases at the current block-atlas size, then re-extracts all terrain ({@link RtTerrain#markAllDirty})
      * so per-prim material flags are recomputed against the (re)built atlases. On first creation this runs
@@ -410,7 +409,7 @@ public final class RtComposite {
         worldPipeline.setBindlessTexture(0, 0, atlasView, sampler); // binding 0 (albedo), slot 0 fallback
         // LabPBR _s + _n parallel atlases. Bind the (block-atlas-sized) atlases; their pixels fill
         // lazily as terrain extraction encounters sprites and refresh via flush(). Fall back to the block
-        // atlas view if an atlas didn't initialize so bindings 8/9 always hold a valid descriptor —
+        // atlas view if an atlas didn't initialize so bindings 9/10 always hold a valid descriptor —
         // the shader only samples them when a prim is flagged (mat.z/mat.w), so the fallback is never read.
         if (worldPipeline.hasBlockMaterialAtlases()) {
             if (RtMaterials.enabled()) {
@@ -498,8 +497,7 @@ public final class RtComposite {
         worldPipeline.setExtraStorageImage(2, gDepth.view);
         worldPipeline.setExtraStorageImage(3, gMotion.view);
         worldPipeline.setExtraStorageImage(4, gSpecAlbedo.view);
-        worldPipeline.setExtraStorageImage(5, gSpecHitDistance.view);
-        worldPipeline.setExtraStorageImage(6, gSpecMotion.view);
+        worldPipeline.setExtraStorageImage(5, gSpecMotion.view);
     }
 
     private void destroyGuideImages() {
@@ -522,10 +520,6 @@ public final class RtComposite {
         if (gSpecAlbedo != null) {
             gSpecAlbedo.destroy();
             gSpecAlbedo = null;
-        }
-        if (gSpecHitDistance != null) {
-            gSpecHitDistance.destroy();
-            gSpecHitDistance = null;
         }
         if (gSpecMotion != null) {
             gSpecMotion.destroy();
@@ -575,7 +569,6 @@ public final class RtComposite {
         gDepth = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R32_SFLOAT, "guide linear depth " + renderW + "x" + renderH);
         gMotion = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R16G16_SFLOAT, "guide motion " + renderW + "x" + renderH);
         gSpecAlbedo = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "guide specular albedo " + renderW + "x" + renderH);
-        gSpecHitDistance = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R32_SFLOAT, "guide specular hit distance " + renderW + "x" + renderH);
         gSpecMotion = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R16G16_SFLOAT, "guide specular motion " + renderW + "x" + renderH);
         // Display-res RT image the display mapper reads. Always present (DLSS-RR target, or blit-upscale fallback).
         rrOutput = ctx.createStorageImage(width, height, VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "DLSS-RR output " + width + "x" + height);
@@ -738,7 +731,7 @@ public final class RtComposite {
                 // -J). The shader push above uses +jitter; report -jitter here.
                 try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "DLSS-RR evaluate")) {
                     rrDone = RtDlssRr.INSTANCE.evaluate(cmd.address(), output, gDepth, gMotion, gAlbedo,
-                            gSpecAlbedo, gNormal, gSpecMotion, gSpecHitDistance, rrOutput, renderW, renderH, displayW, displayH,
+                            gSpecAlbedo, gNormal, gSpecMotion, rrOutput, renderW, renderH, displayW, displayH,
                             -jitterX, -jitterY, frameViewRotation, frameProjection);
                 }
             }

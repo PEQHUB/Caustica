@@ -39,7 +39,7 @@ layout(push_constant) uniform PushAddr { uint64_t worldPushAddr; } pcAddr;
 
 // Vanilla celestials atlas (sun + moon-phase sprites), bound by RtComposite. Sampled with an explicit
 // LOD (no derivatives in a miss shader). The sun/moon discs are drawn from its real texels.
-layout(binding = 12, set = 0) uniform sampler2D celestialsAtlas;
+layout(binding = 11, set = 0) uniform sampler2D celestialsAtlas;
 
 struct Payload {
     vec3 albedo;

@@ -103,8 +103,8 @@ public final class RtVideoOptions {
             "upscaler.options.rt.debugView",
             OptionInstance.cachedConstantTooltip(Component.translatable("upscaler.options.rt.debugView.tooltip")),
             (caption, value) -> Options.genericValueLabel(caption, Component.translatable("upscaler.options.rt.debugView." + value)),
-            new OptionInstance.Enum<>(List.of(0, 1, 2, 3, 4, 5, 6, 7, 8), Codec.INT),
-            Math.clamp(setting.value(), 0, 8),
+            new OptionInstance.Enum<>(List.of(0, 1, 2, 3, 4, 5, 6, 7), Codec.INT),
+            Math.clamp(setting.value(), 0, 7),
             setting::set);
     }
 

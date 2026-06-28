@@ -34,6 +34,5 @@
 	"upscaler.options.rt.debugView.4": "Roughness",
 	"upscaler.options.rt.debugView.5": "Motion",
 	"upscaler.options.rt.debugView.6": "Specular",
-	"upscaler.options.rt.debugView.7": "Specular Hit",
-	"upscaler.options.rt.debugView.8": "Specular Motion"
+	"upscaler.options.rt.debugView.7": "Specular Motion"
 }
