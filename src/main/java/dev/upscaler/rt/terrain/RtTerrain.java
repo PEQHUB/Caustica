@@ -16,6 +16,7 @@ import dev.upscaler.rt.material.RtBlockMaterials;
 import dev.upscaler.rt.material.RtMaterials;
 import it.unimi.dsi.fastutil.floats.FloatArrayList;
 import it.unimi.dsi.fastutil.ints.IntArrayList;
+import it.unimi.dsi.fastutil.longs.Long2IntOpenHashMap;
 import it.unimi.dsi.fastutil.longs.Long2LongOpenHashMap;
 import it.unimi.dsi.fastutil.longs.Long2ObjectMap;
 import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
@@ -114,6 +115,10 @@ public final class RtTerrain {
     // advances per composite; old TLAS/table/sections are freed this many frames after the swap.
     private static final int KEEP_FRAMES = 4;
     private static final long NO_TESS_TOKEN = Long.MIN_VALUE;
+    private static final int PRIORITY_PLAYER = 0;
+    private static final int PRIORITY_DIRTY = 1;
+    private static final int PRIORITY_MISSING = 2;
+    private static final long NO_DIRTY_GROUP = 0L;
 
     private static int sectionTableInitialCapacity() {
         return UpscalerConfig.Rt.Terrain.SECTION_TABLE_INITIAL_CAPACITY.value();
@@ -131,6 +136,8 @@ public final class RtTerrain {
     private final Object dirtyLock = new Object();
     private final LongOpenHashSet dirty = new LongOpenHashSet(); // edited sections to re-extract
     private final LongArrayList dirtyDrain = new LongArrayList();
+    private final ArrayList<DirtyEvent> dirtyEvents = new ArrayList<>();
+    private final ArrayList<DirtyEvent> dirtyEventDrain = new ArrayList<>();
     // Persistent desired window and queued work. The expensive section window is rebuilt only when the
     // player crosses a section/radius/Y-band boundary; steady ticks poll chunk columns for load changes.
     private final LongOpenHashSet desired = new LongOpenHashSet();
@@ -138,6 +145,10 @@ public final class RtTerrain {
     private final LongOpenHashSet loadedColumns = new LongOpenHashSet();
     private final LongArrayList missing = new LongArrayList();
     private final LongOpenHashSet queuedMissing = new LongOpenHashSet();
+    private final Long2IntOpenHashMap missingPriority = new Long2IntOpenHashMap();
+    private final Long2LongOpenHashMap queuedDirtyGroup = new Long2LongOpenHashMap();
+    private final LongArrayList playerReextract = new LongArrayList();
+    private final LongOpenHashSet queuedPlayerReextract = new LongOpenHashSet();
     private final LongArrayList reextract = new LongArrayList();
     private final LongOpenHashSet queuedReextract = new LongOpenHashSet();
     private final List<SectionGeom> removed = new ArrayList<>();
@@ -148,9 +159,14 @@ public final class RtTerrain {
     // monotonic token; a completed job whose token no longer matches (section re-dirtied / unloaded /
     // left the window since dispatch) is dropped. `jobs` holds the outstanding worker futures.
     private final Long2LongOpenHashMap inFlight = new Long2LongOpenHashMap();
+    private final Long2LongOpenHashMap inFlightDirtyGroup = new Long2LongOpenHashMap();
+    private final Long2ObjectOpenHashMap<DirtyGroup> dirtyGroups = new Long2ObjectOpenHashMap<>();
     private final List<TessJob> jobs = new ArrayList<>();
-    private final ConcurrentLinkedQueue<TessResult> completedJobs = new ConcurrentLinkedQueue<>();
+    private final ConcurrentLinkedQueue<TessResult> completedPlayerJobs = new ConcurrentLinkedQueue<>();
+    private final ConcurrentLinkedQueue<TessResult> completedDirtyJobs = new ConcurrentLinkedQueue<>();
+    private final ConcurrentLinkedQueue<TessResult> completedMissingJobs = new ConcurrentLinkedQueue<>();
     private long tessToken;
+    private long dirtyGroupSeq;
     private boolean loggedTessFailure; // log the first worker tessellation failure (should never happen)
     private static volatile boolean loggedMeshFailure; // first per-block/fluid meshing throw (swallowed below,
                                                        // so it never reaches the worker-task catch — log once)
@@ -188,7 +204,10 @@ public final class RtTerrain {
     private int windowHiY;
 
     private RtTerrain() {
+        missingPriority.defaultReturnValue(PRIORITY_MISSING);
+        queuedDirtyGroup.defaultReturnValue(NO_DIRTY_GROUP);
         inFlight.defaultReturnValue(NO_TESS_TOKEN);
+        inFlightDirtyGroup.defaultReturnValue(NO_DIRTY_GROUP);
     }
 
     /** The manager if it currently has resident geometry (built BLAS + instances) to trace, else null. */
@@ -244,14 +263,22 @@ public final class RtTerrain {
     public static void markBlocksDirty(int minX, int minY, int minZ, int maxX, int maxY, int maxZ) {
         RtTerrain terrain = INSTANCE;
         synchronized (terrain.dirtyLock) {
+            LongArrayList keys = new LongArrayList();
             for (int scx = (minX - 1) >> 4; scx <= (maxX + 1) >> 4; scx++) {
                 for (int scy = (minY - 1) >> 4; scy <= (maxY + 1) >> 4; scy++) {
                     for (int scz = (minZ - 1) >> 4; scz <= (maxZ + 1) >> 4; scz++) {
-                        terrain.dirty.add(sectionKey(scx, scy, scz));
+                        keys.add(sectionKey(scx, scy, scz));
                     }
                 }
             }
-            terrain.dirtyPending = true;
+            if (!keys.isEmpty()) {
+                long groupId = ++terrain.dirtyGroupSeq;
+                if (groupId == NO_DIRTY_GROUP) {
+                    groupId = ++terrain.dirtyGroupSeq;
+                }
+                terrain.dirtyEvents.add(new DirtyEvent(groupId, keys));
+                terrain.dirtyPending = true;
+            }
         }
     }
 
@@ -344,7 +371,12 @@ public final class RtTerrain {
         if (!dirtyDrain.isEmpty()) {
             for (LongIterator it = dirtyDrain.iterator(); it.hasNext(); ) {
                 long key = it.nextLong();
-                handleDirtySection(key);
+                handleDirtySection(key, pcx, psy, pcz, NO_DIRTY_GROUP);
+            }
+        }
+        if (!dirtyEventDrain.isEmpty()) {
+            for (DirtyEvent event : dirtyEventDrain) {
+                handleDirtyEvent(event, pcx, psy, pcz);
             }
         }
 
@@ -353,9 +385,17 @@ public final class RtTerrain {
         int dispatchCap = movedWindow ? asyncDispatchMovingPerTick() : asyncDispatchPerTick();
         int resultCap = movedWindow ? sectionResultsMovingPerTick() : sectionResultsPerTick();
         int dispatchSlots = Math.min(dispatchCap, Math.max(0, maxInflight() - inFlight.size()));
-        if (dispatchSlots > 0 && !reextract.isEmpty()) {
+        if (dispatchSlots > 0 && !playerReextract.isEmpty()) {
             dispatch = dispatchContext(level);
-            dispatchSlots -= dispatchReextract(dispatch, chunkSource, dispatchSlots);
+            dispatchSlots -= dispatchReextract(dispatch, chunkSource, dispatchSlots,
+                    playerReextract, queuedPlayerReextract, PRIORITY_PLAYER);
+        }
+        if (dispatchSlots > 0 && !reextract.isEmpty()) {
+            if (dispatch == null) {
+                dispatch = dispatchContext(level);
+            }
+            dispatchSlots -= dispatchReextract(dispatch, chunkSource, dispatchSlots,
+                    reextract, queuedReextract, PRIORITY_DIRTY);
         }
         if (dispatchSlots > 0 && !missing.isEmpty()) {
             if (dispatch == null) {
@@ -387,6 +427,7 @@ public final class RtTerrain {
         loadedColumns.clear();
         missing.clear();
         queuedMissing.clear();
+        missingPriority.clear();
 
         for (int scx = pcx - radius; scx <= pcx + radius; scx++) {
             for (int scz = pcz - radius; scz <= pcz + radius; scz++) {
@@ -402,6 +443,7 @@ public final class RtTerrain {
 
         pruneUndesired(removed);
         removeKeysNotIn(queuedReextract, desired);
+        removeKeysNotIn(queuedPlayerReextract, desired);
         sortMissing(pcx, psy, pcz);
         windowValid = true;
         windowPcx = pcx;
@@ -451,9 +493,8 @@ public final class RtTerrain {
         for (int scy = loY; scy <= hiY; scy++) {
             long key = sectionKey(scx, scy, scz);
             desired.remove(key);
-            queuedMissing.remove(key);
-            queuedReextract.remove(key);
-            inFlight.remove(key);
+            clearQueuedWork(key, true);
+            invalidateInFlight(key);
             empty.remove(key);
             SectionGeom g = resident.remove(key);
             if (g != null) {
@@ -471,27 +512,76 @@ public final class RtTerrain {
             }
         }
         removeKeysNotIn(empty, desired);
-        removeKeysNotIn(inFlight.keySet(), desired);
+        removeInFlightNotIn(desired);
+        removeQueuedGroupsNotIn(desired);
     }
 
-    private void handleDirtySection(long key) {
-        empty.remove(key);
-        inFlight.remove(key); // invalidate any in-flight tessellation of the now-stale section
+    private void handleDirtyEvent(DirtyEvent event, int pcx, int psy, int pcz) {
+        int groupMembers = 0;
+        for (LongIterator it = event.keys().iterator(); it.hasNext(); ) {
+            if (canGroupDirtySection(it.nextLong())) {
+                groupMembers++;
+            }
+        }
+
+        long groupId = NO_DIRTY_GROUP;
+        if (groupMembers > 1) {
+            groupId = event.groupId();
+            dirtyGroups.put(groupId, new DirtyGroup(groupId, groupMembers, event.keys()));
+        }
+
+        for (LongIterator it = event.keys().iterator(); it.hasNext(); ) {
+            long key = it.nextLong();
+            long memberGroup = groupId != NO_DIRTY_GROUP
+                    && dirtyGroups.containsKey(groupId)
+                    && canGroupDirtySection(key) ? groupId : NO_DIRTY_GROUP;
+            if (!handleDirtySection(key, pcx, psy, pcz, memberGroup) && memberGroup != NO_DIRTY_GROUP) {
+                cancelDirtyGroup(memberGroup);
+            }
+        }
+    }
+
+    private boolean canGroupDirtySection(long key) {
+        return desired.contains(key) && (resident.containsKey(key) || empty.contains(key));
+    }
+
+    private boolean handleDirtySection(long key, int pcx, int psy, int pcz, long dirtyGroup) {
+        boolean wasEmpty = empty.remove(key);
+        if (wasEmpty && dirtyGroup != NO_DIRTY_GROUP) {
+            DirtyGroup group = dirtyGroups.get(dirtyGroup);
+            if (group != null) {
+                group.restoreEmptyKeys.add(key);
+            }
+        }
+        invalidateInFlight(key); // invalidate any in-flight tessellation of the now-stale section
         if (!desired.contains(key)) {
-            queuedMissing.remove(key);
-            queuedReextract.remove(key);
-            return;
+            clearQueuedWork(key, true);
+            return false;
         }
         // Keep the old geometry resident + traced; re-dispatch and swap when the new mesh is ready
         // (no eviction gap -> no flicker). Non-resident dirty keys re-enter the normal missing queue.
         SectionGeom g = resident.get(key);
+        int priority = isPlayerUpdatePriority(key, pcx, psy, pcz) ? PRIORITY_PLAYER : PRIORITY_DIRTY;
         if (g != null) {
-            if (queuedReextract.add(key)) {
+            if (priority == PRIORITY_PLAYER) {
+                queuedReextract.remove(key); // promote; stale normal entry will be skipped
+                if (queuedPlayerReextract.add(key)) {
+                    playerReextract.add(key);
+                }
+            } else if (!queuedPlayerReextract.contains(key) && queuedReextract.add(key)) {
                 reextract.add(key);
             }
+            setQueuedGroup(key, dirtyGroup);
+            return true;
         } else {
-            enqueueMissingUrgent(key);
+            return enqueueMissingUrgent(key, priority, dirtyGroup);
         }
+    }
+
+    private static boolean isPlayerUpdatePriority(long key, int pcx, int psy, int pcz) {
+        return Math.abs(sectionX(key) - pcx) <= 1
+                && Math.abs(sectionY(key) - psy) <= 1
+                && Math.abs(sectionZ(key) - pcz) <= 1;
     }
 
     private boolean enqueueMissingIfNeeded(long key) {
@@ -501,11 +591,17 @@ public final class RtTerrain {
         if (!queuedMissing.add(key)) {
             return false;
         }
+        setQueuedGroup(key, NO_DIRTY_GROUP);
+        missingPriority.put(key, PRIORITY_MISSING);
         missing.add(key);
         return true;
     }
 
-    private boolean enqueueMissingUrgent(long key) {
+    private boolean enqueueMissingUrgent(long key, int priority) {
+        return enqueueMissingUrgent(key, priority, NO_DIRTY_GROUP);
+    }
+
+    private boolean enqueueMissingUrgent(long key, int priority, long dirtyGroup) {
         if (resident.containsKey(key) || empty.contains(key) || inFlight.containsKey(key)) {
             return false;
         }
@@ -516,8 +612,74 @@ public final class RtTerrain {
             }
             missing.removeLong(existing);
         }
+        setQueuedGroup(key, dirtyGroup);
+        missingPriority.put(key, priority);
         missing.add(0, key);
         return true;
+    }
+
+    private void clearQueuedWork(long key, boolean cancelGroup) {
+        queuedMissing.remove(key);
+        missingPriority.remove(key);
+        queuedPlayerReextract.remove(key);
+        queuedReextract.remove(key);
+        clearQueuedGroup(key, cancelGroup);
+    }
+
+    private void setQueuedGroup(long key, long groupId) {
+        long oldGroup = groupId == NO_DIRTY_GROUP ? queuedDirtyGroup.remove(key) : queuedDirtyGroup.put(key, groupId);
+        if (oldGroup != NO_DIRTY_GROUP && oldGroup != groupId) {
+            cancelDirtyGroup(oldGroup);
+        }
+    }
+
+    private void clearQueuedGroup(long key, boolean cancelGroup) {
+        long groupId = queuedDirtyGroup.remove(key);
+        if (cancelGroup && groupId != NO_DIRTY_GROUP) {
+            cancelDirtyGroup(groupId);
+        }
+    }
+
+    private boolean isQueuedAnywhere(long key) {
+        return queuedMissing.contains(key) || queuedPlayerReextract.contains(key) || queuedReextract.contains(key);
+    }
+
+    private void invalidateInFlight(long key) {
+        long token = inFlight.remove(key);
+        long groupId = inFlightDirtyGroup.remove(key);
+        if (token != NO_TESS_TOKEN && groupId != NO_DIRTY_GROUP) {
+            cancelDirtyGroup(groupId);
+        }
+    }
+
+    private void removeInFlightNotIn(LongOpenHashSet keep) {
+        for (LongIterator it = inFlight.keySet().iterator(); it.hasNext(); ) {
+            long key = it.nextLong();
+            if (!keep.contains(key)) {
+                it.remove();
+                long groupId = inFlightDirtyGroup.remove(key);
+                if (groupId != NO_DIRTY_GROUP) {
+                    cancelDirtyGroup(groupId);
+                }
+            }
+        }
+    }
+
+    private void removeQueuedGroupsNotIn(LongOpenHashSet keep) {
+        LongArrayList cancelGroups = new LongArrayList();
+        for (LongIterator it = queuedDirtyGroup.keySet().iterator(); it.hasNext(); ) {
+            long key = it.nextLong();
+            if (!keep.contains(key)) {
+                long groupId = queuedDirtyGroup.get(key);
+                it.remove();
+                if (groupId != NO_DIRTY_GROUP) {
+                    cancelGroups.add(groupId);
+                }
+            }
+        }
+        for (LongIterator it = cancelGroups.iterator(); it.hasNext(); ) {
+            cancelDirtyGroup(it.nextLong());
+        }
     }
 
     private void sortMissing(int pcx, int psy, int pcz) {
@@ -560,6 +722,7 @@ public final class RtTerrain {
 
     private void drainDirty() {
         dirtyDrain.clear();
+        dirtyEventDrain.clear();
         if (!dirtyPending) {
             return;
         }
@@ -567,7 +730,9 @@ public final class RtTerrain {
             for (LongIterator it = dirty.iterator(); it.hasNext(); ) {
                 dirtyDrain.add(it.nextLong());
             }
+            dirtyEventDrain.addAll(dirtyEvents);
             dirty.clear();
+            dirtyEvents.clear();
             dirtyPending = false;
         }
     }
@@ -799,11 +964,17 @@ public final class RtTerrain {
         for (int i = 0; i < missing.size() && budget > 0 && attempts-- > 0; ) {
             long key = missing.getLong(i);
             if (!queuedMissing.contains(key)) {
+                missingPriority.remove(key);
+                if (!isQueuedAnywhere(key)) {
+                    clearQueuedGroup(key, true);
+                }
                 missing.removeLong(i);
                 continue;
             }
             if (!desired.contains(key) || resident.containsKey(key) || empty.contains(key) || inFlight.containsKey(key)) {
                 queuedMissing.remove(key);
+                missingPriority.remove(key);
+                clearQueuedGroup(key, true);
                 missing.removeLong(i);
                 continue;
             }
@@ -813,10 +984,11 @@ public final class RtTerrain {
                 i++;
                 continue;
             }
+            int priority = missingPriority.remove(key);
             queuedMissing.remove(key);
             missing.removeLong(i);
             budget--;
-            dispatchSection(dispatch, key, sx, sectionY(key), sz);
+            dispatchSection(dispatch, key, sx, sectionY(key), sz, priority);
         }
     }
 
@@ -826,23 +998,28 @@ public final class RtTerrain {
      * with a gap — when the new mesh is built (see {@link #startBuild} retiring the replaced geom). This
      * is what prevents the visible flicker on block updates that plain eviction would cause.
      */
-    private int dispatchReextract(DispatchContext dispatch, ClientChunkCache chunkSource, int budget) {
-        if (reextract.isEmpty()) {
+    private int dispatchReextract(DispatchContext dispatch, ClientChunkCache chunkSource, int budget,
+                                  LongArrayList queue, LongOpenHashSet queued, int priority) {
+        if (queue.isEmpty()) {
             return 0;
         }
         int dispatched = 0;
-        int attempts = Math.min(reextract.size(), Math.max(64, budget * 4));
-        for (int i = 0; i < reextract.size() && budget > 0 && attempts-- > 0; ) {
-            long key = reextract.getLong(i);
-            if (!queuedReextract.contains(key)) {
-                reextract.removeLong(i);
+        int attempts = Math.min(queue.size(), Math.max(64, budget * 4));
+        for (int i = 0; i < queue.size() && budget > 0 && attempts-- > 0; ) {
+            long key = queue.getLong(i);
+            if (!queued.contains(key)) {
+                if (!isQueuedAnywhere(key)) {
+                    clearQueuedGroup(key, true);
+                }
+                queue.removeLong(i);
                 continue;
             }
             // Skip ones the window pass freed this tick (out of view) — they're being retired, not rebuilt.
             SectionGeom g = resident.get(key);
             if (g == null || !desired.contains(key) || inFlight.containsKey(key)) {
-                queuedReextract.remove(key);
-                reextract.removeLong(i);
+                queued.remove(key);
+                clearQueuedGroup(key, true);
+                queue.removeLong(i);
                 continue;
             }
             int sx = g.sx >> 4;
@@ -851,9 +1028,9 @@ public final class RtTerrain {
                 i++;
                 continue;
             }
-            queuedReextract.remove(key);
-            reextract.removeLong(i);
-            dispatchSection(dispatch, key, g.sx >> 4, g.sy >> 4, g.sz >> 4);
+            queued.remove(key);
+            queue.removeLong(i);
+            dispatchSection(dispatch, key, g.sx >> 4, g.sy >> 4, g.sz >> 4, priority);
             budget--;
             dispatched++;
         }
@@ -861,10 +1038,14 @@ public final class RtTerrain {
     }
 
     /** Snapshot one section on the render thread and submit its tessellation to the worker pool. */
-    private void dispatchSection(DispatchContext dispatch, long key, int sx, int sy, int sz) {
+    private void dispatchSection(DispatchContext dispatch, long key, int sx, int sy, int sz, int priority) {
         RenderSectionRegion region = dispatch.regionCache().createRegion(dispatch.level(), SectionPos.asLong(sx, sy, sz));
         long token = ++tessToken;
-        TessJob job = new TessJob(key, token, sx << 4, sy << 4, sz << 4);
+        long dirtyGroup = queuedDirtyGroup.remove(key);
+        if (dirtyGroup != NO_DIRTY_GROUP && !dirtyGroups.containsKey(dirtyGroup)) {
+            dirtyGroup = NO_DIRTY_GROUP;
+        }
+        TessJob job = new TessJob(key, token, sx << 4, sy << 4, sz << 4, priority, dirtyGroup);
         Future<?> future = RtWorkerPool.INSTANCE.submit(() -> {
             try {
                 ModelBlockRenderer renderer = new ModelBlockRenderer(false, true, dispatch.blockColors());
@@ -874,21 +1055,44 @@ public final class RtTerrain {
                 FluidCapture fluidCapture = new FluidCapture();
                 BlockPos.MutableBlockPos m = new BlockPos.MutableBlockPos();
                 CpuSection cpu = buildCpuSection(region, dispatch.modelSet(), renderer, capture, fluidRenderer, fluidCapture, m, sx, sy, sz);
-                completedJobs.add(new TessResult(job, cpu, null));
+                enqueueCompleted(job, cpu, null);
             } catch (Throwable t) {
-                completedJobs.add(new TessResult(job, null, t));
+                enqueueCompleted(job, null, t);
                 throw t;
             }
             return null;
         });
         job.future = future;
         inFlight.put(key, token);
+        if (dirtyGroup != NO_DIRTY_GROUP) {
+            inFlightDirtyGroup.put(key, dirtyGroup);
+        } else {
+            inFlightDirtyGroup.remove(key);
+        }
         addJob(job);
     }
 
     private void addJob(TessJob job) {
         job.jobIndex = jobs.size();
         jobs.add(job);
+    }
+
+    private void enqueueCompleted(TessJob job, CpuSection cpu, Throwable failure) {
+        TessResult result = new TessResult(job, cpu, failure);
+        switch (job.priority) {
+            case PRIORITY_PLAYER -> completedPlayerJobs.add(result);
+            case PRIORITY_DIRTY -> completedDirtyJobs.add(result);
+            default -> completedMissingJobs.add(result);
+        }
+    }
+
+    private TessResult pollCompleted() {
+        TessResult result = completedPlayerJobs.poll();
+        if (result != null) {
+            return result;
+        }
+        result = completedDirtyJobs.poll();
+        return result != null ? result : completedMissingJobs.poll();
     }
 
     private void removeJob(TessJob job) {
@@ -914,14 +1118,23 @@ public final class RtTerrain {
         int budget = resultCap;
         int attempts = resultCap * 4;
         while (budget > 0 && attempts-- > 0) {
-            TessResult result = completedJobs.poll();
+            TessResult result = pollCompleted();
             if (result == null) {
                 break;
             }
             TessJob job = result.job();
             removeJob(job);
+            long expected = inFlight.get(job.key);
+            boolean valid = expected == job.token;
+            if (!valid) {
+                continue; // stale result; a newer dispatch (or none) supersedes it
+            }
+            inFlight.remove(job.key);
+            long dirtyGroup = inFlightDirtyGroup.remove(job.key);
             if (result.failure() != null) {
-                inFlight.remove(job.key);
+                if (dirtyGroup != NO_DIRTY_GROUP) {
+                    cancelDirtyGroup(dirtyGroup);
+                }
                 if (!loggedTessFailure) {
                     loggedTessFailure = true;
                     UpscalerMod.LOGGER.warn("async terrain: tessellation task failed for section {},{},{}",
@@ -929,28 +1142,99 @@ public final class RtTerrain {
                 }
                 continue;
             }
-            long expected = inFlight.get(job.key);
-            boolean valid = expected == job.token;
-            if (!valid) {
-                continue; // stale result; a newer dispatch (or none) supersedes it
-            }
-            inFlight.remove(job.key);
             PackedSection packed = result.cpu().packed();
-            if (packed == null) {
-                // Legitimately empty (air or fully-enclosed). If this was an in-place re-extract whose new
-                // state is empty, evict the old geom and retire it via the build swap (a startBuild runs
-                // because `removed` is now non-empty).
-                SectionGeom prev = resident.remove(job.key);
-                if (prev != null) {
-                    removed.add(prev);
+            if (dirtyGroup != NO_DIRTY_GROUP && dirtyGroups.containsKey(dirtyGroup)) {
+                DirtyGroup group = dirtyGroups.get(dirtyGroup);
+                if (packed == null) {
+                    SectionGeom prev = resident.get(job.key);
+                    if (prev != null) {
+                        group.removed.add(prev);
+                    } else {
+                        group.restoreEmptyKeys.add(job.key);
+                    }
+                    group.emptyKeys.add(job.key);
+                } else {
+                    empty.remove(job.key);
+                    group.prepared.add(uploadSection(ctx, packed, result.cpu().opacityMicromap(), job.key, job.sox, job.soy, job.soz));
                 }
-                empty.add(job.key);
+                completeDirtyGroupMember(group, prepared, removed);
                 budget--;
             } else {
-                prepared.add(uploadSection(ctx, packed, result.cpu().opacityMicromap(), job.key, job.sox, job.soy, job.soz));
-                budget--;
+                if (packed == null) {
+                    // Legitimately empty (air or fully-enclosed). If this was an in-place re-extract whose new
+                    // state is empty, evict the old geom and retire it via the build swap (a startBuild runs
+                    // because `removed` is now non-empty).
+                    SectionGeom prev = resident.remove(job.key);
+                    if (prev != null) {
+                        removed.add(prev);
+                    }
+                    empty.add(job.key);
+                    budget--;
+                } else {
+                    empty.remove(job.key);
+                    prepared.add(uploadSection(ctx, packed, result.cpu().opacityMicromap(), job.key, job.sox, job.soy, job.soz));
+                    budget--;
+                }
             }
         }
+    }
+
+    private void completeDirtyGroupMember(DirtyGroup group, List<PreparedSection> prepared, List<SectionGeom> removed) {
+        if (--group.remaining > 0) {
+            return;
+        }
+        dirtyGroups.remove(group.id);
+        prepared.addAll(group.prepared);
+        removed.addAll(group.removed);
+        for (LongIterator it = group.emptyKeys.iterator(); it.hasNext(); ) {
+            empty.add(it.nextLong());
+        }
+    }
+
+    private void cancelDirtyGroup(long groupId) {
+        DirtyGroup group = dirtyGroups.remove(groupId);
+        if (group == null) {
+            return;
+        }
+        for (PreparedSection ps : group.prepared) {
+            destroyPreparedSection(ps);
+        }
+        for (LongIterator it = group.restoreEmptyKeys.iterator(); it.hasNext(); ) {
+            long key = it.nextLong();
+            if (desired.contains(key) && !resident.containsKey(key) && !inFlight.containsKey(key) && !isQueuedAnywhere(key)) {
+                empty.add(key);
+            }
+        }
+        for (LongIterator it = group.keys.iterator(); it.hasNext(); ) {
+            long key = it.nextLong();
+            if (queuedDirtyGroup.get(key) == groupId) {
+                queuedDirtyGroup.remove(key);
+            }
+            if (inFlightDirtyGroup.get(key) == groupId) {
+                inFlightDirtyGroup.remove(key);
+            }
+        }
+    }
+
+    private void cancelAllDirtyGroups() {
+        if (dirtyGroups.isEmpty()) {
+            return;
+        }
+        for (DirtyGroup group : dirtyGroups.values()) {
+            for (PreparedSection ps : group.prepared) {
+                destroyPreparedSection(ps);
+            }
+        }
+        dirtyGroups.clear();
+        queuedDirtyGroup.clear();
+        inFlightDirtyGroup.clear();
+    }
+
+    private void destroyPreparedSection(PreparedSection ps) {
+        RtAccel.freeBlasScratch(pool, List.of(ps.blas()));
+        SectionGeom g = new SectionGeom(ps.key(), ps.positions(), ps.indices(), ps.uvs(), ps.material(),
+                ps.blas().accel, ps.blas().pooledBacking(), ps.triBase(), ps.waterGeom(), ps.sx(), ps.sy(), ps.sz());
+        g.destroy(pool);
     }
 
     /** Pure-CPU worker result: tessellated mesh plus optional opacity micromap input for its cutout bucket. */
@@ -973,26 +1257,49 @@ public final class RtTerrain {
                                    RtAccel.PreparedBlas blas, int[] triBase, int waterGeom, int sx, int sy, int sz) {
     }
 
+    private record DirtyEvent(long groupId, LongArrayList keys) {
+    }
+
+    private static final class DirtyGroup {
+        final long id;
+        final LongArrayList keys;
+        final ArrayList<PreparedSection> prepared = new ArrayList<>();
+        final ArrayList<SectionGeom> removed = new ArrayList<>();
+        final LongArrayList emptyKeys = new LongArrayList();
+        final LongArrayList restoreEmptyKeys = new LongArrayList();
+        int remaining;
+
+        DirtyGroup(long id, int remaining, LongArrayList keys) {
+            this.id = id;
+            this.remaining = remaining;
+            this.keys = new LongArrayList(keys);
+        }
+    }
+
     /** A deferred free: run {@code free} once the frame counter reaches {@code freeFrame}. */
     private record Deferred(long freeFrame, Runnable free) {
     }
 
-    /** An outstanding async tessellation; completed results are delivered through {@link #completedJobs}. */
+    /** An outstanding async tessellation; completed results are delivered through the priority queues. */
     private static final class TessJob {
         final long key;
         final long token;
         final int sox;
         final int soy;
         final int soz;
+        final int priority;
+        final long dirtyGroup;
         Future<?> future;
         int jobIndex = -1;
 
-        TessJob(long key, long token, int sox, int soy, int soz) {
+        TessJob(long key, long token, int sox, int soy, int soz, int priority, long dirtyGroup) {
             this.key = key;
             this.token = token;
             this.sox = sox;
             this.soy = soy;
             this.soz = soz;
+            this.priority = priority;
+            this.dirtyGroup = dirtyGroup;
         }
     }
 
@@ -1226,6 +1533,7 @@ public final class RtTerrain {
     /** Cancel outstanding async tessellations and drop their bookkeeping (CPU-only — nothing to free). */
     private void cancelJobs() {
         if (jobs.isEmpty() && inFlight.isEmpty()) {
+            inFlightDirtyGroup.clear();
             return;
         }
         for (TessJob job : jobs) {
@@ -1235,23 +1543,33 @@ public final class RtTerrain {
             job.jobIndex = -1;
         }
         jobs.clear();
-        completedJobs.clear();
+        completedPlayerJobs.clear();
+        completedDirtyJobs.clear();
+        completedMissingJobs.clear();
         inFlight.clear();
+        inFlightDirtyGroup.clear();
     }
 
     /** Full teardown (world exit / shutdown): drain the GPU, then free everything incl. an in-flight build. */
     private void clear(RtContext ctx, boolean destroyPool) {
         cancelJobs();
+        cancelAllDirtyGroups();
         synchronized (dirtyLock) {
             dirty.clear(); // any pending re-extract keys refer to the old world/coords — drop them
+            dirtyEvents.clear();
             dirtyPending = false;
         }
         dirtyDrain.clear();
+        dirtyEventDrain.clear();
         desired.clear();
         desiredColumns.clear();
         loadedColumns.clear();
         missing.clear();
         queuedMissing.clear();
+        missingPriority.clear();
+        queuedDirtyGroup.clear();
+        playerReextract.clear();
+        queuedPlayerReextract.clear();
         reextract.clear();
         queuedReextract.clear();
         windowValid = false;
