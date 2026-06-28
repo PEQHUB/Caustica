@@ -80,6 +80,17 @@ public abstract class GameRendererMixin {
 		WorldRenderScaler.INSTANCE.end(this.mainRenderTarget);
 	}
 
+	// Composite the redirected UI overlay back over the world once the GUI has fully rendered into it.
+	// Done here (not at GuiRenderer.draw TAIL) because that TAIL inject did not fire on in-game HUD frames;
+	// this INVOKE-after seam runs unconditionally once per frame in both gameplay and menus.
+	@Inject(method = "render(Lnet/minecraft/client/DeltaTracker;Z)V",
+			at = @At(value = "INVOKE",
+					target = "Lnet/minecraft/client/gui/render/GuiRenderer;render()V",
+					shift = At.Shift.AFTER))
+	private void upscaler$compositeUiOverlay(DeltaTracker deltaTracker, boolean advanceGameTime, CallbackInfo ci) {
+		dev.upscaler.rt.RtUiOverlay.compositeIfUsed();
+	}
+
 	@Shadow
 	public abstract net.minecraft.client.renderer.state.GameRenderState gameRenderState();
 }

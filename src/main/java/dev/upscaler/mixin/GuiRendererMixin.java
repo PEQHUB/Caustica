@@ -6,16 +6,15 @@ import dev.upscaler.rt.RtUiOverlay;
 import net.minecraft.client.gui.render.GuiRenderer;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
-import org.spongepowered.asm.mixin.injection.Inject;
-import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 /**
- * HDR Phase 2 (step A): redirect the vanilla GUI/HUD into a transparent overlay target, then composite it
- * back over the world. {@code GuiRenderer.draw} fetches the destination via
- * {@code gameRenderer.mainRenderTarget()} once and uses it for every GUI draw range (and the after-blur
- * depth clear), so redirecting that single expression routes all GUI rendering into the overlay. Blur is
- * unaffected — {@code GameRenderer.processBlurEffect} operates on the real main target internally. Gated by
- * {@code upscaler.rt.hdr.uiOverlay} (default off); when off this is a no-op and the vanilla path is intact.
+ * HDR Phase 2 (step A): redirect the vanilla GUI/HUD into a transparent overlay target. {@code
+ * GuiRenderer.draw} fetches the destination via {@code gameRenderer.mainRenderTarget()} once and uses it for
+ * every GUI draw range (and the after-blur depth clear), so redirecting that single expression routes all
+ * GUI rendering into the overlay. The overlay is composited back over the world after {@code
+ * GuiRenderer.render} returns (see {@code GameRendererMixin}) — its {@code draw} TAIL did not fire on in-game
+ * HUD frames. Blur is unaffected — {@code GameRenderer.processBlurEffect} operates on the real main target.
+ * Gated by {@code upscaler.rt.hdr.uiOverlay} (default off); when off this is a no-op.
  */
 @Mixin(GuiRenderer.class)
 public abstract class GuiRendererMixin {
@@ -27,10 +26,5 @@ public abstract class GuiRendererMixin {
 			return RtUiOverlay.beginAndRedirect(original);
 		}
 		return original;
-	}
-
-	@Inject(method = "draw", at = @At("TAIL"))
-	private void upscaler$compositeOverlay(CallbackInfo ci) {
-		RtUiOverlay.compositeIfUsed();
 	}
 }

@@ -16,6 +16,7 @@ import com.mojang.blaze3d.systems.RenderPass;
 import com.mojang.blaze3d.systems.RenderSystem;
 import com.mojang.blaze3d.textures.FilterMode;
 
+import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.BindGroupLayouts;
 import net.minecraft.client.renderer.RenderPipelines;
 
@@ -24,20 +25,22 @@ import dev.upscaler.UpscalerConfig;
 /**
  * HDR Phase 2 (step A) — transparent vanilla-UI overlay. The vanilla GUI/HUD is redirected (via
  * {@code GuiRendererMixin}) into a separate transparent {@code RGBA8} target instead of the main render
- * target, then composited back over the world here. In SDR this reproduces vanilla; the point is to keep
- * 2D SDR-authored UI out of the world's HDR tonemap once HDR presentation lands (the compositor will then
- * blend this same overlay over the HDR world at paper white rather than over the SDR main target).
+ * target, then composited back over the world (from {@code GameRendererMixin}, right after
+ * {@code GuiRenderer.render} returns). In SDR this reproduces vanilla; the point is to keep 2D SDR-authored
+ * UI out of the world's HDR tonemap once HDR presentation lands (the compositor will then blend this same
+ * overlay over the HDR world at paper white rather than over the SDR main target).
  *
- * <p>Alpha convention: vanilla GUI pipelines use {@code BlendFunction.TRANSLUCENT}
- * ({@code SRC_ALPHA, ONE_MINUS_SRC_ALPHA} colour; {@code ONE, ONE_MINUS_SRC_ALPHA} alpha), so drawing onto
- * a cleared (transparent) target accumulates <em>premultiplied</em> colour ({@code rgb = C*A}, {@code a =
- * A}). The composite back therefore uses premultiplied-over ({@code ONE, ONE_MINUS_SRC_ALPHA}) — NOT
- * {@code ENTITY_OUTLINE_BLIT}, which expects straight alpha and would double-darken semi-transparent UI.
+ * <p>Composite blend: vanilla GUI pipelines use {@code BlendFunction.TRANSLUCENT} (colour {@code SRC_ALPHA,
+ * ONE_MINUS_SRC_ALPHA}; alpha {@code ONE, ONE_MINUS_SRC_ALPHA}), so drawing onto a cleared target
+ * accumulates <em>premultiplied</em> colour ({@code rgb = C*A}, {@code a = A}). The composite therefore uses
+ * premultiplied-over ({@code TRANSLUCENT_PREMULTIPLIED_ALPHA}); {@code ENTITY_OUTLINE_BLIT} expects straight
+ * alpha and would double-darken semi-transparent UI. The pipeline is unregistered, so its shaders are not
+ * preloaded — it lazily compiles fine once resources are loaded, but cannot compile during the loading
+ * screen; hence the {@link #enabled()} {@code isGameLoadFinished} guard, plus a defensive try/catch.
  *
- * <p>Depth: the overlay copies the main target's depth each frame so before-blur GUI depth-tests exactly as
- * vanilla would; the after-blur depth clear that {@code GuiRenderer.draw} performs then targets the overlay,
- * matching vanilla. Blur ({@code GameRenderer.processBlurEffect}) still operates on the real main target, so
- * the world behind screens is blurred as usual and the overlay is composited over the blurred result.
+ * <p>Depth: the overlay clears depth to 0.0 each frame, exactly as {@code GameRenderer.render} clears the
+ * main depth right before the GUI. Blur ({@code GameRenderer.processBlurEffect}) still operates on the real
+ * main target, so the world behind screens is blurred as usual and the overlay composites over the result.
  */
 public final class RtUiOverlay {
     private static final Vector4f TRANSPARENT = new Vector4f(0.0f, 0.0f, 0.0f, 0.0f);
@@ -55,39 +58,49 @@ public final class RtUiOverlay {
 
     private static TextureTarget overlay;
     private static boolean usedThisFrame;
+    private static boolean compositeFailed;
 
     private RtUiOverlay() {
     }
 
+    /**
+     * Active only once the game has finished loading: the composite pipeline lazily compiles its shaders,
+     * which are not available during the loading screen (would crash with "Couldn't find source for
+     * core/screenquad"). Gating the redirect here keeps the loading-screen GUI on the normal path.
+     */
     public static boolean enabled() {
-        return UpscalerConfig.Rt.Hdr.UI_OVERLAY.value();
+        return UpscalerConfig.Rt.Hdr.UI_OVERLAY.value() && !compositeFailed && Minecraft.getInstance().isGameLoadFinished();
     }
 
     /**
-     * Prepare the overlay (sized to {@code main}, cleared transparent, depth copied from {@code main}) and
-     * return it so {@code GuiRenderer.draw} renders the GUI into it instead of the main target. Called from
-     * the {@code GuiRendererMixin} redirect on the render thread.
+     * Prepare the overlay (sized to {@code main}, cleared transparent with depth cleared to 0.0) and return
+     * it so {@code GuiRenderer.draw} renders the GUI into it instead of the main target. Called from the
+     * {@code GuiRendererMixin} redirect on the render thread.
      */
     public static RenderTarget beginAndRedirect(RenderTarget main) {
         TextureTarget target = ensureSized(main);
         CommandEncoder enc = RenderSystem.getDevice().createCommandEncoder();
-        enc.clearColorTexture(target.getColorTexture(), TRANSPARENT);
-        // Match vanilla: before-blur GUI tests against the world depth that is in the main target.
-        if (target.useDepth && main.getDepthTexture() != null) {
-            target.copyDepthFrom(main);
+        if (target.useDepth && target.getDepthTexture() != null) {
+            enc.clearColorAndDepthTextures(target.getColorTexture(), TRANSPARENT, target.getDepthTexture(), 0.0);
+        } else {
+            enc.clearColorTexture(target.getColorTexture(), TRANSPARENT);
         }
         usedThisFrame = true;
         return target;
     }
 
-    /** Composite the overlay over the real main target. Called at the tail of {@code GuiRenderer.draw}. */
+    /**
+     * Composite the overlay over the real main target. Called once per frame from {@code GameRendererMixin}
+     * after {@code GuiRenderer.render} returns (the {@code GuiRenderer.draw} TAIL did not fire on in-game HUD
+     * frames). A compile/render failure latches the overlay off rather than crashing the frame.
+     */
     public static void compositeIfUsed() {
         if (!usedThisFrame || overlay == null) {
             usedThisFrame = false;
             return;
         }
         usedThisFrame = false;
-        RenderTarget main = net.minecraft.client.Minecraft.getInstance().gameRenderer.mainRenderTarget();
+        RenderTarget main = Minecraft.getInstance().gameRenderer.mainRenderTarget();
         if (main == null || main.getColorTextureView() == null) {
             return;
         }
@@ -98,6 +111,10 @@ public final class RtUiOverlay {
             pass.bindTexture("InSampler", overlay.getColorTextureView(),
                     RenderSystem.getSamplerCache().getClampToEdge(FilterMode.NEAREST));
             pass.draw(3, 1, 0, 0);
+        } catch (Throwable t) {
+            compositeFailed = true;
+            org.slf4j.LoggerFactory.getLogger("upscaler-ui-overlay")
+                    .error("UI overlay composite failed; disabling overlay", t);
         }
     }
 
