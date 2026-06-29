@@ -239,7 +239,8 @@ public final class RtAccel {
         // order { solid, cutout, translucent, water } (see TERRAIN_BUCKETS). Bucket 0 (solid) is flagged
         // VK_GEOMETRY_OPAQUE_BIT. The fixed geometry indices are also SBT material indices: radiance rays
         // use closest-hit-only records for solid/translucent/water and an any-hit record for true cutout;
-        // shadow rays use any-hit records for cutout/translucent/water.
+        // shadow rays use any-hit records for cutout/translucent/water; guide-skip rays use a guide
+        // any-hit for cutout/translucent so primary glass guides can see through panes.
         // terrainSplit == false ⇒ the single-geometry path (entities / pooled / refit) keyed on triangleCount.
         private final boolean terrainSplit;
         private final int[] terrainTris; // per-bucket triangle counts in TERRAIN_BUCKETS order (null if !terrainSplit)
@@ -310,10 +311,12 @@ public final class RtAccel {
     public static final int TERRAIN_BUCKETS = 4;
     public static final int SBT_RAY_RADIANCE = 0;
     public static final int SBT_RAY_SHADOW = 1;
+    public static final int SBT_RAY_GUIDE = 2;
     public static final int SBT_TERRAIN_RADIANCE_OFFSET = SBT_RAY_RADIANCE * TERRAIN_BUCKETS;
     public static final int SBT_TERRAIN_SHADOW_OFFSET = SBT_RAY_SHADOW * TERRAIN_BUCKETS;
-    public static final int SBT_ENTITY_OFFSET = TERRAIN_BUCKETS * 2;
-    public static final int SBT_HIT_GROUP_COUNT = SBT_ENTITY_OFFSET + TERRAIN_BUCKETS * 2;
+    public static final int SBT_TERRAIN_GUIDE_OFFSET = SBT_RAY_GUIDE * TERRAIN_BUCKETS;
+    public static final int SBT_ENTITY_OFFSET = TERRAIN_BUCKETS * 3;
+    public static final int SBT_HIT_GROUP_COUNT = SBT_ENTITY_OFFSET + TERRAIN_BUCKETS * 3;
 
     /**
      * Result of {@link #prepareUpdatableBlasBuild}: the per-frame BUILD op to record, plus the persistent

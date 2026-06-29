@@ -124,13 +124,16 @@ public final class RtPipeline {
     /**
      * Builds the RT pipeline. {@code rahit} (nullable) adds any-hit-capable triangle hit records. With the
      * world pipeline, the hit SBT region is laid out to match {@link RtAccel}'s terrain bucket/ray-type
-     * constants: radiance records first, shadow records second, then entity records. {@code extraStorageImages}
-     * adds that many raygen-visible storage images at bindings 3.. (the DLSS-RR guide buffers);
+     * constants: radiance records first, shadow records second, guide-skip records third, then entity records.
+     * {@code extraStorageImages} adds that many raygen-visible storage images at bindings 3.. (the DLSS-RR guide buffers);
      * write them with {@link #setExtraStorageImage}.
      */
-    public static RtPipeline create(RtContext ctx, String rgen, String[] rmiss, String rchit, String rahit, int pushConstantSize, boolean withAtlasSampler, int extraStorageImages, int bindlessTextures, boolean blockMaterialAtlases, boolean skyAtlas) {
+    public static RtPipeline create(RtContext ctx, String rgen, String[] rmiss, String rchit, String rahit, String guideAhit,
+                                    int pushConstantSize, boolean withAtlasSampler, int extraStorageImages,
+                                    int bindlessTextures, boolean blockMaterialAtlases, boolean skyAtlas) {
         VkDevice vk = ctx.vk();
         boolean hasAhit = rahit != null;
+        boolean hasGuideAhit = guideAhit != null;
         String label = "world RT pipeline";
         try (MemoryStack stack = MemoryStack.stackPush()) {
             int firstExtraBinding = withAtlasSampler ? 3 : 2;
@@ -258,7 +261,7 @@ public final class RtPipeline {
             long layout = p.get(0);
             RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_PIPELINE_LAYOUT, layout, label + " pipeline layout");
 
-            // Stages: raygen, one miss per rmiss entry, the closest-hit, then (optionally) the any-hit.
+            // Stages: raygen, one miss per rmiss entry, the closest-hit, then optional any-hit modules.
             // Groups are raygen + N miss + the hit records selected by traceRayEXT's SBT offset/stride.
             int missCount = rmiss.length;
             int hitGroupCount = hasAhit ? RtAccel.SBT_HIT_GROUP_COUNT : 1;
@@ -266,7 +269,8 @@ public final class RtPipeline {
             int hitGroupIdx = 1 + missCount;
             int chitStage = 1 + missCount;
             int ahitStage = chitStage + 1;
-            int stageCount = 1 + missCount + 1 + (hasAhit ? 1 : 0);
+            int guideAhitStage = chitStage + 1 + (hasAhit ? 1 : 0);
+            int stageCount = 1 + missCount + 1 + (hasAhit ? 1 : 0) + (hasGuideAhit ? 1 : 0);
             long mGen = loadModule(vk, stack, rgen);
             RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_SHADER_MODULE, mGen, label + " " + rgen);
             long[] mMiss = new long[missCount];
@@ -280,6 +284,10 @@ public final class RtPipeline {
             if (hasAhit) {
                 RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_SHADER_MODULE, mAhit, label + " " + rahit);
             }
+            long mGuideAhit = hasGuideAhit ? loadModule(vk, stack, guideAhit) : 0L;
+            if (hasGuideAhit) {
+                RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_SHADER_MODULE, mGuideAhit, label + " " + guideAhit);
+            }
             ByteBuffer entry = stack.UTF8("main");
             VkPipelineShaderStageCreateInfo.Buffer stages = VkPipelineShaderStageCreateInfo.calloc(stageCount, stack);
             stages.get(0).sType$Default().stage(VK_SHADER_STAGE_RAYGEN_BIT_KHR).module(mGen).pName(entry);
@@ -289,6 +297,9 @@ public final class RtPipeline {
             stages.get(chitStage).sType$Default().stage(VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR).module(mHit).pName(entry);
             if (hasAhit) {
                 stages.get(ahitStage).sType$Default().stage(VK_SHADER_STAGE_ANY_HIT_BIT_KHR).module(mAhit).pName(entry);
+            }
+            if (hasGuideAhit) {
+                stages.get(guideAhitStage).sType$Default().stage(VK_SHADER_STAGE_ANY_HIT_BIT_KHR).module(mGuideAhit).pName(entry);
             }
 
             VkRayTracingShaderGroupCreateInfoKHR.Buffer groups = VkRayTracingShaderGroupCreateInfoKHR.calloc(groupCount, stack);
@@ -301,7 +312,7 @@ public final class RtPipeline {
             for (int h = 0; h < hitGroupCount; h++) {
                 groups.get(hitGroupIdx + h).sType$Default().type(VK_RAY_TRACING_SHADER_GROUP_TYPE_TRIANGLES_HIT_GROUP_KHR)
                         .generalShader(VK_SHADER_UNUSED_KHR).closestHitShader(chitStage)
-                        .anyHitShader(hasAhit && hitGroupUsesAnyHit(h) ? ahitStage : VK_SHADER_UNUSED_KHR)
+                        .anyHitShader(anyHitStageForGroup(h, hasAhit, hasGuideAhit, ahitStage, guideAhitStage))
                         .intersectionShader(VK_SHADER_UNUSED_KHR);
             }
 
@@ -326,6 +337,9 @@ public final class RtPipeline {
             if (hasAhit) {
                 VK10.vkDestroyShaderModule(vk, mAhit, null);
             }
+            if (hasGuideAhit) {
+                VK10.vkDestroyShaderModule(vk, mGuideAhit, null);
+            }
 
             // SBT: one record per group, each region 64-aligned (stride over-aligned to baseAlignment).
             int handleSize = ctx.shaderGroupHandleSize();
@@ -342,16 +356,31 @@ public final class RtPipeline {
         }
     }
 
-    private static boolean hitGroupUsesAnyHit(int relativeHitGroup) {
+    private static int anyHitStageForGroup(int relativeHitGroup, boolean hasAhit, boolean hasGuideAhit, int ahitStage, int guideAhitStage) {
+        return switch (hitGroupAnyHitKind(relativeHitGroup)) {
+            case 1 -> hasAhit ? ahitStage : VK_SHADER_UNUSED_KHR;
+            case 2 -> hasGuideAhit ? guideAhitStage : VK_SHADER_UNUSED_KHR;
+            default -> VK_SHADER_UNUSED_KHR;
+        };
+    }
+
+    private static int hitGroupAnyHitKind(int relativeHitGroup) {
         if (relativeHitGroup < RtAccel.SBT_ENTITY_OFFSET) {
             int rayType = relativeHitGroup / RtAccel.TERRAIN_BUCKETS;
             int bucket = relativeHitGroup % RtAccel.TERRAIN_BUCKETS;
             if (rayType == RtAccel.SBT_RAY_RADIANCE) {
-                return bucket == RtAccel.BUCKET_CUTOUT;
+                return bucket == RtAccel.BUCKET_CUTOUT ? 1 : 0;
             }
-            return bucket != RtAccel.BUCKET_SOLID;
+            if (rayType == RtAccel.SBT_RAY_SHADOW) {
+                return bucket != RtAccel.BUCKET_SOLID ? 1 : 0;
+            }
+            if (rayType == RtAccel.SBT_RAY_GUIDE) {
+                return (bucket == RtAccel.BUCKET_CUTOUT || bucket == RtAccel.BUCKET_TRANSLUCENT) ? 2 : 0;
+            }
+            return 0;
         }
-        return true;
+        int rayType = (relativeHitGroup - RtAccel.SBT_ENTITY_OFFSET) / RtAccel.TERRAIN_BUCKETS;
+        return rayType == RtAccel.SBT_RAY_GUIDE ? 2 : 1;
     }
 
     /**

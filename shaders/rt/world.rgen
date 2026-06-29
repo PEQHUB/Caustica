@@ -132,7 +132,6 @@ const vec3 SKY_SPEC_ALBEDO = vec3(0.5); // RR guide default for sky pixels.
 // roughness feeds DLSS-RR a stable smooth primary surface, as for water.
 const float GLASS_IOR = 1.52;
 const float GLASS_GUIDE_ROUGH = 0.04;
-const int GLASS_GUIDE_MAX_SKIP = 4;
 // Transmitted-ray origin offset when crossing a glass face. Must be SMALLER than the terrain-side
 // TRANSLUCENT_INSET (RtTerrain, 2e-4 blocks): glass is recessed into its block by that inset, so a face
 // touching a slab/stair leaves a tiny gap before the neighbour's surface. A large bias (SURF_BIAS) would
@@ -354,6 +353,7 @@ const uint CULL_PRIMARY = 0x02u;
 const uint TERRAIN_BUCKETS = 4u;
 const uint SBT_RADIANCE = 0u;
 const uint SBT_SHADOW = TERRAIN_BUCKETS;
+const uint SBT_GUIDE = TERRAIN_BUCKETS * 2u;
 const uint SBT_STRIDE_BUCKET = 1u;
 
 vec3 visibility(vec3 origin, vec3 dir, float tmax) {
@@ -469,38 +469,30 @@ void refractedGuideHit(vec3 surfacePos, vec3 incidentDir, vec3 surfaceNormal, bo
 }
 
 // Primary glass/translucent guide trace: keep the glass surface for depth/normal/specular guides, but let
-// diffuse albedo + motion vectors describe the opaque content visible through it. This is a guide-only
-// ray, bounded to a few panes so stacked glass cannot explode cost.
+// diffuse albedo + motion vectors describe the first non-translucent content visible through it. The
+// SBT_GUIDE hit group uses a guide any-hit shader that ignores terrain translucent and alpha-tests cutout.
 bool glassGuideHit(vec3 surfacePos, vec3 incidentDir, vec3 surfaceNormal, bool pbr,
                    out vec3 hitCamRel, out vec3 motionPrev, out vec3 diffuseAlbedo) {
     vec3 ro = surfacePos - surfaceNormal * GLASS_TRANSMIT_BIAS;
     vec3 rd = incidentDir;
-    for (int i = 0; i < GLASS_GUIDE_MAX_SKIP; i++) {
-        payload.hitT = -1.0;
-        payload.showCelestial = 0.0;
-        traceRayEXT(topLevelAS, gl_RayFlagsNoneEXT, CULL_SECONDARY,
-                    SBT_RADIANCE, SBT_STRIDE_BUCKET, 0u, ro, 0.0, rd, 10000.0, 0);
-        if (payload.hitT < 0.0) {
-            hitCamRel = (ro + rd * 1.0e6) - pc.camOffset;
-            motionPrev = vec3(0.0);
-            diffuseAlbedo = vec3(0.5);
-            return true;
-        }
-
-        vec3 hitPos = ro + rd * payload.hitT;
-        if (payload.material > 2.5) {
-            ro = hitPos - payload.normal * GLASS_TRANSMIT_BIAS;
-            continue;
-        }
-
-        hitCamRel = hitPos - pc.camOffset;
-        motionPrev = (payload.material <= 0.5 || payload.material > 1.5) ? payload.motionPrev : vec3(0.0);
-        diffuseAlbedo = payload.material <= 0.5
-                ? (pbr ? payload.albedo * (1.0 - clamp(payload.metalness, 0.0, 1.0)) : payload.albedo)
-                : payload.albedo;
+    payload.hitT = -1.0;
+    payload.showCelestial = 0.0;
+    traceRayEXT(topLevelAS, gl_RayFlagsNoneEXT, CULL_SECONDARY,
+                SBT_GUIDE, SBT_STRIDE_BUCKET, 0u, ro, 0.0, rd, 10000.0, 0);
+    if (payload.hitT < 0.0) {
+        hitCamRel = (ro + rd * 1.0e6) - pc.camOffset;
+        motionPrev = vec3(0.0);
+        diffuseAlbedo = vec3(0.5);
         return true;
     }
-    return false;
+
+    vec3 hitPos = ro + rd * payload.hitT;
+    hitCamRel = hitPos - pc.camOffset;
+    motionPrev = (payload.material <= 0.5 || payload.material > 1.5) ? payload.motionPrev : vec3(0.0);
+    diffuseAlbedo = payload.material <= 0.5
+            ? (pbr ? payload.albedo * (1.0 - clamp(payload.metalness, 0.0, 1.0)) : payload.albedo)
+            : payload.albedo;
+    return true;
 }
 
 // One Monte Carlo path from (ro, rd). Returns accumulated radiance along the path.

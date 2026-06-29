@@ -352,7 +352,7 @@ public final class RtComposite {
         if (worldPipeline == null) {
             bindlessTextureCapacity = RtEntityTextures.maxTextures();
             worldPipeline = RtPipeline.create(ctx, "world.rgen.spv",
-                    new String[]{"world.rmiss.spv", "shadow.rmiss.spv"}, "world.rchit.spv", "world.rahit.spv",
+                    new String[]{"world.rmiss.spv", "shadow.rmiss.spv"}, "world.rchit.spv", "world.rahit.spv", "world.guide.rahit.spv",
                     Long.BYTES, true, GUIDE_COUNT, bindlessTextureCapacity, true, true);
             // Per-frame push data lives in this BDA ring; the pipeline only pushes its address.
             if (pushRing == null) {
