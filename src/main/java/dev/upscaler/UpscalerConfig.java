@@ -556,6 +556,17 @@ public final class UpscalerConfig {
             }
         }
 
+        /** DLSS Frame Generation. Default off; gated additionally by hardware/driver availability. */
+        public static final class Fg {
+            public static final BooleanSetting ENABLED = bool("upscaler.rt.fg", false);
+            // Frames generated per rendered frame: 1 = 2x (one interpolated), 2 = 3x, etc. Clamped at
+            // runtime to the driver's reported DLSSG.MultiFrameCountMax.
+            public static final IntSetting MULTI_FRAME_COUNT = intAtLeast("upscaler.rt.fg.multiFrameCount", 1, 1);
+
+            private Fg() {
+            }
+        }
+
         public static final class Exposure {
             public static final StringSetting MODE = string("upscaler.rt.exposure.mode", "auto", Exposure::sanitizeMode);
             public static final FloatSetting FIXED = exposureScale("upscaler.rt.exposure.fixed", 1.1f);
