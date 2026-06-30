@@ -85,7 +85,7 @@ public final class RtComposite {
     // + dynamic sky (16-byte aligned vec4s): sunDir+dayFactor(@208) + lightDir(@224) + lightRadiance(@240)
     // + sky rewrite: moonDir+moonPhase(@256) + celestialAxis+starAngle(@272) + sunUv(@288) + moonUv(@304)
     // + W1/W2 water: waterParams(@320) xyz=camera-biome tint, w=wave time; waterAnchor(@336) xy=wave anchor
-    private static final int WORLD_PUSH_SIZE = 352;
+    private static final int WORLD_PUSH_SIZE = 416;
     private static final int GUIDE_COUNT = 6; // RR guide buffers bound at world-pipeline bindings 3..8
     // Frames a retired per-frame TLAS must outlive before it's freed (> frames-in-flight); matches
     // RtTerrain's deferred-free horizon. The frame TLAS is built + traced this frame, then freed once
@@ -656,6 +656,7 @@ public final class RtComposite {
             RtBuffer pushBuf = pushRing[pushSlot];
             ByteBuffer push = MemoryUtil.memByteBuffer(pushBuf.mapped, WORLD_PUSH_SIZE);
             frameInvViewProj.set(frameProjection).mul(frameViewRotation).invert().get(0, push);
+            mvCurProjView.get(352, push); // forward camera-relative view-projection: HW depth guide + water MV
             push.putFloat(64, (float) (camX - terrain.blockX));
             push.putFloat(68, (float) (camY - terrain.blockY));
             push.putFloat(72, (float) (camZ - terrain.blockZ));

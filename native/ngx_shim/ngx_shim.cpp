@@ -250,8 +250,9 @@ NGX_SHIM_EXPORT int ngxshim_dlssd_available() {
 }
 
 // Creates a DLSS Ray Reconstruction (DLSSD) feature. Configured for our path tracer: DL-unified
-// denoise, roughness packed into normals.w, and linear depth (we feed view-distance, not HW depth).
-// renderPreset is an NVSDK_NGX_RayReconstruction_Hint_Render_Preset value (0 = DLL default).
+// denoise, roughness packed into normals.w, and HW (non-linear, reversed-Z) depth — the rgen writes
+// ndc z/w, shared with Frame Generation. renderPreset is an NVSDK_NGX_RayReconstruction_Hint_Render_Preset
+// value (0 = DLL default).
 NGX_SHIM_EXPORT void* ngxshim_create_dlssd(VkCommandBuffer cmd,
                                            unsigned int renderWidth, unsigned int renderHeight,
                                            unsigned int displayWidth, unsigned int displayHeight,
@@ -280,7 +281,7 @@ NGX_SHIM_EXPORT void* ngxshim_create_dlssd(VkCommandBuffer cmd,
     std::memset(&createParams, 0, sizeof(createParams));
     createParams.InDenoiseMode = NVSDK_NGX_DLSS_Denoise_Mode_DLUnified;
     createParams.InRoughnessMode = NVSDK_NGX_DLSS_Roughness_Mode_Packed; // roughness from normals.w
-    createParams.InUseHWDepth = NVSDK_NGX_DLSS_Depth_Type_Linear;        // we feed linear view depth
+    createParams.InUseHWDepth = NVSDK_NGX_DLSS_Depth_Type_HW;            // rgen writes ndc reversed-Z depth
     createParams.InWidth = renderWidth;
     createParams.InHeight = renderHeight;
     createParams.InTargetWidth = displayWidth;
@@ -334,8 +335,6 @@ NGX_SHIM_EXPORT int ngxshim_evaluate_dlssd(VkCommandBuffer cmd, void* feature,
     (void) specularHitDistanceView;
     (void) specularHitDistanceImage;
     (void) specularHitDistanceFormat;
-    (void) worldToViewMatrix;
-    (void) viewToClipMatrix;
 
     NVSDK_NGX_Resource_VK color = makeImageResource(colorView, colorImage, colorFormat, renderWidth, renderHeight, VK_IMAGE_ASPECT_COLOR_BIT, false);
     NVSDK_NGX_Resource_VK depth = makeImageResource(depthView, depthImage, depthFormat, renderWidth, renderHeight, VK_IMAGE_ASPECT_COLOR_BIT, false);
@@ -357,8 +356,9 @@ NGX_SHIM_EXPORT int ngxshim_evaluate_dlssd(VkCommandBuffer cmd, void* feature,
     eval.pInNormals = &normals;
     eval.pInMotionVectorsReflections = &specularMotion;
     eval.pInSpecularHitDistance = nullptr;
-    eval.pInWorldToViewMatrix = nullptr;
-    eval.pInViewToClipMatrix = nullptr;
+    // HW depth needs the projection so DLSS can linearize it (jitter-free; NGX left-multiply layout).
+    eval.pInWorldToViewMatrix = worldToViewMatrix;
+    eval.pInViewToClipMatrix = viewToClipMatrix;
     // pInRoughness left null: InRoughnessMode_Packed reads roughness from normals.w.
     eval.InJitterOffsetX = jitterX;
     eval.InJitterOffsetY = jitterY;

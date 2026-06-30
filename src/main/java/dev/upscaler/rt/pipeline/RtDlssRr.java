@@ -28,14 +28,16 @@ public final class RtDlssRr {
 
     // DLSS feature flags. IsHDR (bit 0): color is linear HDR (rgba16f) — RR requires it ("HDR Color
     // required"). MVLowRes (bit 1): motion vectors are at render/input resolution, not display — RR
-    // requires it ("Low resolution Motion Vectors required"). AutoExposure (bit 6): in HDR mode DLSS
-    // needs the scene exposure (exposure texture or auto-estimate); without it the output is black, so
-    // let DLSS estimate exposure from the color itself. MVs are unjittered and depth is linear, so no
-    // MV_JITTERED / DEPTH_INVERTED.
+    // requires it ("Low resolution Motion Vectors required"). DepthInverted (bit 3): the depth guide is
+    // HW reversed-Z (near=1, far=0). AutoExposure (bit 6): in HDR mode DLSS needs the scene exposure
+    // (exposure texture or auto-estimate); without it the output is black, so let DLSS estimate exposure
+    // from the color itself. MVs are unjittered, so no MV_JITTERED.
     private static final int FEATURE_FLAG_IS_HDR = 1 << 0;
     private static final int FEATURE_FLAG_MV_LOW_RES = 1 << 1;
+    private static final int FEATURE_FLAG_DEPTH_INVERTED = 1 << 3;
     private static final int FEATURE_FLAG_AUTO_EXPOSURE = 1 << 6;
-    private static final int FEATURE_FLAGS = FEATURE_FLAG_IS_HDR | FEATURE_FLAG_MV_LOW_RES | FEATURE_FLAG_AUTO_EXPOSURE;
+    private static final int FEATURE_FLAGS = FEATURE_FLAG_IS_HDR | FEATURE_FLAG_MV_LOW_RES
+            | FEATURE_FLAG_DEPTH_INVERTED | FEATURE_FLAG_AUTO_EXPOSURE;
     // 0 = let the RR DLL pick its per-mode default preset.
     private static int renderPreset() {
         return UpscalerConfig.Rt.DlssRr.PRESET.value();
