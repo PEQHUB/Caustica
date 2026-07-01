@@ -1,6 +1,7 @@
 package dev.upscaler.mixin;
 
 import com.mojang.blaze3d.systems.CommandEncoderBackend;
+import com.mojang.blaze3d.systems.GpuSurface;
 import com.mojang.blaze3d.textures.GpuTextureView;
 import com.mojang.blaze3d.vulkan.VulkanCommandEncoder;
 import com.mojang.blaze3d.vulkan.VulkanDevice;
@@ -11,11 +12,15 @@ import dev.upscaler.rt.RtComposite;
 import dev.upscaler.rt.RtDeviceBringup;
 import dev.upscaler.rt.RtFramePresenter;
 import dev.upscaler.rt.RtHdr;
+import dev.upscaler.rt.RtReflex;
 import it.unimi.dsi.fastutil.longs.LongList;
 import org.lwjgl.system.MemoryStack;
 import org.lwjgl.vulkan.KHRSwapchain;
 import org.lwjgl.vulkan.VkAllocationCallbacks;
 import org.lwjgl.vulkan.VkDevice;
+import org.lwjgl.vulkan.VkPresentIdKHR;
+import org.lwjgl.vulkan.VkPresentInfoKHR;
+import org.lwjgl.vulkan.VkQueue;
 import org.lwjgl.vulkan.VkSurfaceFormatKHR;
 import org.lwjgl.vulkan.VkSwapchainCreateInfoKHR;
 import org.lwjgl.vulkan.VkSwapchainLatencyCreateInfoNV;
@@ -161,6 +166,59 @@ public abstract class VulkanGpuSurfaceMixin {
 			pCreateInfo.pNext(latency.address());
 			return KHRSwapchain.vkCreateSwapchainKHR(device, pCreateInfo, pAllocator, pSwapchain);
 		}
+	}
+
+	/**
+	 * Reflex Phase 1b: (re)apply the sleep-mode config for the just-(re)configured swapchain. Per spec this
+	 * is scoped to a specific swapchain object, so it must be re-called whenever {@code configure()} builds a
+	 * new one (e.g. resize) — {@link RtReflex#applySleepMode} is idempotent (no-op if unchanged), so calling
+	 * it unconditionally here is cheap. No-op when Reflex isn't enabled + device-supported.
+	 */
+	@Inject(method = "configure", at = @At("TAIL"))
+	private void upscaler$applyReflexSleepMode(GpuSurface.Configuration config, CallbackInfo ci) {
+		if (RtDeviceBringup.reflexEnabled()) {
+			RtReflex.INSTANCE.applySleepMode(this.device.vkDevice(), this.swapchain);
+		}
+	}
+
+	/**
+	 * Reflex Phase 1b: PRESENT_START/END markers around the real frame's present, plus (when
+	 * {@code VK_KHR_present_id} is enabled) chaining a {@code VkPresentIdKHR} onto it so the marker's
+	 * {@code presentID} correlates with this exact present call. The FG-generated extra presents
+	 * ({@link RtFramePresenter}) are deliberately NOT marked/present-id'd — Reflex paces/measures the real
+	 * frame only. No-op passthrough unless Reflex has successfully applied sleep mode for this swapchain.
+	 */
+	@Redirect(method = "present",
+			at = @At(value = "INVOKE",
+					target = "Lorg/lwjgl/vulkan/KHRSwapchain;vkQueuePresentKHR(Lorg/lwjgl/vulkan/VkQueue;Lorg/lwjgl/vulkan/VkPresentInfoKHR;)I"))
+	private int upscaler$presentWithReflex(VkQueue queue, VkPresentInfoKHR presentInfo) {
+		boolean reflexActive = RtReflex.enabled() && this.swapchain == RtReflex.INSTANCE.appliedSwapchain();
+		if (!reflexActive) {
+			return KHRSwapchain.vkQueuePresentKHR(queue, presentInfo);
+		}
+		VkDevice vkDevice = this.device.vkDevice();
+		// Own counter (not currentSimFrameId()): Minecraft can present outside the normal tick loop (e.g.
+		// Minecraft.setScreenAndShow's synchronous redraw when opening a world), so presentID must advance on
+		// every actual vkQueuePresentKHR call, not just once per sleep()/runTick — otherwise a stale, already-
+		// used id gets resent and VUID-VkPresentIdKHR-presentIds-04999 fires.
+		long presentId = RtReflex.INSTANCE.advancePresentId();
+		RtReflex.INSTANCE.marker(vkDevice, this.swapchain, RtReflex.MARKER_RENDERSUBMIT_END, presentId);
+		RtReflex.INSTANCE.marker(vkDevice, this.swapchain, RtReflex.MARKER_PRESENT_START, presentId);
+		int result;
+		if (RtDeviceBringup.presentIdEnabled()) {
+			try (MemoryStack stack = MemoryStack.stackPush()) {
+				VkPresentIdKHR vkPresentId = VkPresentIdKHR.calloc(stack).sType$Default()
+						.pNext(presentInfo.pNext())
+						.swapchainCount(1)
+						.pPresentIds(stack.longs(presentId));
+				presentInfo.pNext(vkPresentId.address());
+				result = KHRSwapchain.vkQueuePresentKHR(queue, presentInfo);
+			}
+		} else {
+			result = KHRSwapchain.vkQueuePresentKHR(queue, presentInfo);
+		}
+		RtReflex.INSTANCE.marker(vkDevice, this.swapchain, RtReflex.MARKER_PRESENT_END, presentId);
+		return result;
 	}
 
 	/**
