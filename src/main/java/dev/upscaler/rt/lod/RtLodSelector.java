@@ -36,6 +36,7 @@ final class RtLodSelector {
     private int qx = Integer.MIN_VALUE;
     private int qy;
     private int qz;
+    private int seenNearRadius = -1;
     private long seenMutation = -1;
     private long lastSelectNanos;
 
@@ -50,18 +51,24 @@ final class RtLodSelector {
         return selected[level];
     }
 
-    /** Recompute if the quantized camera moved or the world changed; false = previous result stands. */
-    boolean select(Long2ObjectOpenHashMap<RtLodSection>[] levels, long mutation, int pbx, int pby, int pbz) {
+    /**
+     * Recompute if the quantized camera moved, the world changed, or the near radius changed;
+     * false = previous result stands. {@code nearRadius} = the fine RtTerrain window radius
+     * ({@link RtLodWorld#fineWindowRadius}), so fine/proxy coverage is exclusive by construction.
+     */
+    boolean select(Long2ObjectOpenHashMap<RtLodSection>[] levels, long mutation, int pbx, int pby, int pbz,
+                   int nearRadius) {
         int nqx = pbx & ~(QUANT_BLOCKS - 1);
         int nqy = pby & ~(QUANT_BLOCKS - 1);
         int nqz = pbz & ~(QUANT_BLOCKS - 1);
-        if (nqx == qx && nqy == qy && nqz == qz && mutation == seenMutation) {
+        if (nqx == qx && nqy == qy && nqz == qz && mutation == seenMutation && nearRadius == seenNearRadius) {
             return false;
         }
         qx = nqx;
         qy = nqy;
         qz = nqz;
         seenMutation = mutation;
+        seenNearRadius = nearRadius;
         long t0 = System.nanoTime();
         for (LongArrayList list : selected) {
             list.clear();
@@ -70,14 +77,14 @@ final class RtLodSelector {
         int pcx = pbx >> 4;
         int pcz = pbz >> 4;
         for (RtLodSection s : levels[rootLevel].values()) {
-            descend(levels, rootLevel, s.sx, s.sy, s.sz, pcx, pcz, rootLevel);
+            descend(levels, rootLevel, s.sx, s.sy, s.sz, pcx, pcz, rootLevel, nearRadius);
         }
         lastSelectNanos = System.nanoTime() - t0;
         return true;
     }
 
     private void descend(Long2ObjectOpenHashMap<RtLodSection>[] levels, int level,
-                         int sx, int sy, int sz, int pcx, int pcz, int rootLevel) {
+                         int sx, int sy, int sz, int pcx, int pcz, int rootLevel, int nearRadius) {
         long x0 = (long) sx << (5 + level);
         long y0 = (long) sy << (5 + level);
         long z0 = (long) sz << (5 + level);
@@ -87,7 +94,7 @@ final class RtLodSelector {
         int cx1 = (int) ((x0 + size - 1) >> 4);
         int cz0 = (int) (z0 >> 4);
         int cz1 = (int) ((z0 + size - 1) >> 4);
-        int r = NEAR_RADIUS_CHUNKS;
+        int r = nearRadius;
         if (cx0 >= pcx - r && cx1 <= pcx + r && cz0 >= pcz - r && cz1 <= pcz + r) {
             return; // fully inside the near field — fine terrain owns this volume
         }
@@ -101,7 +108,7 @@ final class RtLodSelector {
                 int csy = sy * 2 + ((o >> 2) & 1);
                 if (levels[level - 1].containsKey(RtLodWorld.key(csx, csy, csz))) {
                     anyChild = true;
-                    descend(levels, level - 1, csx, csy, csz, pcx, pcz, rootLevel);
+                    descend(levels, level - 1, csx, csy, csz, pcx, pcz, rootLevel, nearRadius);
                 }
             }
             if (!anyChild && !straddles) {

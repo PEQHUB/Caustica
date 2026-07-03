@@ -41,6 +41,7 @@ import dev.upscaler.rt.accel.RtBuffer;
 import dev.upscaler.rt.accel.RtImage;
 import dev.upscaler.rt.entity.RtEntities;
 import dev.upscaler.rt.entity.RtEntityTextures;
+import dev.upscaler.rt.lod.RtLodTerrain;
 import dev.upscaler.rt.material.RtBlockMaterials;
 import dev.upscaler.rt.material.RtEntityMaterials;
 import dev.upscaler.rt.material.RtMaterials;
@@ -348,6 +349,9 @@ public final class RtComposite {
             UpscalerMod.LOGGER.error("RT terrain streaming failed; reverting to vanilla/upscaler path", t);
             return false;
         }
+        // Far-field LOD proxy residency (mesh drain + BLAS batch kick), budgeted like terrain streaming.
+        // Latches its own failure internally — LOD can never take the composite down.
+        RtLodTerrain.frame(ctx);
         if (RtTerrain.currentOrNull() == null || !frameCaptured || Minecraft.getInstance().level == null) {
             // No world this frame (incl. after quitting to the title — terrain residency + frameCaptured can
             // linger until an explicit invalidate, which would otherwise present a stale/empty HDR image as a
@@ -703,6 +707,7 @@ public final class RtComposite {
             push.putFloat(68, (float) (camY - terrain.blockY));
             push.putFloat(72, (float) (camZ - terrain.blockZ));
             push.putLong(80, terrain.tableAddress());
+            push.putLong(200, RtLodTerrain.INSTANCE.tableAddress()); // LOD node table (std430 pad slot before sunDir)
             push.putInt(88, debugView);
             push.putInt(92, (int) frameCounter); // per-frame RNG variation for the denoiser
             mvPushMatrix.get(96, push);
@@ -755,7 +760,18 @@ public final class RtComposite {
             // only the cheap instance-level TLAS is rebuilt per frame. Retired KEEP_FRAMES later.
             // Entity BLASes are built inline below and merged into the per-frame TLAS. geomTableAddr
             // feeds the hit shader entity path (per-prim normal/tint) and motion vectors.
-            RtEntities.FrameEntities fe = RtEntities.INSTANCE.beginFrame(ctx, terrain.staticInstances(),
+            // Static base = near-terrain sections + far-field LOD proxies (both against the terrain rebase);
+            // RtEntities appends its dynamic instances on top as a view.
+            List<RtAccel.Instance> staticBase = terrain.staticInstances();
+            List<RtAccel.Instance> lodInstances =
+                    RtLodTerrain.INSTANCE.instances(terrain.blockX, terrain.blockY, terrain.blockZ);
+            if (!lodInstances.isEmpty()) {
+                ArrayList<RtAccel.Instance> merged = new ArrayList<>(staticBase.size() + lodInstances.size());
+                merged.addAll(staticBase);
+                merged.addAll(lodInstances);
+                staticBase = merged;
+            }
+            RtEntities.FrameEntities fe = RtEntities.INSTANCE.beginFrame(ctx, staticBase,
                     terrain.blockX, terrain.blockY, terrain.blockZ, camX, camY, camZ, frameProjection, frameViewRotation);
             push.putLong(184, fe.geomTableAddr());
             // Upload any entity textures registered this frame into the bindless set before the trace.

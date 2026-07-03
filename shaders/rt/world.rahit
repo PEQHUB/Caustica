@@ -52,7 +52,9 @@ struct WorldPush {
     vec3 camDelta; uint spp;
     vec2 jitter;
     uint64_t entityTableAddr;  // 184 entity geometry table
-    uint flags;
+    uint flags;                // 192
+    uint pad0;                 // 196 (std430 pad — layout-identical to world.rchit)
+    uint64_t lodTableAddr;     // 200 M2 LOD node table (any-hit never runs on opaque LOD geometry)
     vec4 sunDir; vec4 lightDir; vec4 lightRadiance;
 };
 layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer WorldPushRef { WorldPush v; };

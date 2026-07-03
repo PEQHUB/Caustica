@@ -525,6 +525,19 @@ public final class UpscalerConfig {
             // Level 0 is dropped once its chunks are this far outside render distance.
             public static final IntSetting DEMOTE_MARGIN_CHUNKS =
                     intAtLeast("upscaler.rt.lodDemoteMarginChunks", 2, 0);
+            // M2: render far-field proxies (mesh + BLAS + TLAS merge) and shrink the fine RtTerrain
+            // window to the near boundary. Off = M0/M1 data/selection only, zero rendering delta.
+            public static final BooleanSetting RENDER = bool("upscaler.rt.lodRender", true);
+            // Render-thread budget for one LOD residency pass (upload + BLAS prepare of finished meshes).
+            public static final FloatSetting BUILD_BUDGET_MS =
+                    clampedFloat("upscaler.rt.lodBuildBudgetMs", 1.5f, 0.05f, 100f);
+            public static final IntSetting BUILDS_PER_FRAME = intAtLeast("upscaler.rt.lodBuildsPerFrame", 64, 1);
+            // Annulus ingest (sections outside the fine window): snapshot dispatches per tick + in-flight cap.
+            public static final IntSetting INGEST_PER_TICK = intAtLeast("upscaler.rt.lodIngestPerTick", 64, 1);
+            public static final IntSetting INGEST_MAX_INFLIGHT = intAtLeast("upscaler.rt.lodIngestMaxInflight", 128, 1);
+            // Deselected proxies keep their GPU resources this long (re-selection is then free); rendering
+            // exclusion is immediate — the grace only prevents rebuild churn at band boundaries.
+            public static final IntSetting RETIRE_GRACE_TICKS = intAtLeast("upscaler.rt.lodRetireGraceTicks", 40, 0);
 
             private Lod() {
             }

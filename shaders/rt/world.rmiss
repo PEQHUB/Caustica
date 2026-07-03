@@ -24,7 +24,9 @@ struct WorldPush {
     vec3 camDelta; uint spp;
     vec2 jitter;
     uint64_t entityTableAddr;
-    uint flags;
+    uint flags;            // 192
+    uint pad0;             // 196 (std430 pad — layout-identical to world.rchit)
+    uint64_t lodTableAddr; // 200 M2 LOD node table (unused here)
     vec4 sunDir;         // 208 xyz true sun direction, w = dayFactor 0..1
     vec4 lightDir;       // 224 xyz active NEE light dir, w = square half-angle (rad)
     vec4 lightRadiance;  // 240 xyz HDR radiance of the active light, w = star brightness (vanilla, 0..1)

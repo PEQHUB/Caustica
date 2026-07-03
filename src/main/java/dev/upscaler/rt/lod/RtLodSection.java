@@ -27,6 +27,7 @@ public final class RtLodSection {
     private short[] dataS; // ...escalated here past 256 entries (mutually exclusive with dataB)
     private int nonAir;
     private int ingestMask; // level 0 only: which of the 8 vanilla-section octants have been ingested
+    private int contentVersion; // bumped per setRegion; RtLodTerrain re-meshes a proxy when it lags
     long lastTouch; // RtLodWorld tick of the last write (eviction ordering input)
 
     RtLodSection(int level, int sx, int sy, int sz) {
@@ -56,6 +57,7 @@ public final class RtLodSection {
         if (cells == null && dataB == null && dataS == null) {
             return; // clearing a section that never held data
         }
+        contentVersion++;
         int lastGid = Integer.MIN_VALUE;
         int lastLocal = 0;
         for (int y = 0; y < n; y++) {
@@ -76,6 +78,29 @@ public final class RtLodSection {
 
     public int nonAir() {
         return nonAir;
+    }
+
+    public int contentVersion() {
+        return contentVersion;
+    }
+
+    /**
+     * Decode all 32³ cells to global palette ids (same {@code (y*32 + z)*32 + x} order the mesh builder
+     * consumes). A fresh array per call: the caller hands it to a worker thread while this section keeps
+     * mutating on the main thread.
+     */
+    public int[] snapshotCells() {
+        int[] out = new int[VOLUME];
+        if (dataB != null) {
+            for (int i = 0; i < VOLUME; i++) {
+                out[i] = localPalette[dataB[i] & 0xFF];
+            }
+        } else if (dataS != null) {
+            for (int i = 0; i < VOLUME; i++) {
+                out[i] = localPalette[dataS[i] & 0xFFFF];
+            }
+        }
+        return out;
     }
 
     public int ingestMask() {

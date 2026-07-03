@@ -12,10 +12,15 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.client.renderer.chunk.RenderSectionRegion;
 import net.minecraft.world.level.block.state.BlockState;
 
+import it.unimi.dsi.fastutil.longs.LongArrayList;
+import net.minecraft.world.level.EmptyBlockGetter;
+import net.minecraft.world.level.chunk.PalettedContainer;
+
 import java.lang.ref.WeakReference;
 import java.util.ArrayList;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.LongAdder;
 
 /**
@@ -46,8 +51,13 @@ public final class RtLodWorld {
     private static final RtLodWorld INSTANCE = new RtLodWorld();
     // First failure disables LOD for the session (never let sidecar bugs take down terrain or ticks).
     private static volatile boolean failed;
+    // Shared monotonic ingest ordering across BOTH sources (terrain-job piggyback + annulus ingester).
+    // Tokens are fetched at dispatch time on the render thread, so per-section order is dispatch order
+    // no matter which source re-ingests a section as it crosses the near boundary.
+    private static final AtomicLong INGEST_TOKENS = new AtomicLong();
 
     private final RtLodPalette palette = new RtLodPalette();
+    private final RtLodIngester ingester = new RtLodIngester();
     private final ConcurrentLinkedQueue<Ingest> ingestQueue = new ConcurrentLinkedQueue<>();
     private final AtomicInteger queueSize = new AtomicInteger();
     private volatile int epoch;
@@ -57,6 +67,7 @@ public final class RtLodWorld {
     private final Long2LongOpenHashMap appliedToken = new Long2LongOpenHashMap();
     private final RtLodSelector selector = new RtLodSelector();
     private long mutationCounter; // bumped on any section-map change; gates selector recompute
+    private long selectionGeneration; // bumped when the selector actually recomputed (RtLodTerrain diff gate)
     private WeakReference<ClientLevel> trackedLevel = new WeakReference<>(null);
     private long tickCount;
 
@@ -79,6 +90,37 @@ public final class RtLodWorld {
 
     private static boolean enabled() {
         return UpscalerConfig.Rt.Lod.WORLD.value();
+    }
+
+    /** True when far-field proxies should render (M2) — the LOD world is on, rendering isn't A/B'd off. */
+    public static boolean renderingActive() {
+        return !failed && enabled() && UpscalerConfig.Rt.Lod.RENDER.value();
+    }
+
+    /**
+     * The fine {@code RtTerrain} window radius in chunks: the vanilla render distance, capped at the LOD
+     * near boundary while proxies render (proxies own the annulus). RtTerrain calls this from
+     * {@code horizontalChunks}; the ingester and selector use the same value so coverage is exclusive.
+     */
+    public static int fineWindowRadius(int effectiveRenderDistance) {
+        int r = Math.max(1, effectiveRenderDistance);
+        return renderingActive() ? Math.min(r, RtLodSelector.NEAR_RADIUS_CHUNKS) : r;
+    }
+
+    /** Next shared ingest-ordering token. Fetch at dispatch time on the render thread (see INGEST_TOKENS). */
+    public static long nextIngestToken() {
+        return INGEST_TOKENS.incrementAndGet();
+    }
+
+    /**
+     * Block-dirty hook (LevelExtractorMixin, thread-safe): re-ingest edited sections outside the fine
+     * terrain window. Inside it the terrain re-extract job re-voxelizes via the piggyback — no work here.
+     */
+    public static void markBlocksDirty(int minX, int minY, int minZ, int maxX, int maxY, int maxZ) {
+        if (failed || !enabled()) {
+            return;
+        }
+        INSTANCE.ingester.markBlocksDirty(minX, minY, minZ, maxX, maxY, maxZ);
     }
 
     /**
@@ -142,15 +184,22 @@ public final class RtLodWorld {
         int pbx = mc.player.getBlockX();
         int pby = mc.player.getBlockY();
         int pbz = mc.player.getBlockZ();
+        int effRd = Math.max(1, mc.options.getEffectiveRenderDistance());
+        int nearRadius = fineWindowRadius(effRd);
+        int outerRadius = effRd + UpscalerConfig.Rt.Lod.DEMOTE_MARGIN_CHUNKS.value();
+        // M2: sections between the fine window and the loaded horizon no longer get tessellation jobs
+        // (the fine window shrank), so the ingester voxelizes them through its own lightweight path.
+        ingester.tick(this, level, pbx >> 4, pbz >> 4, nearRadius, outerRadius);
         applyIngests();
         if (tickCount % SWEEP_INTERVAL_TICKS == 0) {
-            int radius = Math.max(1, mc.options.getEffectiveRenderDistance())
-                    + UpscalerConfig.Rt.Lod.DEMOTE_MARGIN_CHUNKS.value();
-            demoteSweep(pbx >> 4, pbz >> 4, radius);
+            demoteSweep(pbx >> 4, pbz >> 4, outerRadius);
             evictSweep(pbx, pby, pbz);
         }
-        // M1: recompute the far-field selection when the camera or the data moved (dump-only until M2).
-        selector.select(levels, mutationCounter, pbx, pby, pbz);
+        // Recompute the far-field selection when the camera or the data moved; RtLodTerrain diffs
+        // residency against it per selectionGeneration.
+        if (selector.select(levels, mutationCounter, pbx, pby, pbz, nearRadius)) {
+            selectionGeneration++;
+        }
         if (UpscalerConfig.Rt.Lod.DEBUG.value() && tickCount % DEBUG_LOG_INTERVAL_TICKS == 0) {
             logDebug();
         }
@@ -188,13 +237,63 @@ public final class RtLodWorld {
                 }
             }
         }
+        finishIngest(cells, nonAir, scx, scy, scz, token, epochAtIngest, maxLevel);
+    }
+
+    /**
+     * Annulus-path voxelization from a {@link PalettedContainer} copy (no region snapshot — sections
+     * outside the fine terrain window never get a tessellation job). Worker thread; the MapColor query
+     * uses an empty view, which vanilla map colors never consult. Mirrors {@link #voxelizeAndQueue}.
+     */
+    void voxelizeContainer(PalettedContainer<BlockState> states, int scx, int scy, int scz, long token) {
+        int epochAtIngest = epoch;
+        int maxLevel = UpscalerConfig.Rt.Lod.MAX_LEVEL.value();
+        int sox = scx << 4, soy = scy << 4, soz = scz << 4;
+        BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
+        int[] cells = new int[16 * 16 * 16];
+        int nonAir = 0;
+        int idx = 0;
+        for (int ly = 0; ly < 16; ly++) {
+            for (int lz = 0; lz < 16; lz++) {
+                for (int lx = 0; lx < 16; lx++) {
+                    BlockState state = states.get(lx, ly, lz);
+                    int gid = RtLodPalette.AIR_ID;
+                    if (!state.isAir()) {
+                        pos.set(sox + lx, soy + ly, soz + lz);
+                        int id = palette.idFor(state, EmptyBlockGetter.INSTANCE, pos);
+                        if (palette.entry(id).kind() != RtLodPalette.KIND_AIR) {
+                            gid = id;
+                        }
+                    }
+                    if (gid != RtLodPalette.AIR_ID) {
+                        nonAir++;
+                    }
+                    cells[idx++] = gid;
+                }
+            }
+        }
+        finishIngest(cells, nonAir, scx, scy, scz, token, epochAtIngest, maxLevel);
+    }
+
+    /** All-air fast path (hasOnlyAir sections) — no worker job, straight to the apply queue. */
+    void enqueueAllAir(int scx, int scy, int scz, long token) {
+        voxelized.increment();
+        enqueue(new Ingest(scx, scy, scz, token, epoch, null));
+    }
+
+    private void finishIngest(int[] cells, int nonAir, int scx, int scy, int scz, long token,
+                              int epochAtIngest, int maxLevel) {
         voxelized.increment();
         int[][] mips = nonAir > 0 ? RtLodMipper.buildMips(palette, cells, maxLevel) : null;
+        enqueue(new Ingest(scx, scy, scz, token, epochAtIngest, mips));
+    }
+
+    private void enqueue(Ingest in) {
         if (queueSize.get() >= QUEUE_CAP) {
-            overflowDropped.increment(); // apply is behind; the section re-ingests on its next job
+            overflowDropped.increment(); // apply is behind; the section re-ingests on its next job/scan
             return;
         }
-        ingestQueue.add(new Ingest(scx, scy, scz, token, epochAtIngest, mips));
+        ingestQueue.add(in);
         queueSize.incrementAndGet();
     }
 
@@ -350,8 +449,53 @@ public final class RtLodWorld {
         }
         appliedToken.clear();
         appliedToken.trim();
+        ingester.clear();
         trackedLevel = new WeakReference<>(null);
         mutationCounter++;
+        selectionGeneration++;
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // Package accessors (RtLodTerrain residency + RtLodIngester run on the same client/render thread)
+
+    static RtLodWorld instance() {
+        return INSTANCE;
+    }
+
+    RtLodSection sectionAt(int level, long key) {
+        return levels[level].get(key);
+    }
+
+    LongArrayList selectedKeys(int level) {
+        return selector.selected(level);
+    }
+
+    long selectionGeneration() {
+        return selectionGeneration;
+    }
+
+    long mutation() {
+        return mutationCounter;
+    }
+
+    int worldEpoch() {
+        return epoch;
+    }
+
+    long currentTick() {
+        return tickCount;
+    }
+
+    RtLodPalette palette() {
+        return palette;
+    }
+
+    boolean hasApplied(long vanillaSectionKey) {
+        return appliedToken.containsKey(vanillaSectionKey);
+    }
+
+    void forgetApplied(long vanillaSectionKey) {
+        appliedToken.remove(vanillaSectionKey);
     }
 
     private void logDebug() {
@@ -380,12 +524,26 @@ public final class RtLodWorld {
                 .append(" evicted ").append(evicted)
                 .append(", queue ").append(queueSize.get());
         selector.appendDebug(sb);
+        ingester.appendDebug(sb);
+        RtLodTerrain.INSTANCE.appendDebug(sb);
         UpscalerMod.LOGGER.info(sb.toString());
     }
 
     /** Same packing as RtTerrain.sectionKey; LOD-level coords are strictly smaller, so ranges fit. */
     static long key(int x, int y, int z) {
         return (x & 0x3FFFFFFL) | ((z & 0x3FFFFFFL) << 26) | ((y & 0xFFFL) << 52);
+    }
+
+    static int keyX(long key) {
+        return (int) (key << 38 >> 38);
+    }
+
+    static int keyZ(long key) {
+        return (int) (key << 12 >> 38);
+    }
+
+    static int keyY(long key) {
+        return (int) (key >> 52);
     }
 
     /** One voxelized vanilla section: full mip pyramid ({@code null} = all air) + ordering/epoch fences. */

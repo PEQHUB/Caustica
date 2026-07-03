@@ -55,6 +55,8 @@ struct WorldPush {
     vec2 jitter;               // 176 P4.2b sub-pixel jitter, render px (+ on the ray, - reported to RR)
     uint64_t entityTableAddr;  // 184 P5.1b-2 entity geometry table (closest-hit/any-hit)
     uint flags;                // 192 bit0 = camera submerged, bit1 = PBR BRDF enabled, bit4 = water waves
+    uint pad0;                 // 196 (std430 pad — layout-identical to world.rchit)
+    uint64_t lodTableAddr;     // 200 M2 far-field LOD node table (hit shaders only; rgen ignores)
     vec4 sunDir;               // 208 P6.3 xyz true sun direction (sky glow/disc), w dayFactor 0..1
     vec4 lightDir;             // 224 xyz active NEE light dir (sun above horizon else moon), w = square half-angle (rad)
     vec4 lightRadiance;        // 240 xyz HDR radiance of the active light (warm/dim low, white high)

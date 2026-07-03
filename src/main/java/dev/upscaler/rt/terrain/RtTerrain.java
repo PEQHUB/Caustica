@@ -826,7 +826,9 @@ public final class RtTerrain {
     }
 
     private int horizontalChunks(Minecraft mc) {
-        return Math.max(1, mc.options.getEffectiveRenderDistance());
+        // M2: while LOD proxies render, the fine window stops at the LOD near boundary (10 chunks) and
+        // far-field proxies own the annulus out to render distance and beyond (docs/LOD_PLAN.md).
+        return RtLodWorld.fineWindowRadius(mc.options.getEffectiveRenderDistance());
     }
 
     private void drainDirty() {
@@ -1235,6 +1237,9 @@ public final class RtTerrain {
         RtFrameStats.STREAM.count("sectionsSnapshotted", 1);
         RenderSectionRegion region = dispatch.regionCache().createRegion(dispatch.level(), SectionPos.asLong(sx, sy, sz));
         long token = ++tessToken;
+        // LOD ingest ordering token, fetched at dispatch time (render thread) from the source SHARED with
+        // the annulus ingester — so a section crossing the fine-window boundary keeps monotonic order.
+        long lodToken = RtLodWorld.nextIngestToken();
         long dirtyGroup = queuedDirtyGroup.remove(key);
         if (dirtyGroup != NO_DIRTY_GROUP && !dirtyGroups.containsKey(dirtyGroup)) {
             dirtyGroup = NO_DIRTY_GROUP;
@@ -1252,7 +1257,7 @@ public final class RtTerrain {
                 // LOD sidecar ingest piggybacks the snapshot this job already holds (docs/LOD_PLAN.md M0).
                 // Runs after the terrain result is enqueued so it never delays visible fill, and is total
                 // (never throws — a throw here would enqueueCompleted twice via the catch below).
-                RtLodWorld.ingestFromWorker(region, sx, sy, sz, token);
+                RtLodWorld.ingestFromWorker(region, sx, sy, sz, lodToken);
             } catch (Throwable t) {
                 enqueueCompleted(job, null, t);
                 throw t;

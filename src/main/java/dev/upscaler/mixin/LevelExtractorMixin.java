@@ -1,5 +1,6 @@
 package dev.upscaler.mixin;
 
+import dev.upscaler.rt.lod.RtLodWorld;
 import dev.upscaler.rt.terrain.RtTerrain;
 import net.minecraft.client.renderer.extract.LevelExtractor;
 import net.minecraft.core.BlockPos;
@@ -28,10 +29,14 @@ public class LevelExtractorMixin {
     @Inject(method = "blockChanged(Lnet/minecraft/core/BlockPos;I)V", at = @At("HEAD"))
     private void upscaler$rtBlockChanged(BlockPos pos, int updateFlags, CallbackInfo ci) {
         RtTerrain.markBlocksDirty(pos.getX(), pos.getY(), pos.getZ(), pos.getX(), pos.getY(), pos.getZ());
+        // LOD sidecar: edits inside the fine window re-ingest via the terrain re-extract piggyback; this
+        // covers edits in the annulus (loaded chunks beyond the shrunken fine window).
+        RtLodWorld.markBlocksDirty(pos.getX(), pos.getY(), pos.getZ(), pos.getX(), pos.getY(), pos.getZ());
     }
 
     @Inject(method = "setBlocksDirty(IIIIII)V", at = @At("HEAD"))
     private void upscaler$rtBlocksDirty(int minX, int minY, int minZ, int maxX, int maxY, int maxZ, CallbackInfo ci) {
         RtTerrain.markBlocksDirty(minX, minY, minZ, maxX, maxY, maxZ);
+        RtLodWorld.markBlocksDirty(minX, minY, minZ, maxX, maxY, maxZ);
     }
 }

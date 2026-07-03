@@ -84,6 +84,7 @@ public final class UpscalerClient implements ClientModInitializer {
 		if (ctx != null) {
 			ctx.waitIdle();
 			RtTerrain.shutdown(ctx);
+			dev.upscaler.rt.lod.RtLodTerrain.shutdown(ctx); // LOD proxy BLAS/buffers (device idle)
 			RtEntities.INSTANCE.shutdown();
 		}
 		RtLodWorld.reset(); // CPU-only sidecar: drop retained sections + queued ingests

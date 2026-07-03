@@ -42,6 +42,9 @@ layout(buffer_reference, std430, buffer_reference_align = 8) readonly buffer Sec
 // P5.1b-2: per-entity geometry records, indexed by the entity instance index (the low bits of
 // gl_InstanceCustomIndexEXT). See RtEntities.
 layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer EntityTable { EntityGeom e[]; };
+// M2 far-field LOD proxies: one u64 per node slot = the address of the node's per-triangle Prim array
+// (same Prim layout as terrain; normal.w carries raw emission 0..1, tint.rgb the flat palette albedo).
+layout(buffer_reference, std430, buffer_reference_align = 8) readonly buffer LodTable { uint64_t a[]; };
 // P5.1c-2: per-vertex world-space displacement (cur − prev frame), parallel to the vertex/UV buffers
 // (vec4 per vertex, xyz used). Barycentric-interpolated at the hit for a per-vertex motion vector.
 layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer Disps { vec4 d[]; };
@@ -72,7 +75,9 @@ struct WorldPush {
     vec3 camDelta; uint spp;
     vec2 jitter;
     uint64_t entityTableAddr;  // 184 entity geometry table
-    uint flags;
+    uint flags;                // 192
+    uint pad0;                 // 196 (std430 pad before the vec4 below — lodTableAddr reuses it)
+    uint64_t lodTableAddr;     // 200 M2 far-field LOD node table: u64 Prim-array address per slot
     vec4 sunDir; vec4 lightDir; vec4 lightRadiance;
 };
 layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer WorldPushRef { WorldPush v; };
@@ -105,6 +110,9 @@ const int ENTITY_BIT = 0x800000;
 // bits index the geom table (IDX_MASK). Particle instances also carry TLAS mask 0x02 (camera-ray-only).
 const int PARTICLE_BIT = 0x400000;
 const int IDX_MASK = 0x3FFFFF;
+// M2 far-field LOD proxies: bit 21 routes to the LOD node table; the low 21 bits are the node slot.
+// Opaque single-geometry BLAS → any-hit never runs; shading is the flat palette albedo in the prim.
+const int LOD_BIT = 0x200000;
 
 // P6.2a LabPBR predefined metals (green channel 230..237): complex refractive indices N (eta) and K
 // (kappa) per RGB. F0 = ((n-1)^2 + k^2) / ((n+1)^2 + k^2). Values per the LabPBR 1.3 standard.
@@ -300,6 +308,29 @@ void main() {
         payload.metalness = metal;
         payload.f0 = f0;
         payload.sss = sss;
+        return;
+    }
+
+    // M2 far-field LOD proxy: per-triangle flat material, no atlas, no UVs, no index buffer. The
+    // geometric normal comes from the prim (axis-aligned greedy faces); emission rides normal.w raw
+    // (no terrain +2 layer flag). Static geometry → camera-only motion vector, like terrain.
+    if ((gl_InstanceCustomIndexEXT & LOD_BIT) != 0) {
+        int slot = gl_InstanceCustomIndexEXT & (LOD_BIT - 1);
+        Prim lpr = Prims(LodTable(pc.lodTableAddr).a[slot]).p[gl_PrimitiveID];
+        vec3 ln = normalize(lpr.normal.xyz);
+        if (dot(ln, -gl_WorldRayDirectionEXT) < 0.0) {
+            ln = -ln;
+        }
+        payload.albedo = lpr.tint.rgb;
+        payload.normal = ln;
+        payload.hitT = gl_HitTEXT;
+        payload.emission = lpr.normal.w;
+        payload.motionPrev = vec3(0.0);
+        payload.material = 0.0;
+        payload.roughness = lpr.mat.x;
+        payload.metalness = lpr.mat.y;
+        payload.f0 = vec3(0.04);
+        payload.sss = 0.0;
         return;
     }
 
