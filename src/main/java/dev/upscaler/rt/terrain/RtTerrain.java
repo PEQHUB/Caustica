@@ -227,7 +227,12 @@ public final class RtTerrain {
         inFlightDirtyGroup.defaultReturnValue(NO_DIRTY_GROUP);
     }
 
-    /** The manager if it currently has resident geometry (built BLAS + instances) to trace, else null. */
+    /**
+     * The manager if it has a valid (possibly zero-instance) section table to trace against, else null.
+     * Null only while genuinely uninitialized (no world, or mid-teardown) — a transient empty-residency
+     * window (world join, dimension change, a full evict) still returns non-null so the RT frame keeps
+     * tracing (sky/entities only) instead of a caller falling back to vanilla.
+     */
     public static RtTerrain currentOrNull() {
         return INSTANCE.ready ? INSTANCE : null;
     }
@@ -1612,7 +1617,10 @@ public final class RtTerrain {
                     g.slot = -1;
                 }
             }
-            ready = false;
+            // Zero resident sections (e.g. every section just evicted on a respawn) is a transient
+            // streaming state, not "no world" — keep tracing (sky/entities only) instead of handing the
+            // frame back to vanilla; see ensureEmptyTableReady.
+            ensureEmptyTableReady(ctx);
             return;
         }
 
@@ -1665,6 +1673,26 @@ public final class RtTerrain {
         if (oldTable != null) {
             retire(freeAt, oldTable, List.of());
         }
+    }
+
+    /**
+     * Establish a minimal, valid, zero-instance table so the terrain stays traceable (sky/entities only,
+     * {@link #ready} true) through transient no-resident-sections windows (world join, dimension change,
+     * a full residency evict) instead of forcing a null/not-ready gap. Only called once sectionTable is
+     * already null (old one already freed by the caller) — a plain allocation, not a growth/retire swap.
+     */
+    private void ensureEmptyTableReady(RtContext ctx) {
+        if (sectionTable == null) {
+            int capacity = sectionTableInitialCapacity();
+            sectionTable = pool.acquire(ctx, (long) capacity * SECTION_ENTRY_BYTES,
+                    org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true,
+                    "terrain section table " + capacity + " slots (empty)");
+            sectionTableCapacity = capacity;
+        }
+        if (staticInstances == null) {
+            staticInstances = staticInstanceList;
+        }
+        ready = true;
     }
 
     private int allocateSectionSlot() {
@@ -1803,6 +1831,9 @@ public final class RtTerrain {
             prepared.clear();
             if (destroyPool) {
                 pool.destroyAll();
+                ready = false;
+            } else {
+                ensureEmptyTableReady(ctx);
             }
             return;
         }
@@ -1852,8 +1883,10 @@ public final class RtTerrain {
         prepared.clear();
         if (destroyPool) {
             pool.destroyAll();
+            ready = false;
+        } else {
+            ensureEmptyTableReady(ctx);
         }
-        ready = false;
     }
 
     private static long columnKey(int scx, int scz) {
