@@ -1,7 +1,6 @@
 package dev.upscaler.client;
 
 import com.mojang.blaze3d.pipeline.RenderTarget;
-import dev.upscaler.UpscalerConfig;
 import dev.upscaler.UpscalerMod;
 import dev.upscaler.rt.RtComposite;
 import dev.upscaler.rt.RtContext;
@@ -9,20 +8,6 @@ import dev.upscaler.rt.terrain.RtTerrain;
 
 public final class VanillaRenderController {
 	public static final VanillaRenderController INSTANCE = new VanillaRenderController();
-
-	public enum OutputMode {
-		RT,
-		VANILLA;
-
-		public static OutputMode parse(String value) {
-			if ("vanilla".equalsIgnoreCase(value)) {
-				return VANILLA;
-			}
-			return RT;
-		}
-	}
-
-	private static volatile OutputMode outputModeOverride;
 
 	private boolean frameStarted;
 	private boolean baseReady;
@@ -32,8 +17,8 @@ public final class VanillaRenderController {
 	private boolean loggedActive;
 	private boolean loggedWaitingForRtPlayerSection;
 	private boolean loggedRtPlayerSectionReady;
-	private OutputMode outputMode = OutputMode.RT;
-	private OutputMode lastLoggedOutputMode;
+	private boolean rtActive = true;
+	private Boolean lastLoggedRtActive;
 	private String inactiveReason;
 	private String lastLoggedInactiveReason;
 
@@ -46,21 +31,21 @@ public final class VanillaRenderController {
 		this.worldSkipped = false;
 		this.baseReady = false;
 		this.inactiveReason = null;
-		this.outputMode = currentOutputMode();
+		this.rtActive = RtComposite.enabled();
 
-		if (logEnabled() && this.outputMode != this.lastLoggedOutputMode) {
-			this.lastLoggedOutputMode = this.outputMode;
-			UpscalerMod.LOGGER.info("RT output mode: {}", this.outputMode == OutputMode.RT ? "rt" : "vanilla");
+		if (!Boolean.valueOf(this.rtActive).equals(this.lastLoggedRtActive)) {
+			this.lastLoggedRtActive = this.rtActive;
+			UpscalerMod.LOGGER.info("RT output mode: {}", this.rtActive ? "rt" : "vanilla");
 		}
 
-		if (this.outputMode == OutputMode.VANILLA) {
+		if (!this.rtActive) {
 			return;
 		}
 
 		this.inactiveReason = findInactiveReason(mainTarget);
 		this.baseReady = this.inactiveReason == null;
 		if (this.baseReady) {
-			if (logEnabled() && !this.loggedActive) {
+			if (!this.loggedActive) {
 				this.loggedActive = true;
 				UpscalerMod.LOGGER.info("Vanilla world rendering cancellation active; using existing RT composite seam");
 			}
@@ -78,7 +63,7 @@ public final class VanillaRenderController {
 	}
 
 	public boolean shouldCancelLevelRenderer(boolean waitingForRtPlayerSection) {
-		if (this.outputMode == OutputMode.VANILLA) {
+		if (!this.rtActive) {
 			return false;
 		}
 		if (!this.frameStarted) {
@@ -92,7 +77,7 @@ public final class VanillaRenderController {
 			logInactive("level projection was not captured");
 			return false;
 		}
-		if (waitingForRtPlayerSection && logEnabled() && !this.loggedWaitingForRtPlayerSection) {
+		if (waitingForRtPlayerSection && !this.loggedWaitingForRtPlayerSection) {
 			this.loggedWaitingForRtPlayerSection = true;
 			UpscalerMod.LOGGER.info("Keeping vanilla LevelRenderer canceled while waiting for RT player section residency");
 		}
@@ -100,7 +85,7 @@ public final class VanillaRenderController {
 	}
 
 	public void markRtPlayerSectionReady() {
-		if (logEnabled() && !this.loggedRtPlayerSectionReady) {
+		if (!this.loggedRtPlayerSectionReady) {
 			this.loggedRtPlayerSectionReady = true;
 			UpscalerMod.LOGGER.info("Satisfied vanilla terrain-load callback from RT player section residency");
 		}
@@ -115,34 +100,12 @@ public final class VanillaRenderController {
 	}
 
 	public boolean shouldCompositeRt() {
-		return this.outputMode == OutputMode.RT && RtComposite.enabled();
+		return this.rtActive;
 	}
 
-	/**
-	 * Runtime work/output switch for per-frame RT work. Startup Vulkan RT feature negotiation is controlled
-	 * separately by {@code upscaler.rt}, so VANILLA can be flipped back to RT later.
-	 */
+	/** Runtime work switch for per-frame RT work; mirrors {@link RtComposite#enabled()}. */
 	public static boolean rtRuntimeWorkRequested() {
-		return currentOutputMode() == OutputMode.RT && RtComposite.enabled();
-	}
-
-	public static OutputMode currentOutputMode() {
-		OutputMode override = outputModeOverride;
-		if (override != null) {
-			return override;
-		}
-		return readOutputMode();
-	}
-
-	public static void setOutputMode(OutputMode mode) {
-		if (mode == null) {
-			throw new IllegalArgumentException("mode");
-		}
-		outputModeOverride = mode;
-	}
-
-	public static void clearOutputModeOverride() {
-		outputModeOverride = null;
+		return RtComposite.enabled();
 	}
 
 	public void markRtCompositeResult(boolean success) {
@@ -162,7 +125,7 @@ public final class VanillaRenderController {
 			return "RT composite failure latch is set";
 		}
 		if (!RtComposite.enabled()) {
-			return "upscaler.rt.composite is false";
+			return "upscaler.rt is false";
 		}
 		if (RtContext.currentOrNull() == null) {
 			return "RT context is not ready";
@@ -177,7 +140,7 @@ public final class VanillaRenderController {
 	}
 
 	private void latchFailure(String reason) {
-		if (!this.failureLatched && logEnabled()) {
+		if (!this.failureLatched) {
 			UpscalerMod.LOGGER.warn("Disabling vanilla world cancellation: {}", reason);
 		}
 		this.failureLatched = true;
@@ -186,18 +149,10 @@ public final class VanillaRenderController {
 	}
 
 	private void logInactive(String reason) {
-		if (!logEnabled() || reason == null || reason.equals(this.lastLoggedInactiveReason)) {
+		if (reason == null || reason.equals(this.lastLoggedInactiveReason)) {
 			return;
 		}
 		UpscalerMod.LOGGER.info("Vanilla world cancellation inactive: {}", reason);
 		this.lastLoggedInactiveReason = reason;
-	}
-
-	private static OutputMode readOutputMode() {
-		return OutputMode.parse(UpscalerConfig.Rt.OUTPUT_MODE.get());
-	}
-
-	private static boolean logEnabled() {
-		return UpscalerConfig.Rt.CANCEL_VANILLA_WORLD_LOG.value();
 	}
 }

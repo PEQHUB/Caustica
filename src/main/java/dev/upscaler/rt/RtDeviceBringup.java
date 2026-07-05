@@ -55,9 +55,9 @@ import static org.lwjgl.vulkan.KHRPresentId.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PR
  *
  * <p>Extension names are added to the device extension list separately; feature structs are added here.
  * Both are gated on the selected device actually supporting RT; if not, nothing is added
- * and the device comes up exactly as vanilla. This startup capability switch is intentionally
- * independent of {@code upscaler.rt.output}: output mode is a runtime work/display toggle,
- * while the device features must be present before that toggle can be flipped to RT later.
+ * and the device comes up exactly as vanilla. {@code upscaler.rt} is read once here, at
+ * {@code vkCreateDevice} time, before the device exists — flipping it later at runtime cannot add
+ * device features to an already-created device, so a config change only takes effect on restart.
  */
 public final class RtDeviceBringup {
     public static boolean enabledByProperty() {

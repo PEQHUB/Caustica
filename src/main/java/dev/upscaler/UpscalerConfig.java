@@ -56,7 +56,7 @@ public final class UpscalerConfig {
     public static void ensureRegistered() {
         @SuppressWarnings("unused")
         Object[] touch = {
-            Rt.ENABLED, Rt.Composite.ENABLED, Rt.Terrain.ASYNC_DISPATCH_PER_TICK, Rt.Omm.ENABLED,
+            Rt.ENABLED, Rt.Composite.SPP, Rt.Terrain.ASYNC_DISPATCH_PER_TICK, Rt.Omm.ENABLED,
             Rt.Entities.ENABLED, Rt.EntityTextures.MAX_TEXTURES, Rt.DlssRr.ENABLED, Rt.Fg.ENABLED,
             Rt.Reflex.ENABLED, Rt.Exposure.MODE, Rt.BufferPool.STATS, Rt.FrameStats.ENABLED,
             Rt.Hdr.ENABLED, Ngx.PATH,
@@ -92,9 +92,6 @@ public final class UpscalerConfig {
                         + " throughput recovers when it matters and the cost drops back once the queue clears.\n"
                         + " stream-fallback-budget-ms is the per-tick slice used only when no world frame is\n"
                         + " streaming (loading screens), where a long pass hitches nothing.");
-        FILE.setComment("entities.rigid-reuse",
-                " Reuse an entity's previous mesh buffers + BLAS when this frame's pose is a rigid transform\n"
-                        + " (translation and/or yaw) of the cached one.");
         FILE.setComment("frame-generation",
                 " DLSS Frame Generation. Default off; gated additionally by hardware/driver availability.\n"
                         + " multi-frame-count: frames generated per rendered frame (1 = 2x, 2 = 3x, ...), clamped\n"
@@ -522,10 +519,6 @@ public final class UpscalerConfig {
 
     public static final class Rt {
         public static final BooleanSetting ENABLED = bool("upscaler.rt", "enabled", true);
-        public static final StringSetting OUTPUT_MODE = string("upscaler.rt.output", "output", "rt", Rt::sanitizeOutputMode);
-        public static final BooleanSetting CANCEL_VANILLA_WORLD_LOG =
-                bool("upscaler.rt.cancelVanillaWorld.log", "cancel-vanilla-world.log", true);
-        public static final BooleanSetting PBR = bool("upscaler.rt.pbr", "pbr", true);
         public static final IntSetting WORKER_THREADS =
                 intAtLeast("upscaler.rt.workerThreads", "worker-threads", defaultWorkerThreads(), 1);
 
@@ -533,7 +526,6 @@ public final class UpscalerConfig {
         }
 
         public static final class Composite {
-            public static final BooleanSetting ENABLED = bool("upscaler.rt.composite", "composite.enabled", false);
             public static final IntSetting DEBUG_VIEW = intValue("upscaler.rt.debugView", "composite.debug-view", 0);
             public static final IntSetting SPP = intAtLeast("upscaler.rt.spp", "composite.spp", 1, 1);
             public static final BooleanSetting WATER_WAVES =
@@ -587,8 +579,6 @@ public final class UpscalerConfig {
 
         public static final class Entities {
             public static final BooleanSetting ENABLED = bool("upscaler.rt.entities", "entities.enabled", true);
-            public static final BooleanSetting RIGID_REUSE =
-                    bool("upscaler.rt.entityRigidReuse", "entities.rigid-reuse", true);
             public static final BooleanSetting PARTICLES_ENABLED =
                     bool("upscaler.rt.particles", "particles.enabled", true);
             public static final IntSetting MAX_ENTITIES =
@@ -597,12 +587,8 @@ public final class UpscalerConfig {
                     intAtLeast("upscaler.rt.beViewChunks", "entities.block-entities.view-chunks", 8, 0);
             public static final IntSetting BE_BUILDS_PER_FRAME =
                     intAtLeast("upscaler.rt.beBuildsPerFrame", "entities.block-entities.builds-per-frame", 8, 0);
-            public static final BooleanSetting REFIT =
-                    bool("upscaler.rt.entityRefit", "entities.refit.enabled", true);
             public static final IntSetting REFIT_REBUILD_INTERVAL =
                     intAtLeast("upscaler.rt.refitRebuildInterval", "entities.refit.rebuild-interval", 120, 1);
-            public static final IntSetting CAPTURE_INITIAL_VERTICES =
-                    intAtLeast("upscaler.rt.entityCaptureInitialVertices", "entities.capture-initial-vertices", 1024, 1);
 
             private Entities() {
             }
@@ -731,16 +717,28 @@ public final class UpscalerConfig {
         public static final class Hdr {
             public static final BooleanSetting ENABLED = bool("upscaler.rt.hdr", "hdr.enabled", false);
             public static final FloatSetting PAPER_WHITE_NITS =
-                    clampedFloat("upscaler.rt.hdr.paperWhiteNits", "hdr.paper-white-nits", 200.0f, 80.0f, 1000.0f);
+                    clampedFloat("upscaler.rt.hdr.paperWhiteNits", "hdr.paper-white-nits", 200.0f, 80.0f, 500.0f);
             public static final FloatSetting PEAK_NITS =
-                    clampedFloat("upscaler.rt.hdr.peakNits", "hdr.peak-nits", 1000.0f, 80.0f, 10000.0f);
+                    clampedFloat("upscaler.rt.hdr.peakNits", "hdr.peak-nits", 1000.0f, 80.0f, 5000.0f);
+
+            // Snapshot of ENABLED as resolved at startup (system property / config file), before any
+            // in-session edit from the options screen. The swapchain's pixel format (PQ vs SDR) is fixed
+            // at surface-creation time, so flipping ENABLED later cannot change what's actually presented
+            // until a restart — every runtime/rendering check reads this frozen value via enabled(),
+            // never ENABLED directly, so the live toggle is a no-op for the current session.
+            private static final boolean ENABLED_AT_STARTUP = ENABLED.value();
 
             private Hdr() {
             }
 
-            /** Whether the HDR display path (world HDR + PQ swapchain + UI overlay) should be active. */
+            /** Whether the HDR display path (world HDR + PQ swapchain + UI overlay) is active this session. */
             public static boolean enabled() {
-                return ENABLED.value();
+                return ENABLED_AT_STARTUP;
+            }
+
+            /** Whether {@link #ENABLED} has been changed since startup and needs a restart to take effect. */
+            public static boolean pendingRestart() {
+                return ENABLED.value() != ENABLED_AT_STARTUP;
             }
 
             /** Absolute nits SDR paper white maps to in the PQ encode (ST.2084 is referenced to 10000 nits). */
@@ -752,10 +750,6 @@ public final class UpscalerConfig {
             public static float headroom() {
                 return Math.max(1.0f, PEAK_NITS.value() / Math.max(1.0f, PAPER_WHITE_NITS.value()));
             }
-        }
-
-        private static String sanitizeOutputMode(String value) {
-            return "vanilla".equalsIgnoreCase(value) ? "vanilla" : "rt";
         }
     }
 

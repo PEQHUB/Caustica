@@ -1,6 +1,5 @@
 package dev.upscaler.rt.material;
 
-import dev.upscaler.UpscalerConfig;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.SoundType;
@@ -12,17 +11,9 @@ import java.util.Set;
  * Heuristic PBR material classifier for blocks that carry only albedo. Assigns each block a
  * {@code (roughness, metalness)} pair from its {@link SoundType} (metal/glass) plus a small set of
  * known smooth dielectrics. Per-prim {@code mat} lanes store the pair; the GGX BRDF reads them.
- *
- * <p>{@code -Dupscaler.rt.pbr} does not gate this classification — it gates the shader BRDF via a
- * push bit, so {@code pbr=false} reverts to Lambertian regardless of what is stored here.
  */
 public final class RtMaterials {
     private RtMaterials() {}
-
-    /** Master toggle for the GGX BRDF + material guides in the path tracer (pushed to the shader). */
-    public static boolean enabled() {
-        return UpscalerConfig.Rt.PBR.value();
-    }
 
     private static final float DEFAULT_ROUGH = 0.9f;
     private static final float METAL_ROUGH = 0.3f;

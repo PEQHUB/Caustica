@@ -49,7 +49,7 @@ public final class RtHdr {
     public static void logConfig() {
         UpscalerMod.LOGGER.info(
                 "HDR config: enabled={} paperWhite={}nits peak={}nits -> {} (headroom={})",
-                UpscalerConfig.Rt.Hdr.ENABLED.value(),
+                UpscalerConfig.Rt.Hdr.enabled(),
                 UpscalerConfig.Rt.Hdr.PAPER_WHITE_NITS.value(), UpscalerConfig.Rt.Hdr.PEAK_NITS.value(),
                 UpscalerConfig.Rt.Hdr.enabled() ? "HDR display path active" : "SDR display path",
                 UpscalerConfig.Rt.Hdr.headroom());

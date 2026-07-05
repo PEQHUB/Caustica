@@ -10,8 +10,8 @@ import dev.upscaler.rt.RtComposite;
  * hand and HUD draw at native resolution on top.
  *
  * <p>This used to host the FSR/DLSS-SR low-res render-scale path; that has been removed — the RT
- * renderer owns reconstruction via DLSS Ray Reconstruction. With {@code -Dupscaler.rt.composite=false}
- * this is an inert passthrough.
+ * renderer owns reconstruction via DLSS Ray Reconstruction. With {@code -Dupscaler.rt=false} this is an
+ * inert passthrough.
  */
 public final class WorldRenderScaler {
 	public static final WorldRenderScaler INSTANCE = new WorldRenderScaler();

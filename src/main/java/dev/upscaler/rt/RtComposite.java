@@ -43,7 +43,6 @@ import dev.upscaler.rt.entity.RtEntities;
 import dev.upscaler.rt.entity.RtEntityTextures;
 import dev.upscaler.rt.material.RtBlockMaterials;
 import dev.upscaler.rt.material.RtEntityMaterials;
-import dev.upscaler.rt.material.RtMaterials;
 import dev.upscaler.rt.pipeline.RtDisplayPipeline;
 import dev.upscaler.rt.pipeline.RtDlssFg;
 import dev.upscaler.rt.pipeline.RtDlssRr;
@@ -63,12 +62,11 @@ import java.util.List;
  * On-screen composite. Each frame, ray-trace into a render-res storage image (+ guide buffers), use
  * DLSS Ray Reconstruction to denoise and upscale it to display res, write that into a storage-capable
  * copy of the world color, and copy the result back to the world target at the
- * end-of-world seam. Gated by {@code -Dupscaler.rt.composite=true}.
+ * end-of-world seam. Gated by {@code -Dupscaler.rt=true}.
  *
  * <p>The path tracer and its guide buffers run at the configured render scale of display res with a per-frame
  * sub-pixel camera jitter; DLSS-RR ({@link RtDlssRr}) reconstructs the display-res image. With RR
  * disabled the trace runs at 1:1 and a linear blit stands in for the upscale (a raw, noisy reference).
- * Output selection: {@code -Dupscaler.rt.output=rt|vanilla}.
  *
  * <p>Traces the extracted {@link RtTerrain} with perspective camera rays (camera matrices captured
  * each frame via {@link #captureFrame}); writes nothing until terrain is available.
@@ -78,7 +76,7 @@ public final class RtComposite {
     public static final RtComposite INSTANCE = new RtComposite();
 
     public static boolean enabled() {
-        return UpscalerConfig.Rt.Composite.ENABLED.value();
+        return UpscalerConfig.Rt.ENABLED.value();
     }
 
     // invViewProj(64) + camOffset(@64) + sectionTableAddr(@80) + debugView(@88) + frameIndex(@92)
@@ -476,21 +474,15 @@ public final class RtComposite {
         // atlas view if an atlas didn't initialize so bindings 9/10 always hold a valid descriptor —
         // the shader only samples them when a prim is flagged (mat.z/mat.w), so the fallback is never read.
         if (worldPipeline.hasBlockMaterialAtlases()) {
-            if (RtMaterials.enabled()) {
-                RtBlockMaterials.INSTANCE.reset();
-                // Build the full _s/_n atlases now (parallel decode + blit), before terrain tessellates, so
-                // ensure() is a pure lookup on the build path instead of decoding each sprite's maps lazily.
-                RtBlockMaterials.INSTANCE.prepareAll();
-                long specView = RtBlockMaterials.INSTANCE.viewS();
-                long normalView = RtBlockMaterials.INSTANCE.viewN();
-                worldPipeline.setBlockSpecAtlas(specView != 0L ? specView : atlasView, sampler);
-                worldPipeline.setBlockNormalAtlas(normalView != 0L ? normalView : atlasView, sampler);
-                materialBindingsReady = true;
-            } else {
-                worldPipeline.setBlockSpecAtlas(atlasView, sampler);
-                worldPipeline.setBlockNormalAtlas(atlasView, sampler);
-                materialBindingsReady = false;
-            }
+            RtBlockMaterials.INSTANCE.reset();
+            // Build the full _s/_n atlases now (parallel decode + blit), before terrain tessellates, so
+            // ensure() is a pure lookup on the build path instead of decoding each sprite's maps lazily.
+            RtBlockMaterials.INSTANCE.prepareAll();
+            long specView = RtBlockMaterials.INSTANCE.viewS();
+            long normalView = RtBlockMaterials.INSTANCE.viewN();
+            worldPipeline.setBlockSpecAtlas(specView != 0L ? specView : atlasView, sampler);
+            worldPipeline.setBlockNormalAtlas(normalView != 0L ? normalView : atlasView, sampler);
+            materialBindingsReady = true;
         }
         // Sky rewrite: bind the vanilla celestials atlas (sun + moon phases) for world.rmiss. The view
         // handle is stable across frames; the shader only samples it inside the sun/moon discs (sky
@@ -507,12 +499,8 @@ public final class RtComposite {
         if (worldPipeline == null || reloadRebindRequested) {
             return;
         }
-        if (RtMaterials.enabled()) {
-            if (!materialBindingsReady) {
-                bindWorldTextures(ctx);
-            }
-        } else {
-            materialBindingsReady = false;
+        if (!materialBindingsReady) {
+            bindWorldTextures(ctx);
         }
     }
 
@@ -719,9 +707,9 @@ public final class RtComposite {
             push.putInt(172, spp());
             push.putFloat(176, jitterX);
             push.putFloat(180, jitterY);
-            // flags: PBR BRDF toggle + camera-in-water (so the path tracer starts in the water medium
-            // when the eye is submerged, fixing the air→water first-segment orientation).
-            int flags = RtMaterials.enabled() ? 0b10 : 0;
+            // flags: PBR BRDF (bit 1, always on) + camera-in-water (so the path tracer starts in the water
+            // medium when the eye is submerged, fixing the air→water first-segment orientation).
+            int flags = 0b10;
             var level = Minecraft.getInstance().level;
             if (level != null) {
                 cameraBlockPos.set(Mth.floor(camX), Mth.floor(camY), Mth.floor(camZ));
@@ -769,10 +757,8 @@ public final class RtComposite {
             RtEntityTextures.INSTANCE.uploadPending(active, atlasSampler(ctx));
             // Re-upload the LabPBR _s atlas if extraction added sprites since the last frame (the
             // view handle is stable, so no re-bind needed). Before the trace records, like uploadPending.
-            if (RtMaterials.enabled()) {
-                RtBlockMaterials.INSTANCE.flush();
-                RtEntityMaterials.INSTANCE.flushAll(); // block-entity parallel _s/_n blitted during capture
-            }
+            RtBlockMaterials.INSTANCE.flush();
+            RtEntityMaterials.INSTANCE.flushAll(); // block-entity parallel _s/_n blitted during capture
             // Build the entity BLAS this frame, then the TLAS that references them (+ the already-built
             // terrain BLAS), then the trace — each separated by a barrier. The frame TLAS is retired
             // KEEP_FRAMES later (entity meshes/BLAS are retired by RtEntities on the same horizon).

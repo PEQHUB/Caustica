@@ -124,17 +124,11 @@ public final class RtEntities {
     private static final int FRAME_LIST_RING = KEEP_FRAMES;
     // Refit (UPDATE-mode) BLAS: persistent per-entity AS, refit in place each frame (cheap) while
     // topology is stable, instead of a full BUILD. Block entities always use the pooled-BUILD path.
-    private static boolean refit() {
-        return UpscalerConfig.Rt.Entities.REFIT.value();
-    }
-
+    //
     // Rigid reuse: when this frame's capture is a rigid transform (translation and/or yaw) of the mesh the
     // entity's AS was last built from, reference that AS with the fitted TLAS instance transform and skip
     // the mesh upload + refit entirely — still mobs, item frames/armor stands, and spinning/bobbing
-    // dropped items become table-entry + instance writes only. Depends on refit() (the persistent AS).
-    private static boolean rigidReuse() {
-        return UpscalerConfig.Rt.Entities.RIGID_REUSE.value();
-    }
+    // dropped items become table-entry + instance writes only.
 
     // Max per-axis residual (blocks) for a capture to count as a rigid transform of the reference mesh.
     // Well below a texel (1/16 block) and DLSS-RR jitter; float pose math noise is ~1e-5.
@@ -930,9 +924,6 @@ public final class RtEntities {
      * pose is non-rigid (animation), or the shading data changed under identical topology.
      */
     private boolean appendRigidReuse(RtContext ctx, FrameBuild build, Motion motion, int entityId, int mask) {
-        if (!rigidReuse() || !refit()) {
-            return false;
-        }
         EntityAccel ea = entityAccels.get(entityId);
         if (ea == null || ea.refAccel == null
                 || ea.refVertCount != capture.verts.size() / 3 || ea.refIdxCount != capture.idx.size()) {
@@ -1081,7 +1072,7 @@ public final class RtEntities {
 
         // Non-opaque so world.rahit alpha-tests the texture (cutout). Opaque texels pass to the chit.
         RtAccel accel;
-        if (refit() && entityId >= 0) {
+        if (entityId >= 0) {
             accel = refitOrBuild(ctx, build, entityId, positions, indices, vertCount, idxCount, label);
         } else {
             RtAccel.PreparedBlas blas = RtAccel.prepareTrianglesBlasPooled(ctx, pool, positions, vertCount, indices, idxCount, false,
@@ -1097,7 +1088,7 @@ public final class RtEntities {
         build.instances.add(new RtAccel.Instance(IDENTITY, accel.deviceAddress,
                 instanceBit | (build.count & 0x3FFFFF), mask, RtAccel.SBT_ENTITY_OFFSET));
         build.buffers.add(positions); // only this frame's BLAS build consumes positions — always per-frame
-        if (rigidReuse() && refit() && entityId >= 0) {
+        if (entityId >= 0) {
             // Hand idx/uv/prim to the entity's rigid-reuse cache (later reuse frames keep reading them via
             // the geometry table) and snapshot the verts this AS now contains as the fit reference.
             EntityAccel ea = entityAccels.get(entityId); // created by refitOrBuild above

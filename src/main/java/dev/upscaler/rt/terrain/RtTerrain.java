@@ -2190,7 +2190,7 @@ public final class RtTerrain {
             q.metal = RtMaterials.metalness(state);
             TextureAtlasSprite sprite = quad.materialInfo().sprite();
             q.sprite = sprite;
-            q.materialSprite = RtMaterials.enabled() ? sprite : null;
+            q.materialSprite = sprite;
         }
 
         /** Acquire a pooled PendingQuad for the current block (grown on demand, count reset by flushBlock). */

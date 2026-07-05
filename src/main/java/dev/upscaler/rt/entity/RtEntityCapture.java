@@ -1,7 +1,6 @@
 package dev.upscaler.rt.entity;
 
 import com.mojang.blaze3d.vertex.VertexConsumer;
-import dev.upscaler.UpscalerConfig;
 import dev.upscaler.rt.material.RtMaterials;
 import it.unimi.dsi.fastutil.floats.FloatArrayList;
 import it.unimi.dsi.fastutil.ints.IntArrayList;
@@ -21,14 +20,12 @@ import org.joml.Vector3fc;
  * share the terrain upload + BLAS path verbatim.
  */
 public final class RtEntityCapture implements VertexConsumer {
-    private static int defaultVertexCapacity() {
-        return UpscalerConfig.Rt.Entities.CAPTURE_INITIAL_VERTICES.value();
-    }
+    private static final int DEFAULT_VERTEX_CAPACITY = 1024;
 
-    final FloatArrayList verts = new FloatArrayList(defaultVertexCapacity() * 3);   // 3 floats/vertex (capture-space position)
-    final IntArrayList idx = new IntArrayList(indexCapacity(defaultVertexCapacity())); // 3 indices/triangle
-    final FloatArrayList uvList = new FloatArrayList(defaultVertexCapacity() * 2);  // 2 floats/vertex (entity-texture UV)
-    final FloatArrayList prim = new FloatArrayList(primCapacity(defaultVertexCapacity())); // 12 floats/triangle: normal.xyz+0, tint.rgb+texSlot, mat.{rough,metal,0,0}
+    final FloatArrayList verts = new FloatArrayList(DEFAULT_VERTEX_CAPACITY * 3);   // 3 floats/vertex (capture-space position)
+    final IntArrayList idx = new IntArrayList(indexCapacity(DEFAULT_VERTEX_CAPACITY)); // 3 indices/triangle
+    final FloatArrayList uvList = new FloatArrayList(DEFAULT_VERTEX_CAPACITY * 2);  // 2 floats/vertex (entity-texture UV)
+    final FloatArrayList prim = new FloatArrayList(primCapacity(DEFAULT_VERTEX_CAPACITY)); // 12 floats/triangle: normal.xyz+0, tint.rgb+texSlot, mat.{rough,metal,0,0}
 
     // Bindless texture slot for the geometry currently being submitted (set by the collector per
     // submitModel, so body + feature layers get their own texture). Stored per-prim in tint.w;
