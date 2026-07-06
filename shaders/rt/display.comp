@@ -63,7 +63,7 @@ vec3 agx(vec3 color) {
     color = clamp(log2(max(color, vec3(1.0e-10))), AGX_MIN_EV, AGX_MAX_EV);
     color = (color - AGX_MIN_EV) / (AGX_MAX_EV - AGX_MIN_EV);
     color = agxDefaultContrast(color);
-    color = applyLook(color);
+    // color = applyLook(color);
     color = AGX_OUTSET * color;
     return clamp(color, 0.0, 1.0);
 }
