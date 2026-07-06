@@ -583,6 +583,8 @@ public final class UpscalerConfig {
                     bool("upscaler.rt.particles", "particles.enabled", true);
             public static final BooleanSetting GLOW_ENABLED =
                     bool("upscaler.rt.glow", "entities.glow.enabled", true);
+            public static final BooleanSetting NAME_TAGS_ENABLED =
+                    bool("upscaler.rt.nameTags", "entities.name-tags.enabled", true);
             public static final IntSetting MAX_ENTITIES =
                     intAtLeast("upscaler.rt.maxEntities", "entities.max-entities", 1024, 1);
             public static final IntSetting BE_VIEW_CHUNKS =

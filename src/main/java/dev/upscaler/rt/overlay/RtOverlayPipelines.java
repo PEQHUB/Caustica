@@ -23,6 +23,7 @@ import org.lwjgl.vulkan.VkPipelineShaderStageCreateInfo;
 import org.lwjgl.vulkan.VkPipelineVertexInputStateCreateInfo;
 import org.lwjgl.vulkan.VkPipelineViewportStateCreateInfo;
 import org.lwjgl.vulkan.VkPushConstantRange;
+import org.lwjgl.vulkan.VkSamplerCreateInfo;
 import org.lwjgl.vulkan.VkShaderModuleCreateInfo;
 import org.lwjgl.vulkan.VkVertexInputAttributeDescription;
 import org.lwjgl.vulkan.VkVertexInputBindingDescription;
@@ -332,6 +333,93 @@ public final class RtOverlayPipelines {
             long set = pSet.get(0);
             RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_DESCRIPTOR_SET, set, label + " descriptor set");
             return new StorageImageSet(dsl, pool, set, count);
+        }
+    }
+
+    /**
+     * A single combined-image-sampler descriptor set (binding 0) — for overlay passes that sample a real
+     * texture (e.g. a font atlas page) rather than reading a mod-owned storage image. Same {@code
+     * VK_IMAGE_LAYOUT_GENERAL} convention as every other sampled-image binding in this codebase (Blaze3D
+     * keeps its own textures in GENERAL too — see {@code RtEntityTextures}/{@code RtPipeline}'s bindless
+     * texture arrays, which bind vanilla-owned atlases the same way).
+     */
+    public static final class SampledImageSet {
+        public final long layout;
+        private final long pool;
+        public final long set;
+        private long boundView;
+
+        private SampledImageSet(long layout, long pool, long set) {
+            this.layout = layout;
+            this.pool = pool;
+            this.set = set;
+        }
+
+        /** Point binding 0 at {@code view}, sampled with {@code sampler}; no-op when already bound. */
+        public void bind(RtContext ctx, long view, long sampler) {
+            if (boundView == view) {
+                return;
+            }
+            try (MemoryStack stack = MemoryStack.stackPush()) {
+                VkDescriptorImageInfo.Buffer info = VkDescriptorImageInfo.calloc(1, stack);
+                info.get(0).sampler(sampler).imageView(view).imageLayout(VK10.VK_IMAGE_LAYOUT_GENERAL);
+                VkWriteDescriptorSet.Buffer writes = VkWriteDescriptorSet.calloc(1, stack);
+                writes.get(0).sType$Default().dstSet(set).dstBinding(0)
+                        .descriptorCount(1).descriptorType(VK10.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER).pImageInfo(info);
+                VK10.vkUpdateDescriptorSets(ctx.vk(), writes, null);
+            }
+            boundView = view;
+        }
+
+        public void destroy(VkDevice vk) {
+            VK10.vkDestroyDescriptorPool(vk, pool, null);
+            VK10.vkDestroyDescriptorSetLayout(vk, layout, null);
+        }
+    }
+
+    public static SampledImageSet sampledImageSet(RtContext ctx, int stageFlags, String label) {
+        VkDevice vk = ctx.vk();
+        try (MemoryStack stack = MemoryStack.stackPush()) {
+            LongBuffer p = stack.mallocLong(1);
+            VkDescriptorSetLayoutBinding.Buffer binds = VkDescriptorSetLayoutBinding.calloc(1, stack);
+            binds.get(0).binding(0).descriptorType(VK10.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
+                    .descriptorCount(1).stageFlags(stageFlags);
+            VkDescriptorSetLayoutCreateInfo dslci = VkDescriptorSetLayoutCreateInfo.calloc(stack).sType$Default().pBindings(binds);
+            check(VK10.vkCreateDescriptorSetLayout(vk, dslci, null, p), "vkCreateDescriptorSetLayout(" + label + ")");
+            long dsl = p.get(0);
+            RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT, dsl, label + " descriptor set layout");
+
+            VkDescriptorPoolSize.Buffer poolSizes = VkDescriptorPoolSize.calloc(1, stack);
+            poolSizes.get(0).type(VK10.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER).descriptorCount(1);
+            VkDescriptorPoolCreateInfo dpci = VkDescriptorPoolCreateInfo.calloc(stack).sType$Default().maxSets(1).pPoolSizes(poolSizes);
+            check(VK10.vkCreateDescriptorPool(vk, dpci, null, p), "vkCreateDescriptorPool(" + label + ")");
+            long pool = p.get(0);
+            RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_DESCRIPTOR_POOL, pool, label + " descriptor pool");
+
+            VkDescriptorSetAllocateInfo dsai = VkDescriptorSetAllocateInfo.calloc(stack).sType$Default()
+                    .descriptorPool(pool).pSetLayouts(stack.longs(dsl));
+            LongBuffer pSet = stack.mallocLong(1);
+            check(VK10.vkAllocateDescriptorSets(vk, dsai, pSet), "vkAllocateDescriptorSets(" + label + ")");
+            long set = pSet.get(0);
+            RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_DESCRIPTOR_SET, set, label + " descriptor set");
+            return new SampledImageSet(dsl, pool, set);
+        }
+    }
+
+    /** A shared nearest/clamp sampler, for overlay passes sampling a real texture (e.g. a font atlas). */
+    public static long createNearestClampSampler(RtContext ctx, String label) {
+        try (MemoryStack stack = MemoryStack.stackPush()) {
+            VkSamplerCreateInfo sci = VkSamplerCreateInfo.calloc(stack).sType$Default()
+                    .magFilter(VK10.VK_FILTER_NEAREST).minFilter(VK10.VK_FILTER_NEAREST)
+                    .mipmapMode(VK10.VK_SAMPLER_MIPMAP_MODE_NEAREST)
+                    .addressModeU(VK10.VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE)
+                    .addressModeV(VK10.VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE)
+                    .addressModeW(VK10.VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
+            LongBuffer p = stack.mallocLong(1);
+            check(VK10.vkCreateSampler(ctx.vk(), sci, null, p), "vkCreateSampler(" + label + ")");
+            long sampler = p.get(0);
+            RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_SAMPLER, sampler, label + " sampler");
+            return sampler;
         }
     }
 

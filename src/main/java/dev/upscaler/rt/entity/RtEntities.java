@@ -20,12 +20,17 @@ import net.minecraft.client.renderer.state.level.CameraRenderState;
 import net.minecraft.client.renderer.state.level.QuadParticleRenderState;
 
 import net.minecraft.core.BlockPos;
+import net.minecraft.network.chat.Component;
 import net.minecraft.util.Mth;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.level.ClipContext;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.chunk.LevelChunk;
+import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
+import net.minecraft.world.phys.shapes.CollisionContext;
 import org.joml.Matrix4f;
+import org.joml.Quaternionf;
 import org.lwjgl.system.MemoryUtil;
 
 import dev.upscaler.rt.RtComposite;
@@ -83,6 +88,9 @@ public final class RtEntities {
     }
     public static boolean glowEnabled() {
         return UpscalerConfig.Rt.Entities.GLOW_ENABLED.value();
+    }
+    public static boolean nameTagsEnabled() {
+        return UpscalerConfig.Rt.Entities.NAME_TAGS_ENABLED.value();
     }
 
     private static int maxEntities() {
@@ -211,6 +219,23 @@ public final class RtEntities {
         return glowCamOffsetZ;
     }
 
+    // This frame's visible name tags (see NameTagEntity), captured off the SAME EntityRenderState vanilla's
+    // own EntityRenderer.extractNameTags already populates (shouldShowName/crosshair-look/distance rules,
+    // computed as a side effect of the dispatcher.extractEntity call captureEntities already makes) — no
+    // reimplementation of that logic. Positions are rebase-space (same convention as glowBatches); consumed
+    // by RtNameTagFeature's raster pass, which reuses glowCamOffset{X,Y,Z} (same camera, same frame).
+    private final List<NameTagEntity> nameTagBatches = new ArrayList<>();
+
+    /** This frame's visible name tags, or an empty list if none (or name tags are disabled). */
+    public List<NameTagEntity> nameTagBatches() {
+        return nameTagBatches;
+    }
+
+    /** This frame's camera orientation (view-to-world rotation) — the billboard rotation name tags face. */
+    public Quaternionf cameraOrientation() {
+        return cameraState.orientation;
+    }
+
     /** Last frame's posed mesh for one entity: rebase-space vertex positions + the rebase origin they were
      *  captured against (needed to convert the inter-frame delta to world space when the rebase moved). */
     private static final class EntityPrev {
@@ -294,6 +319,12 @@ public final class RtEntities {
      *  next entity resets it) plus its vanilla outline colour, for {@code RtGlowOutlineFeature}'s full-res raster
      *  mask pass. Captured as a side effect of the normal RT capture — no extra posing/animation work. */
     public record GlowEntity(float[] verts, int[] idx, int color) {
+    }
+
+    /** One visible name tag: display text + the attachment point's world position (rebase-space, same
+     *  convention as entity capture — see {@link RtEntities#glowCamOffsetX()} for the camera-relative
+     *  offset needed to finish the transform to camera-relative space). */
+    public record NameTagEntity(Component text, float x, float y, float z) {
     }
 
     private record Deferred(long freeFrame, Runnable free) {
@@ -454,7 +485,9 @@ public final class RtEntities {
         boolean firstPerson = mc.options.getCameraType().isFirstPerson();
         curVerts.clear();
         glowBatches.clear();
+        nameTagBatches.clear();
         boolean glow = glowEnabled();
+        boolean nameTags = nameTagsEnabled();
         glowCamOffsetX = (float) (cameraState.pos.x - rbx);
         glowCamOffsetY = (float) (cameraState.pos.y - rby);
         glowCamOffsetZ = (float) (cameraState.pos.z - rbz);
@@ -475,6 +508,17 @@ public final class RtEntities {
             capture.reset(prev != null ? prev.size / 3 : 0);
             try {
                 EntityRenderState state = dispatcher.extractEntity(entity, partial);
+                // extractEntity already ran EntityRenderer.extractNameTags (shouldShowName, crosshair-look,
+                // distance cutoff, the attachment point) as a normal part of building the render state — no
+                // need to reimplement any of that here, just read the result. Name tags billboard to face
+                // the camera every frame (see RtNameTagFeature), so — unlike glow, whose mesh is captured
+                // straight into the SAME rigid entity mesh used for the BLAS — they are never mixed into
+                // `capture`: doing so would make every frame's mesh a non-rigid transform of the last
+                // whenever the camera turns, defeating rigid-reuse/motion-vector fitting for every
+                // name-tagged entity. RtWorldOverlay renders them in a completely separate raster pass.
+                if (nameTags && !firstPersonSelf && state.nameTag != null) {
+                    captureNameTag(level, state, ix, iy, iz, rbx, rby, rbz);
+                }
                 collector.begin(capture);
                 // Capture directly in rebased space so the TLAS instance transform is identity.
                 dispatcher.submit(state, cameraState, ix - rbx, iy - rby, iz - rbz, new PoseStack(), collector);
@@ -513,6 +557,38 @@ public final class RtEntities {
         Map<Integer, EntityPrev> oldPrev = prevVerts;
         prevVerts = curVerts;
         curVerts = oldPrev;
+    }
+
+    /**
+     * Gather one entity's name tag (world position + text) into {@link #nameTagBatches}, unless a block is
+     * in the way. {@code state.nameTagAttachment} is only non-null when {@code state.nameTag} is (both set
+     * together in {@code EntityRenderer.extractNameTags}). Positions are world-space (unrebased) until the
+     * very end, matching {@code level.clip}'s coordinate space; the rebase subtraction happens last.
+     *
+     * <p>Vanilla draws a translucent "ghost" copy of the tag through walls (see {@code
+     * SubmitNodeCollection.submitNameTag}'s {@code seeThroughNameTags} phase) instead of hiding it — v1
+     * here just hides occluded tags, a simplification to avoid a second draw/blend mode; revisit if that
+     * turns out to look wrong in practice.
+     */
+    private void captureNameTag(ClientLevel level, EntityRenderState state, float ix, float iy, float iz,
+                                 int rbx, int rby, int rbz) {
+        Vec3 attach = state.nameTagAttachment;
+        if (attach == null) {
+            return;
+        }
+        double wx = ix + attach.x;
+        double wy = iy + attach.y + 0.5;
+        double wz = iz + attach.z;
+        // The 5-arg (Vec3,Vec3,Block,Fluid,Entity) overload NPEs on a null entity (it unconditionally builds
+        // an EntityCollisionContext via CollisionContext.of, which requireNonNulls it) — this raycast isn't
+        // for any particular entity's own collision shape, so pass an empty CollisionContext directly.
+        HitResult hit = level.clip(new ClipContext(cameraState.pos, new Vec3(wx, wy, wz),
+                ClipContext.Block.VISUAL, ClipContext.Fluid.NONE, CollisionContext.empty()));
+        if (hit.getType() != HitResult.Type.MISS) {
+            return; // a block is between the camera and the tag
+        }
+        nameTagBatches.add(new NameTagEntity(state.nameTag,
+                (float) wx - rbx, (float) wy - rby, (float) wz - rbz));
     }
 
     /**
@@ -1313,7 +1389,13 @@ public final class RtEntities {
         cameraState.pos = new Vec3(camX, camY, camZ);
         cameraState.projectionMatrix.set(projection);
         cameraState.viewRotationMatrix.set(viewRotation);
-        cameraState.orientation.setFromUnnormalized(viewRotation);
+        // viewRotation is the world->view rotation (mvCurProjView = frameProjection * frameViewRotation);
+        // vanilla's Camera.rotation() (what CameraRenderState.orientation actually holds, per Camera.java
+        // "cameraState.orientation.set(this.rotation())") is the INVERSE of that — view->world, i.e. the
+        // camera's own facing direction, used to billboard world-space quads (name tags) to face the
+        // camera. A pure rotation's inverse is its conjugate. Nothing consumed this field before
+        // RtNameTagFeature; a plain setFromUnnormalized(viewRotation) here would billboard backwards.
+        cameraState.orientation.setFromUnnormalized(viewRotation).conjugate();
         cameraState.initialized = true;
     }
 
