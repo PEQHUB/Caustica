@@ -1126,7 +1126,7 @@ public final class RtComposite {
                         .addressModeU(VK10.VK_SAMPLER_ADDRESS_MODE_REPEAT)
                         .addressModeV(VK10.VK_SAMPLER_ADDRESS_MODE_REPEAT)
                         .addressModeW(VK10.VK_SAMPLER_ADDRESS_MODE_REPEAT)
-                        .minLod(0f).maxLod(0f);
+                        .minLod(0f).maxLod(16f);
                 LongBuffer p = stack.mallocLong(1);
                 if (VK10.vkCreateSampler(ctx.vk(), sci, null, p) != VK10.VK_SUCCESS) {
                     throw new IllegalStateException("vkCreateSampler(block atlas) failed");

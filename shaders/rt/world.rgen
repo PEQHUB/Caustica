@@ -100,6 +100,8 @@ struct Payload {
     vec3 f0;         // P6.2a: specular F0 (set by the chit: dielectric 0.04 / LabPBR green / metal).
     float showCelestial; // raygen sets this before each trace: >0.5 ⇒ world.rmiss draws the sun/moon disc.
     float sss;           // P6.5: LabPBR _s blue channel SSS strength (0 = no subsurface scattering)
+    float rayConeWidth;  // one-pixel ray footprint width at the ray origin, in world units
+    float rayConeSpread; // footprint growth per world unit travelled by this ray
 };
 layout(location = 0) rayPayloadEXT Payload payload;
 layout(location = 1) rayPayloadEXT vec4 shadowVis; // rgb = transmittance, a = 1.0 if the visibility ray escaped
@@ -135,6 +137,14 @@ const float GLASS_GUIDE_ROUGH = 0.04;
 // restart the ray past that neighbour and see through it; this lands the ray inside the gap so the
 // neighbour is still hit, while still clearing the glass surface to avoid self-intersection.
 const float GLASS_TRANSMIT_BIAS = 1.0e-4;
+
+// Ray-cone texture LOD: raygen tracks a one-pixel footprint along the path, and closest-hit converts it
+// to texture mip levels from the local UV/world-space scale. Diffuse/glossy bounces widen the cone so
+// indirect texture fetches don't keep sampling mip 0 through broad lobes.
+const float RAY_CONE_MIN_SPREAD = 1.0e-5;
+const float RAY_CONE_MIN_WIDTH = 1.0e-5;
+const float RAY_CONE_DIFFUSE_SPREAD = 0.25;
+const float RAY_CONE_GLOSSY_SPREAD_SCALE = 0.35;
 
 // W2: per-channel Beer–Lambert extinction from a water body's biome tint (carried in payload.albedo for
 // water hits, or pc.waterParams.xyz for the camera's own biome when starting submerged). A blue ocean
@@ -274,6 +284,21 @@ uint pcg(inout uint s) {
 }
 float rndf(inout uint s) { return float(pcg(s)) * (1.0 / 4294967296.0); }
 
+vec3 primaryRayDir(vec2 ndc) {
+    vec4 nearH = pc.invViewProj * vec4(ndc.x, ndc.y, 1.0, 1.0);
+    vec4 farH = pc.invViewProj * vec4(ndc.x, ndc.y, 0.0, 1.0);
+    vec3 nearP = nearH.xyz / nearH.w;
+    vec3 farP = farH.xyz / farH.w;
+    return normalize(farP - nearP);
+}
+
+float primaryRayConeSpread(vec2 ndc, vec2 size, vec3 dir) {
+    vec2 onePixelNdc = 2.0 / size;
+    vec3 dx = primaryRayDir(ndc + vec2(onePixelNdc.x, 0.0));
+    vec3 dy = primaryRayDir(ndc + vec2(0.0, onePixelNdc.y));
+    return max(max(length(cross(dir, dx)), length(cross(dir, dy))), RAY_CONE_MIN_SPREAD);
+}
+
 // Cosine-weighted hemisphere sample about n (Malley's method). For a Lambertian BRDF this is the
 // importance-sampling match: BRDF*cos/pdf = (albedo/PI)*cos / (cos/PI) = albedo, so the continuation
 // throughput is just *= albedo with no PI/cos bookkeeping left over.
@@ -379,7 +404,7 @@ vec2 previousReflectionNdc(vec3 surfacePos, vec3 surfaceNormal, vec3 reflectedWo
 // sharp specular lobe (specular albedo > 0, roughness <= 0.5). A sky miss is treated as a reflected
 // hit at infinity along the reflected direction, so the same mirror-image reprojection handles surface
 // and sky reflections uniformly (continuous as the reflected distance -> infinity).
-vec2 specularReflectionMotion(vec3 surfacePos, vec3 primaryDir, vec2 currentNdc, vec2 size) {
+vec2 specularReflectionMotion(vec3 surfacePos, vec3 primaryDir, vec2 currentNdc, vec2 size, float primaryConeSpread) {
     if (length(gv_normal) < 0.5 || max(gv_specAlb.r, max(gv_specAlb.g, gv_specAlb.b)) <= 0.001 || gv_rough > 0.5) {
         return vec2(0.0);
     }
@@ -395,6 +420,8 @@ vec2 specularReflectionMotion(vec3 surfacePos, vec3 primaryDir, vec2 currentNdc,
     // zeroing the trace bias the main path tracer needs to avoid surface acne. (Setting SURF_BIAS=0
     // globally fixed the MV but reintroduced that acne — this localizes the fix to the MV reconstruction.)
     payload.hitT = -1.0;
+    payload.rayConeWidth = max(length(surfacePos - pc.camOffset) * primaryConeSpread, RAY_CONE_MIN_WIDTH);
+    payload.rayConeSpread = max(primaryConeSpread, RAY_CONE_MIN_SPREAD);
     traceRayEXT(topLevelAS, gl_RayFlagsNoneEXT, CULL_SECONDARY,
                 SBT_RADIANCE, SBT_STRIDE_BUCKET, 0u, surfacePos + n * SURF_BIAS, RAY_TMIN, specDir, 10000.0, 0);
 
@@ -420,6 +447,7 @@ vec2 specularReflectionMotion(vec3 surfacePos, vec3 primaryDir, vec2 currentNdc,
 // `refracted` is false on total internal reflection (no refracted hit exists); a sky miss returns a far
 // point along the refracted direction, which the self-delta MV handles uniformly.
 void refractedGuideHit(vec3 surfacePos, vec3 incidentDir, vec3 surfaceNormal, bool inWaterAtSurface,
+                       float rayConeWidth, float rayConeSpread,
                        out vec3 hitCamRel, out vec3 motionPrev, out bool refracted, out vec3 diffuseAlbedo,
                        out vec3 specAlbedo) {
     hitCamRel = surfacePos - pc.camOffset;
@@ -439,6 +467,8 @@ void refractedGuideHit(vec3 surfacePos, vec3 incidentDir, vec3 surfaceNormal, bo
 
     vec3 ro = surfacePos - surfaceNormal * SURF_BIAS;
     payload.hitT = -1.0;
+    payload.rayConeWidth = rayConeWidth;
+    payload.rayConeSpread = rayConeSpread;
     traceRayEXT(topLevelAS, gl_RayFlagsNoneEXT, CULL_SECONDARY,
                 SBT_RADIANCE, SBT_STRIDE_BUCKET, 0u, ro, RAY_TMIN, refractedDir, 10000.0, 0);
     if (payload.hitT < 0.0) {
@@ -465,9 +495,11 @@ void refractedGuideHit(vec3 surfacePos, vec3 incidentDir, vec3 surfaceNormal, bo
 }
 
 // One Monte Carlo path from (ro, rd). Returns accumulated radiance along the path.
-vec3 tracePath(vec3 ro, vec3 rd, inout uint seed) {
+vec3 tracePath(vec3 ro, vec3 rd, float primaryConeSpread, inout uint seed) {
     vec3 L = vec3(0.0);
     vec3 throughput = vec3(1.0);
+    float rayConeWidth = 0.0;
+    float rayConeSpread = max(primaryConeSpread, RAY_CONE_MIN_SPREAD);
     bool pbr = (pc.flags & 2u) != 0u; // P6.1: GGX BRDF + material guides (else legacy Lambertian)
     // P6.1: start submerged if the camera is in water (fixes the air->water first-segment orientation
     // + absorption when the eye is underwater; without it the first hit was treated as an air segment).
@@ -484,6 +516,8 @@ vec3 tracePath(vec3 ro, vec3 rd, inout uint seed) {
     for (int bounce = 0; bounce <= MAX_BOUNCES; bounce++) {
         payload.hitT = -1.0;
         payload.showCelestial = showCelestial ? 1.0 : 0.0;
+        payload.rayConeWidth = rayConeWidth;
+        payload.rayConeSpread = rayConeSpread;
         // Radiance SBT records run any-hit only for true alpha cutout. Translucent/water go straight to
         // closest-hit for dielectric handling. Geometry is double-sided; the chit flips the normal.
         // Primary (bounce 0) is the camera ray (CULL_PRIMARY): sees particles but not the first-person
@@ -522,6 +556,7 @@ vec3 tracePath(vec3 ro, vec3 rd, inout uint seed) {
 
         vec3 n = payload.normal; // oriented toward the incoming ray by the closest-hit
         vec3 hitPos = ro + rd * payload.hitT;
+        rayConeWidth = max(rayConeWidth + rayConeSpread * max(payload.hitT, 0.0), RAY_CONE_MIN_WIDTH);
 
         // Stained glass / ice (material 3): a thin colored dielectric. Stochastically
         // reflect (Fresnel glint) or transmit; on transmission the throughput is multiplied by the pane's
@@ -604,7 +639,8 @@ vec3 tracePath(vec3 ro, vec3 rd, inout uint seed) {
                 // own Fresnel reflectance is ignored here — it's a clear interface, not a demodulation target.
                 vec3 refractedAlbedo;
                 vec3 refractedSpecAlbedo;
-                refractedGuideHit(hitPos, rd, n, inWater, gv_motionHitCamRel, gv_motionObjDisp,
+                refractedGuideHit(hitPos, rd, n, inWater, rayConeWidth, rayConeSpread,
+                        gv_motionHitCamRel, gv_motionObjDisp,
                         gv_motionUseRefracted, refractedAlbedo, refractedSpecAlbedo);
                 gv_albedo = refractedAlbedo;
                 gv_specAlb = refractedSpecAlbedo;
@@ -728,11 +764,13 @@ vec3 tracePath(vec3 ro, vec3 rd, inout uint seed) {
                 throughput *= F * ggxG1(ndl2, rough) / ps;
                 ro = p;
                 rd = l;
+                rayConeSpread = max(rayConeSpread, rough * rough * RAY_CONE_GLOSSY_SPREAD_SCALE);
                 showCelestial = true; // specular lobe: this ray is a (glossy) mirror — show the disc
             } else {
                 throughput *= diffAlb / (1.0 - ps);
                 ro = p;
                 rd = cosineDir(n, seed);
+                rayConeSpread = max(rayConeSpread, RAY_CONE_DIFFUSE_SPREAD);
                 showCelestial = false; // diffuse lobe: disc covered by NEE, hide it (anti-firefly)
             }
         } else {
@@ -740,6 +778,7 @@ vec3 tracePath(vec3 ro, vec3 rd, inout uint seed) {
             showCelestial = false; // legacy diffuse bounce: hide the disc (covered by NEE)
             ro = p;
             rd = cosineDir(n, seed);
+            rayConeSpread = max(rayConeSpread, RAY_CONE_DIFFUSE_SPREAD);
         }
 
         // Russian roulette on deeper bounces: survive with prob = max channel, rescale survivors.
@@ -774,6 +813,7 @@ void main() {
 
     vec3 origin = nearP + pc.camOffset;
     vec3 dir = normalize(farP - nearP);
+    float rayConeSpread = primaryRayConeSpread(jndc, size, dir);
 
     // Camera forward (unit view direction at the unjittered screen centre). Used below to convert the
     // (see the HW-depth guide below).
@@ -783,7 +823,7 @@ void main() {
     vec3 frameRadiance = vec3(0.0);
     for (uint s = 0u; s < spp; s++) {
         seed = pcg(seed); // decorrelate per-sample paths (shared camera ray, no AA jitter yet)
-        frameRadiance += tracePath(origin, dir, seed);
+        frameRadiance += tracePath(origin, dir, rayConeSpread, seed);
     }
     frameRadiance /= float(spp);
 
@@ -824,7 +864,7 @@ void main() {
     }
     vec2 motion = (prevNdc - curNdc) * 0.5 * size;
     imageStore(gMotion, pix, vec4(motion, 0.0, 0.0));
-    vec2 specMotion = specularReflectionMotion(gv_hitCamRel + pc.camOffset, dir, jndc, size);
+    vec2 specMotion = specularReflectionMotion(gv_hitCamRel + pc.camOffset, dir, jndc, size, rayConeSpread);
     imageStore(gSpecMotion, pix, vec4(specMotion, 0.0, 0.0));
 
     // Debug guide-buffer visualization: bypass accumulation and show a guide directly.

@@ -103,6 +103,8 @@ struct Payload {
     vec3 f0;         // P6.2a: specular reflectance at normal incidence (dielectric 0.04 / LabPBR / metal)
     float showCelestial; // sky-disc gate (raygen-set, read by world.rmiss); unused here, kept for layout match
     float sss;           // P6.5: LabPBR _s blue channel SSS strength (0 = no subsurface scattering)
+    float rayConeWidth;  // one-pixel footprint width at gl_WorldRayOriginEXT, in world units
+    float rayConeSpread; // footprint growth per world unit travelled by this ray
 };
 layout(location = 0) rayPayloadInEXT Payload payload;
 hitAttributeEXT vec2 attribs;
@@ -149,6 +151,35 @@ vec3 metalF0(int idx) {
 // P6.2b: strength of the LabPBR _n ambient-occlusion (blue) applied to albedo. Kept mild because the
 // path tracer already computes its own AO from sky-visibility rays (avoid double-darkening).
 const float NORMAL_AO_STRENGTH = 0.5;
+
+const float RAY_CONE_MIN_WIDTH = 1.0e-5;
+const float RAY_CONE_MIN_TEXEL_FOOTPRINT = 1.0e-4;
+const float RAY_CONE_MAX_LOD = 12.0;
+
+float rayConeHitWidth() {
+    return max(payload.rayConeWidth + payload.rayConeSpread * max(gl_HitTEXT, 0.0), RAY_CONE_MIN_WIDTH);
+}
+
+float edgeTexelsPerWorld(vec3 p0, vec3 p1, vec2 uv0, vec2 uv1, vec2 textureSizePx) {
+    float worldLen = length(p1 - p0);
+    if (worldLen <= 1.0e-7) {
+        return 0.0;
+    }
+    return length((uv1 - uv0) * textureSizePx) / worldLen;
+}
+
+float rayConeTextureLod(vec2 textureSizePx, vec3 p0, vec3 p1, vec3 p2, vec2 uv0, vec2 uv1, vec2 uv2) {
+    float texelsPerWorld = max(edgeTexelsPerWorld(p0, p1, uv0, uv1, textureSizePx),
+            max(edgeTexelsPerWorld(p1, p2, uv1, uv2, textureSizePx),
+                edgeTexelsPerWorld(p2, p0, uv2, uv0, textureSizePx)));
+    float footprint = max(rayConeHitWidth() * texelsPerWorld, RAY_CONE_MIN_TEXEL_FOOTPRINT);
+    return clamp(log2(footprint), 0.0, RAY_CONE_MAX_LOD);
+}
+
+float rayConeUnitUvLod(vec2 textureSizePx) {
+    float footprint = max(rayConeHitWidth() * max(textureSizePx.x, textureSizePx.y), RAY_CONE_MIN_TEXEL_FOOTPRINT);
+    return clamp(log2(footprint), 0.0, RAY_CONE_MAX_LOD);
+}
 
 // LabPBR _s decode (shared by terrain + entities): red = perceptual smoothness -> roughness; green =
 // reflectance (dielectric F0 0..229 / predefined metal 230..237 / generic metal albedo); alpha = emission
@@ -224,7 +255,8 @@ vec3 applyBreaking(vec3 albedo, vec3 rayOrigin, vec3 rayDir, float hitT, vec3 n)
             vec2 decalUv = (an.x >= an.y && an.x >= an.z) ? local.zy
                          : (an.y >= an.z) ? local.xz
                          : local.xy;
-            vec3 crack = texture(entityTex[nonuniformEXT(ps.w)], decalUv).rgb;
+            float decalLod = rayConeUnitUvLod(vec2(textureSize(entityTex[nonuniformEXT(ps.w)], 0)));
+            vec3 crack = textureLod(entityTex[nonuniformEXT(ps.w)], decalUv, decalLod).rgb;
             return clamp(crack * albedo, 0.0, 1.0);
         }
     }
@@ -247,11 +279,16 @@ void main() {
         vec3 pbary = vec3(1.0 - attribs.x - attribs.y, attribs.x, attribs.y);
         vec2 puv = pbary.x * uvb.uv[p0] + pbary.y * uvb.uv[p1] + pbary.z * uvb.uv[p2];
         int pslot = int(pr.tint.w + 0.5);
+        vec3 pp0 = mat3(gl_ObjectToWorldEXT) * gl_HitTriangleVertexPositionsEXT[0];
+        vec3 pp1 = mat3(gl_ObjectToWorldEXT) * gl_HitTriangleVertexPositionsEXT[1];
+        vec3 pp2 = mat3(gl_ObjectToWorldEXT) * gl_HitTriangleVertexPositionsEXT[2];
+        float particleLod = rayConeTextureLod(vec2(textureSize(entityTex[nonuniformEXT(pslot)], 0)),
+                pp0, pp1, pp2, uvb.uv[p0], uvb.uv[p1], uvb.uv[p2]);
         vec3 pn = normalize(pr.normal.xyz);
         if (dot(pn, gl_WorldRayDirectionEXT) > 0.0) {
             pn = -pn;
         }
-        payload.albedo = texture(entityTex[nonuniformEXT(pslot)], puv).rgb * pr.tint.rgb;
+        payload.albedo = textureLod(entityTex[nonuniformEXT(pslot)], puv, particleLod).rgb * pr.tint.rgb;
         payload.normal = pn;
         payload.hitT = gl_HitTEXT;
         payload.emission = 0.0;
@@ -297,8 +334,15 @@ void main() {
         vec3 ebary = vec3(1.0 - attribs.x - attribs.y, attribs.x, attribs.y);
         vec2 euvCoord = ebary.x * euv.uv[e0] + ebary.y * euv.uv[e1] + ebary.z * euv.uv[e2];
         int texSlot = int(pr.tint.w + 0.5);
+        vec3 ep0 = entityO2w * gl_HitTriangleVertexPositionsEXT[0];
+        vec3 ep1 = entityO2w * gl_HitTriangleVertexPositionsEXT[1];
+        vec3 ep2 = entityO2w * gl_HitTriangleVertexPositionsEXT[2];
+        float entityLod = rayConeTextureLod(vec2(textureSize(entityTex[nonuniformEXT(texSlot)], 0)),
+                ep0, ep1, ep2, euv.uv[e0], euv.uv[e1], euv.uv[e2]);
+        float blockEntityLod = rayConeTextureLod(vec2(textureSize(blockAtlas, 0)),
+                ep0, ep1, ep2, euv.uv[e0], euv.uv[e1], euv.uv[e2]);
 
-        vec3 albedo = texture(entityTex[nonuniformEXT(texSlot)], euvCoord).rgb * pr.tint.rgb;
+        vec3 albedo = textureLod(entityTex[nonuniformEXT(texSlot)], euvCoord, entityLod).rgb * pr.tint.rgb;
         float rough = pr.mat.x;          // P6.1 heuristic defaults
         float metal = pr.mat.y;
         vec3 f0 = mix(vec3(0.04), albedo, metal);
@@ -309,20 +353,16 @@ void main() {
         // block items / falling / contained blocks; sampled from the terrain parallel atlases at the same UV,
         // since their geometry textures from the block atlas), 1 = per-type bindless entity arrays (P6.2c mobs).
         if (pr.mat.z > 1.5) {
-            decodeSpec(textureLod(blockSpecAtlas, euvCoord, 0.0), albedo, rough, metal, f0, emission, sss);
+            decodeSpec(textureLod(blockSpecAtlas, euvCoord, blockEntityLod), albedo, rough, metal, f0, emission, sss);
         } else if (pr.mat.z > 0.5) {
-            decodeSpec(texture(entitySpecTex[nonuniformEXT(texSlot)], euvCoord), albedo, rough, metal, f0, emission, sss);
+            decodeSpec(textureLod(entitySpecTex[nonuniformEXT(texSlot)], euvCoord, entityLod), albedo, rough, metal, f0, emission, sss);
         }
         if (pr.mat.w > 1.5) {
-            n = perturbNormal(n, entityO2w * gl_HitTriangleVertexPositionsEXT[0],
-                    entityO2w * gl_HitTriangleVertexPositionsEXT[1],
-                    entityO2w * gl_HitTriangleVertexPositionsEXT[2], euv.uv[e0], euv.uv[e1], euv.uv[e2], vdir,
-                    textureLod(blockNormalAtlas, euvCoord, 0.0), ao);
+            n = perturbNormal(n, ep0, ep1, ep2, euv.uv[e0], euv.uv[e1], euv.uv[e2], vdir,
+                    textureLod(blockNormalAtlas, euvCoord, blockEntityLod), ao);
         } else if (pr.mat.w > 0.5) {
-            n = perturbNormal(n, entityO2w * gl_HitTriangleVertexPositionsEXT[0],
-                    entityO2w * gl_HitTriangleVertexPositionsEXT[1],
-                    entityO2w * gl_HitTriangleVertexPositionsEXT[2], euv.uv[e0], euv.uv[e1], euv.uv[e2], vdir,
-                    texture(entityNormalTex[nonuniformEXT(texSlot)], euvCoord), ao);
+            n = perturbNormal(n, ep0, ep1, ep2, euv.uv[e0], euv.uv[e1], euv.uv[e2], vdir,
+                    textureLod(entityNormalTex[nonuniformEXT(texSlot)], euvCoord, entityLod), ao);
         }
 
         payload.albedo = albedo * ao;
@@ -367,6 +407,10 @@ void main() {
     vec2 uv2 = uvs.uv[3u * pid + 2u];
     vec3 bary = vec3(1.0 - attribs.x - attribs.y, attribs.x, attribs.y);
     vec2 uv = bary.x * uv0 + bary.y * uv1 + bary.z * uv2;
+    vec3 tp0 = gl_HitTriangleVertexPositionsEXT[0];
+    vec3 tp1 = gl_HitTriangleVertexPositionsEXT[1];
+    vec3 tp2 = gl_HitTriangleVertexPositionsEXT[2];
+    float blockLod = rayConeTextureLod(vec2(textureSize(blockAtlas, 0)), tp0, tp1, tp2, uv0, uv1, uv2);
 
     // Orient the GEOMETRIC normal toward the viewer FIRST (double-sided geometry), so the normal-map TBN
     // is built in the correct hemisphere. Doing this before the map — rather than flipping the perturbed
@@ -380,16 +424,15 @@ void main() {
     // P6.2b LabPBR normal map (_n), gated by mat.w — shared decode (TBN from position-fetch + UVs).
     float ao = 1.0;
     if (pr.mat.w > 0.5) {
-        n = perturbNormal(n, gl_HitTriangleVertexPositionsEXT[0], gl_HitTriangleVertexPositionsEXT[1],
-                gl_HitTriangleVertexPositionsEXT[2], uv0, uv1, uv2, vdir,
-                textureLod(blockNormalAtlas, uv, 0.0), ao);
+        n = perturbNormal(n, tp0, tp1, tp2, uv0, uv1, uv2, vdir,
+                textureLod(blockNormalAtlas, uv, blockLod), ao);
     }
 
     // Stained glass / ice (tint.w == 2, flagged at extraction): a thin colored filter resolved in raygen
     // (material 3). albedo carries the transmission tint = texel rgb mixed toward white by (1 − opacity), so
     // a more opaque texel tints transmitted light more strongly.
     if (pr.tint.w > 1.5) {
-        vec4 gtex = textureLod(blockAtlas, uv, 0.0);
+        vec4 gtex = textureLod(blockAtlas, uv, blockLod);
         // Translucent blocks (glass, ice, …) are breakable too — apply the same overlay here, reusing
         // gtex (already sampled above) rather than re-fetching blockAtlas.
         payload.albedo = applyBreaking(mix(vec3(1.0), gtex.rgb * tint * ao, gtex.a),
@@ -409,7 +452,7 @@ void main() {
     // Water (tint.w == 1) carries the pure biome water tint (no grey water-texture multiply): raygen
     // shades the surface as a clear dielectric and only needs the tint to derive the per-channel
     // Beer–Lambert absorption. Opaque terrain uses the textured albedo as before.
-    payload.albedo = (pr.tint.w > 0.5) ? tint : textureLod(blockAtlas, uv, 0.0).rgb * tint * ao;
+    payload.albedo = (pr.tint.w > 0.5) ? tint : textureLod(blockAtlas, uv, blockLod).rgb * tint * ao;
     payload.normal = n;
     payload.hitT = gl_HitTEXT;
     payload.motionPrev = vec3(0.0); // static terrain: camera-only motion vector
@@ -436,7 +479,7 @@ void main() {
     // P6.5: blue channel (porosity 0-64 / SSS 65-255) now decoded into sss (0 if no _s map or porosity range).
     float sss = 0.0;
     if (pr.mat.z > 0.5) {
-        decodeSpec(textureLod(blockSpecAtlas, uv, 0.0), payload.albedo, rough, metal, f0, emission, sss);
+        decodeSpec(textureLod(blockSpecAtlas, uv, blockLod), payload.albedo, rough, metal, f0, emission, sss);
         if (!nonSolid) sss = 0.0; // SSS only on non-SOLID terrain (leaves/foliage); SOLID blocks opt out
     }
     payload.roughness = rough;
