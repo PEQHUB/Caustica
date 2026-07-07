@@ -45,7 +45,8 @@ public final class RtWorldOverlay {
     public static final int TARGET_FORMAT = VK10.VK_FORMAT_R8G8B8A8_UNORM;
 
     private final RtOverlayFramePool framePool = new RtOverlayFramePool();
-    private final List<RtOverlayFeature> features = List.of(new RtGlowOutlineFeature(), new RtNameTagFeature());
+    private final List<RtOverlayFeature> features =
+            List.of(new RtGlowOutlineFeature(), new RtNameTagFeature(), new RtBlockOutlineFeature());
     private boolean failed;
 
     private RtWorldOverlay() {

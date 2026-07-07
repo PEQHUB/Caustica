@@ -8,6 +8,7 @@ import dev.upscaler.UpscalerConfig;
 import dev.upscaler.UpscalerMod;
 import org.lwjgl.system.MemoryStack;
 import org.lwjgl.vulkan.VKCapabilitiesDevice;
+import org.lwjgl.vulkan.VK10;
 import org.lwjgl.vulkan.VK12;
 import org.lwjgl.vulkan.VkDevice;
 import org.lwjgl.vulkan.VkPhysicalDeviceAccelerationStructureFeaturesKHR;
@@ -16,6 +17,7 @@ import org.lwjgl.vulkan.VkPhysicalDeviceProperties2;
 import org.lwjgl.vulkan.VkPhysicalDeviceRayTracingPipelineFeaturesKHR;
 import org.lwjgl.vulkan.VkPhysicalDeviceRayTracingPipelinePropertiesKHR;
 import org.lwjgl.vulkan.VkPhysicalDeviceRayTracingPositionFetchFeaturesKHR;
+import org.lwjgl.vulkan.VkPhysicalDeviceRayQueryFeaturesKHR;
 import org.lwjgl.vulkan.VkPhysicalDeviceFeatures;
 import org.lwjgl.vulkan.VkPhysicalDeviceVulkan12Features;
 import org.lwjgl.vulkan.VkPhysicalDeviceOpacityMicromapFeaturesEXT;
@@ -35,6 +37,8 @@ import static org.lwjgl.vulkan.KHRRayTracingPipeline.VK_KHR_RAY_TRACING_PIPELINE
 import static org.lwjgl.vulkan.KHRRayTracingPipeline.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR;
 import static org.lwjgl.vulkan.KHRRayTracingPositionFetch.VK_KHR_RAY_TRACING_POSITION_FETCH_EXTENSION_NAME;
 import static org.lwjgl.vulkan.KHRRayTracingPositionFetch.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_POSITION_FETCH_FEATURES_KHR;
+import static org.lwjgl.vulkan.KHRRayQuery.VK_KHR_RAY_QUERY_EXTENSION_NAME;
+import static org.lwjgl.vulkan.KHRRayQuery.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR;
 import static org.lwjgl.vulkan.EXTOpacityMicromap.VK_EXT_OPACITY_MICROMAP_EXTENSION_NAME;
 import static org.lwjgl.vulkan.EXTOpacityMicromap.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_OPACITY_MICROMAP_FEATURES_EXT;
 import static org.lwjgl.vulkan.EXTOpacityMicromap.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_OPACITY_MICROMAP_PROPERTIES_EXT;
@@ -69,12 +73,16 @@ public final class RtDeviceBringup {
      * {@code ray_tracing_position_fetch} lets the closest-hit read hit triangle vertex positions
      * ({@code gl_HitTriangleVertexPositionsEXT}) for the normal-map TBN, avoiding a positions buffer
      * plumbed through the geometry tables. Supported on all RTX GPUs (the project's target).
+     * {@code ray_query} lets fragment shaders (the world-overlay pass, e.g. block outline) issue inline
+     * {@code rayQueryEXT} occlusion tests against the same TLAS the ray-tracing pipeline traces, without a
+     * dedicated raygen dispatch. Same RTX-GPU support floor as the rest of this list.
      */
     public static final List<String> RT_EXTENSIONS = List.of(
             VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME,
             VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME,
             VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME,
-            VK_KHR_RAY_TRACING_POSITION_FETCH_EXTENSION_NAME);
+            VK_KHR_RAY_TRACING_POSITION_FETCH_EXTENSION_NAME,
+            VK_KHR_RAY_QUERY_EXTENSION_NAME);
 
     /**
      * OPTIONAL RT extensions: enabled only when the selected device supports them AND the gate is on, but
@@ -101,6 +109,8 @@ public final class RtDeviceBringup {
     private static volatile boolean ommEnabled; // VK_EXT_opacity_micromap actually enabled on the device
     private static volatile boolean reflexEnabled; // VK_NV_low_latency2 actually enabled on the device
     private static volatile boolean presentIdEnabled; // VK_KHR_present_id actually enabled on the device
+    private static volatile boolean wideLinesEnabled; // VkPhysicalDeviceFeatures.wideLines actually enabled
+    private static volatile float maxLineWidth = 1.0f; // device's lineWidthRange[1]; 1.0 unless wideLinesEnabled
     private static volatile int maxOpacity4StateSubdivisionLevel;
     private static boolean loggedUnavailable;
 
@@ -132,6 +142,18 @@ public final class RtDeviceBringup {
         return maxOpacity4StateSubdivisionLevel;
     }
 
+    /** True if {@code VkPhysicalDeviceFeatures.wideLines} was enabled on the device (world-overlay thick
+     *  lines, e.g. the block outline, use this instead of a screen-space quad when available). */
+    public static boolean wideLinesEnabled() {
+        return wideLinesEnabled;
+    }
+
+    /** The device's max native line width (raster {@code lineWidthRange[1]}); 1.0 if wideLines isn't
+     *  enabled (Vulkan mandates exactly 1.0 in that case). Callers must clamp their desired width to this. */
+    public static float maxLineWidth() {
+        return maxLineWidth;
+    }
+
     /** Optional extensions the gate wants AND the device supports — added but never required. */
     private static List<String> supportedOptionalExtensions(VulkanPhysicalDevice physicalDevice) {
         List<String> supported = new ArrayList<>();
@@ -150,6 +172,17 @@ public final class RtDeviceBringup {
 
     private static boolean reflexRequested() {
         return UpscalerConfig.Rt.Reflex.ENABLED.value();
+    }
+
+    /** Query the raw {@code VkPhysicalDeviceFeatures} for {@code wideLines} support — no wrapper on
+     *  {@code VulkanPhysicalDevice} exposes this, so it's fetched directly off the raw handle, same as
+     *  {@link #probe} already does for other physical-device queries. */
+    private static boolean supportsWideLines(VulkanPhysicalDevice physicalDevice) {
+        try (MemoryStack stack = MemoryStack.stackPush()) {
+            VkPhysicalDeviceFeatures features = VkPhysicalDeviceFeatures.calloc(stack);
+            VK10.vkGetPhysicalDeviceFeatures(physicalDevice.vkPhysicalDevice(), features);
+            return features.wideLines();
+        }
     }
 
     private static String firstUnsupported(VulkanPhysicalDevice physicalDevice) {
@@ -204,6 +237,9 @@ public final class RtDeviceBringup {
         VulkanPNextStruct posFetchStruct = new VulkanPNextStruct(
                 VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_POSITION_FETCH_FEATURES_KHR,
                 VkPhysicalDeviceRayTracingPositionFetchFeaturesKHR.SIZEOF);
+        VulkanPNextStruct rayQueryStruct = new VulkanPNextStruct(
+                VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR,
+                VkPhysicalDeviceRayQueryFeaturesKHR.SIZEOF);
         // bufferDeviceAddress merges into vanilla's existing Vulkan12Features struct.
         features.add(new VulkanFeature(VulkanBackend.VK12_FEATURES_STRUCT, "bufferDeviceAddress",
                 VkPhysicalDeviceVulkan12Features.BUFFERDEVICEADDRESS));
@@ -227,6 +263,21 @@ public final class RtDeviceBringup {
                 VkPhysicalDeviceRayTracingPipelineFeaturesKHR.RAYTRACINGPIPELINE));
         features.add(new VulkanFeature(posFetchStruct, "rayTracingPositionFetch",
                 VkPhysicalDeviceRayTracingPositionFetchFeaturesKHR.RAYTRACINGPOSITIONFETCH));
+        features.add(new VulkanFeature(rayQueryStruct, "rayQuery",
+                VkPhysicalDeviceRayQueryFeaturesKHR.RAYQUERY));
+
+        // Optional: wideLines (core VK10 feature, no extension). Lets the world-overlay pass (block
+        // outline) draw a real thick native line via a raster pipeline's lineWidth / VK_DYNAMIC_STATE_LINE
+        // _WIDTH instead of a screen-space quad. Its absence must not disable RT — the overlay falls back
+        // to whatever the device's mandated lineWidth (1.0) allows.
+        wideLinesEnabled = supportsWideLines(physicalDevice);
+        if (wideLinesEnabled) {
+            features.add(new VulkanFeature(VulkanBackend.VK10_FEATURES_STRUCT, "wideLines",
+                    VkPhysicalDeviceFeatures.WIDELINES));
+            maxLineWidth = physicalDevice.vkPhysicalDeviceProperties().limits().lineWidthRange(1);
+        } else {
+            maxLineWidth = 1.0f;
+        }
 
         // Optional: opacity micromaps (any-hit opt). Only when the gate is on AND the device advertises the
         // extension — its absence must not disable RT, so it is kept out of the mandatory feature set above.
@@ -257,7 +308,8 @@ public final class RtDeviceBringup {
 
         rtRequested = true;
         UpscalerMod.LOGGER.info(
-                "Ray tracing: enabling {}{}{} + features [bufferDeviceAddress, accelerationStructure, rayTracingPipeline"
+                "Ray tracing: enabling {}{}{} + features [bufferDeviceAddress, accelerationStructure, rayTracingPipeline, rayQuery"
+                        + (wideLinesEnabled ? ", wideLines(max=" + maxLineWidth + ")" : "")
                         + (ommEnabled ? ", opacityMicromap" : "") + "] on [{}]",
                 RT_EXTENSIONS, ommEnabled ? " + " + OPTIONAL_RT_EXTENSIONS : "",
                 reflexEnabled ? " + " + REFLEX_EXTENSIONS : "", physicalDevice.deviceName());

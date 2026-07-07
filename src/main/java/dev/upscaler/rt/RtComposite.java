@@ -276,7 +276,19 @@ public final class RtComposite {
     // showed up as rare multi-ms prepareTlas spikes).
     private final RtAccel.TlasRing tlasRing = new RtAccel.TlasRing();
 
+    // This frame's TLAS handle, published after prepareTlas so the world-overlay pass (block outline's
+    // rayQueryEXT occlusion test) can bind the exact same acceleration structure the primary trace used —
+    // same-queue submission order (RtWorldOverlay's transient buffer runs later, same graphics queue)
+    // makes the TLAS build's writes visible without an extra semaphore, matching every other overlay
+    // feature's reliance on in-order queue execution for this frame's world content.
+    private volatile long currentTlasHandle;
+
     private RtComposite() {
+    }
+
+    /** This frame's TLAS handle (0 if none built yet), for {@code dev.upscaler.rt.overlay} occlusion queries. */
+    public long currentTlasHandle() {
+        return currentTlasHandle;
     }
 
     private static Identifier[] createMoonIds() {
@@ -796,6 +808,7 @@ public final class RtComposite {
                 frameTlas = RtAccel.prepareTlas(ctx, fe.instances(), tlasRing);
             }
             active.setTlas(frameTlas.accel.handle);
+            currentTlasHandle = frameTlas.accel.handle;
             try (RtFrameStats.Scope ignored = RtFrameStats.FRAME.stage("frame.recordTlas")) {
                 RtAccel.recordTlasBuild(ctx, cmd, frameTlas);
             }

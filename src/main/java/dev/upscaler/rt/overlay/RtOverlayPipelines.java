@@ -2,6 +2,7 @@ package dev.upscaler.rt.overlay;
 
 import org.lwjgl.system.MemoryStack;
 import org.lwjgl.system.MemoryUtil;
+import org.lwjgl.vulkan.KHRAccelerationStructure;
 import org.lwjgl.vulkan.VK10;
 import org.lwjgl.vulkan.VkDescriptorImageInfo;
 import org.lwjgl.vulkan.VkDescriptorPoolCreateInfo;
@@ -28,6 +29,7 @@ import org.lwjgl.vulkan.VkShaderModuleCreateInfo;
 import org.lwjgl.vulkan.VkVertexInputAttributeDescription;
 import org.lwjgl.vulkan.VkVertexInputBindingDescription;
 import org.lwjgl.vulkan.VkWriteDescriptorSet;
+import org.lwjgl.vulkan.VkWriteDescriptorSetAccelerationStructureKHR;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -217,8 +219,17 @@ public final class RtOverlayPipelines {
             VkPipelineColorBlendStateCreateInfo colorBlend = VkPipelineColorBlendStateCreateInfo.calloc(stack)
                     .sType$Default().pAttachments(blendAttach);
 
+            // Line-topology pipelines get a dynamic line width (vkCmdSetLineWidth) instead of the fixed
+            // 1.0 baked above — real thickness needs the device's wideLines feature (RtDeviceBringup
+            // .wideLinesEnabled/maxLineWidth); callers must clamp their desired width to that max
+            // themselves (Vulkan mandates exactly 1.0 without the feature).
+            boolean isLineTopology = spec.topology == VK10.VK_PRIMITIVE_TOPOLOGY_LINE_LIST
+                    || spec.topology == VK10.VK_PRIMITIVE_TOPOLOGY_LINE_STRIP;
+            int[] dynamicStates = isLineTopology
+                    ? new int[]{VK10.VK_DYNAMIC_STATE_VIEWPORT, VK10.VK_DYNAMIC_STATE_SCISSOR, VK10.VK_DYNAMIC_STATE_LINE_WIDTH}
+                    : new int[]{VK10.VK_DYNAMIC_STATE_VIEWPORT, VK10.VK_DYNAMIC_STATE_SCISSOR};
             VkPipelineDynamicStateCreateInfo dynamicState = VkPipelineDynamicStateCreateInfo.calloc(stack).sType$Default()
-                    .pDynamicStates(stack.ints(VK10.VK_DYNAMIC_STATE_VIEWPORT, VK10.VK_DYNAMIC_STATE_SCISSOR));
+                    .pDynamicStates(stack.ints(dynamicStates));
 
             VkPipelineRenderingCreateInfo renderingInfo = VkPipelineRenderingCreateInfo.calloc(stack).sType$Default()
                     .colorAttachmentCount(1).pColorAttachmentFormats(stack.ints(spec.attachmentFormat));
@@ -403,6 +414,88 @@ public final class RtOverlayPipelines {
             long set = pSet.get(0);
             RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_DESCRIPTOR_SET, set, label + " descriptor set");
             return new SampledImageSet(dsl, pool, set);
+        }
+    }
+
+    /**
+     * A ring of descriptor sets each holding one {@code VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR}
+     * binding — for overlay passes that issue an inline {@code rayQueryEXT} occlusion test against the
+     * world TLAS (e.g. block outline). A ring (not a single set, unlike {@link StorageImageSet}/
+     * {@link SampledImageSet}) is required because the TLAS handle changes most frames ({@code RtAccel
+     * .TlasRing} cycles it every frame even when it doesn't grow) — rewriting a single set's binding while
+     * an earlier frame's command buffer referencing that same set may still be executing on the GPU is the
+     * same "descriptor set update while in use" hazard {@code RtPipeline.setTlas} already guards against
+     * with its own 4-slot ring.
+     */
+    public static final class AccelStructureSet {
+        private static final int RING = 4;
+        public final long layout;
+        private final long pool;
+        private final long[] sets;
+        private int current = -1;
+
+        private AccelStructureSet(long layout, long pool, long[] sets) {
+            this.layout = layout;
+            this.pool = pool;
+            this.sets = sets;
+        }
+
+        /** Advance to the next ring slot, write {@code tlas} into it, and return the set to bind this frame. */
+        public long bind(RtContext ctx, long tlas) {
+            current = (current + 1) % RING;
+            long set = sets[current];
+            try (MemoryStack stack = MemoryStack.stackPush()) {
+                VkWriteDescriptorSetAccelerationStructureKHR asWrite = VkWriteDescriptorSetAccelerationStructureKHR.calloc(stack)
+                        .sType(KHRAccelerationStructure.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR)
+                        .pAccelerationStructures(stack.longs(tlas));
+                VkWriteDescriptorSet.Buffer write = VkWriteDescriptorSet.calloc(1, stack);
+                write.get(0).sType$Default().pNext(asWrite.address()).dstSet(set).dstBinding(0)
+                        .descriptorCount(1).descriptorType(KHRAccelerationStructure.VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR);
+                VK10.vkUpdateDescriptorSets(ctx.vk(), write, null);
+            }
+            return set;
+        }
+
+        public void destroy(VkDevice vk) {
+            VK10.vkDestroyDescriptorPool(vk, pool, null);
+            VK10.vkDestroyDescriptorSetLayout(vk, layout, null);
+        }
+    }
+
+    public static AccelStructureSet accelStructureSet(RtContext ctx, int stageFlags, String label) {
+        VkDevice vk = ctx.vk();
+        try (MemoryStack stack = MemoryStack.stackPush()) {
+            LongBuffer p = stack.mallocLong(1);
+            VkDescriptorSetLayoutBinding.Buffer binds = VkDescriptorSetLayoutBinding.calloc(1, stack);
+            binds.get(0).binding(0).descriptorType(KHRAccelerationStructure.VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR)
+                    .descriptorCount(1).stageFlags(stageFlags);
+            VkDescriptorSetLayoutCreateInfo dslci = VkDescriptorSetLayoutCreateInfo.calloc(stack).sType$Default().pBindings(binds);
+            check(VK10.vkCreateDescriptorSetLayout(vk, dslci, null, p), "vkCreateDescriptorSetLayout(" + label + ")");
+            long dsl = p.get(0);
+            RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT, dsl, label + " descriptor set layout");
+
+            int ring = AccelStructureSet.RING;
+            VkDescriptorPoolSize.Buffer poolSizes = VkDescriptorPoolSize.calloc(1, stack);
+            poolSizes.get(0).type(KHRAccelerationStructure.VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR).descriptorCount(ring);
+            VkDescriptorPoolCreateInfo dpci = VkDescriptorPoolCreateInfo.calloc(stack).sType$Default().maxSets(ring).pPoolSizes(poolSizes);
+            check(VK10.vkCreateDescriptorPool(vk, dpci, null, p), "vkCreateDescriptorPool(" + label + ")");
+            long pool = p.get(0);
+            RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_DESCRIPTOR_POOL, pool, label + " descriptor pool");
+
+            LongBuffer dsls = stack.mallocLong(ring);
+            for (int i = 0; i < ring; i++) {
+                dsls.put(i, dsl);
+            }
+            VkDescriptorSetAllocateInfo dsai = VkDescriptorSetAllocateInfo.calloc(stack).sType$Default()
+                    .descriptorPool(pool).pSetLayouts(dsls);
+            LongBuffer pSets = stack.mallocLong(ring);
+            check(VK10.vkAllocateDescriptorSets(vk, dsai, pSets), "vkAllocateDescriptorSets(" + label + ")");
+            long[] sets = new long[ring];
+            for (int i = 0; i < ring; i++) {
+                sets[i] = pSets.get(i);
+                RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_DESCRIPTOR_SET, sets[i], label + " descriptor set " + i);
+            }
+            return new AccelStructureSet(dsl, pool, sets);
         }
     }
 

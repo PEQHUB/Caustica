@@ -619,6 +619,14 @@ public final class UpscalerConfig {
             }
         }
 
+        public static final class Overlay {
+            public static final BooleanSetting BLOCK_OUTLINE_ENABLED =
+                    bool("upscaler.rt.blockOutline", "overlay.block-outline.enabled", true);
+
+            private Overlay() {
+            }
+        }
+
         public static final class DlssRr {
             public static final BooleanSetting ENABLED = bool("upscaler.rt.dlssRr", "dlss-rr.enabled", true);
             public static final IntSetting PRESET = intValue("upscaler.rt.dlssRr.preset", "dlss-rr.preset", 0);
