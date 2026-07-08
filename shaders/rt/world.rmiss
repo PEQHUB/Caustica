@@ -10,7 +10,7 @@
 // disc + moon disc with procedural phase + stars) into payload.albedo; raygen reads it back for both the
 // accumulated radiance and the bounce-0 denoiser guides, exactly like the pre-P6.3 era.
 //
-// Celestial discs (sun/moon) are gated by payload.showCelestial, which raygen sets per-ray from the path
+// Celestial discs (sun/moon) are gated by a packed payload flag, which raygen sets per-ray from the path
 // state: true on the primary ray and after every specular/dielectric bounce (so the sun/moon show up in
 // water/glass/metal reflections + refractions), false after a diffuse vertex did sun/moon NEE (so the
 // disc isn't double-counted against the direct light → fireflies). The atmosphere gradient + stars are
@@ -45,15 +45,17 @@ struct Payload {
     vec3 albedo;
     vec3 normal;
     float hitT;
-    float emission;
     vec3 motionPrev;
-    float material;
-    float roughness;
-    float metalness;
     vec3 f0;
-    float showCelestial; // raygen-set gate: >0.5 ⇒ draw the sun/moon disc on this miss
+    uint flags;       // bits 0..1 = material, bit 2 = show celestial disc on miss
+    uint roughMetal;  // packHalf2x16(vec2(roughness, metalness))
+    uint emissionSss; // packHalf2x16(vec2(emission, sss))
+    uint rayCone;     // packHalf2x16(vec2(width, spread))
 };
 layout(location = 0) rayPayloadInEXT Payload payload;
+
+const uint PAYLOAD_SHOW_CELESTIAL = 4u;
+bool payloadShowCelestial() { return (payload.flags & PAYLOAD_SHOW_CELESTIAL) != 0u; }
 
 const float PI = 3.14159265359;
 float pow2(float x) { return x * x; }
@@ -241,7 +243,7 @@ void main() {
     // accounted for the light via diffuse NEE. squareBody gives the body-local [-1,1] coord; the sprite's
     // own texel coverage (alpha) shapes the disc. The moon sprite is the current phase, so its art already
     // encodes the crescent/gibbous shape — no procedural terminator needed.
-    if (payload.showCelestial > 0.5) {
+    if (payloadShowCelestial()) {
         vec2 local;
         squareBody(dir, sd, SUN_DISC_HALF_ANGLE, local);
         if (all(lessThan(abs(local), vec2(1.0)))) {
@@ -266,10 +268,11 @@ void main() {
 
     payload.albedo = max(col, vec3(0.0)); // raygen reads this as the sky radiance + bounce-0 guide
     payload.hitT = -1.0;
-    payload.emission = 0.0;
+    payload.normal = vec3(0.0);
     payload.motionPrev = vec3(0.0);
-    payload.material = 0.0;
-    payload.roughness = 1.0;
-    payload.metalness = 0.0;
     payload.f0 = vec3(0.0);
+    payload.flags = 0u;
+    payload.roughMetal = packHalf2x16(vec2(1.0, 0.0));
+    payload.emissionSss = packHalf2x16(vec2(0.0, 0.0));
+    payload.rayCone = 0u;
 }

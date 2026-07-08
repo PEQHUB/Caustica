@@ -99,19 +99,32 @@ struct Payload {
     vec3 albedo;    // hit: block albedo (atlas * tint). miss: sky radiance.
     vec3 normal;    // hit: geometric normal, oriented toward the viewer.
     float hitT;     // >= 0 on hit (ray length), < 0 on miss.
-    float emission; // hit: block light level 0..1; 0 on miss.
     vec3 motionPrev; // hit: per-vertex world displacement since last frame (entity/BE MV); 0 otherwise.
-    float material; // hit: 0 = opaque diffuse, 1 = water (smooth dielectric); 0 on miss.
-    float roughness; // P6.1: perceptual roughness for the GGX BRDF.
-    float metalness; // P6.1: 0 = dielectric, 1 = conductor.
     vec3 f0;         // P6.2a: specular F0 (set by the chit: dielectric 0.04 / LabPBR green / metal).
-    float showCelestial; // raygen sets this before each trace: >0.5 ⇒ world.rmiss draws the sun/moon disc.
-    float sss;           // P6.5: LabPBR _s blue channel SSS strength (0 = no subsurface scattering)
-    float rayConeWidth;  // one-pixel ray footprint width at the ray origin, in world units
-    float rayConeSpread; // footprint growth per world unit travelled by this ray
+    uint flags;       // bits 0..1 = material, bit 2 = show celestial disc on miss
+    uint roughMetal;  // packHalf2x16(vec2(roughness, metalness))
+    uint emissionSss; // packHalf2x16(vec2(emission, sss))
+    uint rayCone;     // packHalf2x16(vec2(width, spread))
 };
 layout(location = 0) rayPayloadEXT Payload payload;
 layout(location = 1) rayPayloadEXT vec4 shadowVis; // rgb = transmittance; a is unused by hit-object visibility
+
+const uint MATERIAL_OPAQUE = 0u;
+const uint MATERIAL_WATER = 1u;
+const uint MATERIAL_PARTICLE = 2u;
+const uint MATERIAL_GLASS = 3u;
+const uint PAYLOAD_MATERIAL_MASK = 3u;
+const uint PAYLOAD_SHOW_CELESTIAL = 4u;
+
+uint payloadMaterial() { return payload.flags & PAYLOAD_MATERIAL_MASK; }
+float payloadRoughness() { return unpackHalf2x16(payload.roughMetal).x; }
+float payloadMetalness() { return unpackHalf2x16(payload.roughMetal).y; }
+float payloadEmission() { return unpackHalf2x16(payload.emissionSss).x; }
+float payloadSss() { return unpackHalf2x16(payload.emissionSss).y; }
+void payloadSetTraceState(bool showCelestial, float rayConeWidth, float rayConeSpread) {
+    payload.flags = showCelestial ? PAYLOAD_SHOW_CELESTIAL : 0u;
+    payload.rayCone = packHalf2x16(vec2(rayConeWidth, rayConeSpread));
+}
 
 const float PI = 3.14159265359;
 const float INV_PI = 0.31830988618;
@@ -427,8 +440,9 @@ vec2 specularReflectionMotion(vec3 surfacePos, vec3 primaryDir, vec2 currentNdc,
     // zeroing the trace bias the main path tracer needs to avoid surface acne. (Setting SURF_BIAS=0
     // globally fixed the MV but reintroduced that acne — this localizes the fix to the MV reconstruction.)
     payload.hitT = -1.0;
-    payload.rayConeWidth = max(length(surfacePos - pc.camOffset) * primaryConeSpread, RAY_CONE_MIN_WIDTH);
-    payload.rayConeSpread = max(primaryConeSpread, RAY_CONE_MIN_SPREAD);
+    payloadSetTraceState(false,
+            max(length(surfacePos - pc.camOffset) * primaryConeSpread, RAY_CONE_MIN_WIDTH),
+            max(primaryConeSpread, RAY_CONE_MIN_SPREAD));
     hitObjectEXT hObj;
     hitObjectTraceReorderExecuteEXT(hObj, topLevelAS, gl_RayFlagsNoneEXT, CULL_SECONDARY,
                 SBT_RADIANCE, SBT_STRIDE_BUCKET, 0u, surfacePos + n * SURF_BIAS, RAY_TMIN, specDir, 10000.0, 0);
@@ -439,7 +453,7 @@ vec2 specularReflectionMotion(vec3 surfacePos, vec3 primaryDir, vec2 currentNdc,
         reflectedHit = surfacePos + specDir * payload.hitT;
         // Reflected water/fluid is a static dielectric (its chit MV lane is repurposed); only opaque
         // geometry carries a real per-vertex displacement. Particles are off secondary rays (cull mask).
-        reflectedMotionPrev = payload.material > 0.5 ? vec3(0.0) : payload.motionPrev;
+        reflectedMotionPrev = payloadMaterial() == MATERIAL_OPAQUE ? payload.motionPrev : vec3(0.0);
     } else {
         reflectedHit = surfacePos + specDir * 1.0e6; // sky reflection: virtual image at infinity along specDir
         reflectedMotionPrev = vec3(0.0);
@@ -475,8 +489,7 @@ void refractedGuideHit(vec3 surfacePos, vec3 incidentDir, vec3 surfaceNormal, bo
 
     vec3 ro = surfacePos - surfaceNormal * SURF_BIAS;
     payload.hitT = -1.0;
-    payload.rayConeWidth = rayConeWidth;
-    payload.rayConeSpread = rayConeSpread;
+    payloadSetTraceState(false, rayConeWidth, rayConeSpread);
     hitObjectEXT hObj;
     hitObjectTraceReorderExecuteEXT(hObj, topLevelAS, gl_RayFlagsNoneEXT, CULL_SECONDARY,
                 SBT_RADIANCE, SBT_STRIDE_BUCKET, 0u, ro, RAY_TMIN, refractedDir, 10000.0, 0);
@@ -490,13 +503,14 @@ void refractedGuideHit(vec3 surfacePos, vec3 incidentDir, vec3 surfaceNormal, bo
 
     vec3 hitPos = ro + refractedDir * payload.hitT;
     hitCamRel = hitPos - pc.camOffset;
-    motionPrev = (payload.material <= 0.5 || payload.material > 1.5) ? payload.motionPrev : vec3(0.0);
-    if (payload.material <= 0.5) {
+    uint material = payloadMaterial();
+    motionPrev = material != MATERIAL_WATER ? payload.motionPrev : vec3(0.0);
+    if (material == MATERIAL_OPAQUE) {
         bool pbr = (pc.flags & 2u) != 0u;
-        diffuseAlbedo = pbr ? payload.albedo * (1.0 - clamp(payload.metalness, 0.0, 1.0)) : payload.albedo;
+        diffuseAlbedo = pbr ? payload.albedo * (1.0 - clamp(payloadMetalness(), 0.0, 1.0)) : payload.albedo;
         if (pbr) {
             vec3 f0 = payload.f0;
-            float rough = clamp(payload.roughness, MIN_ROUGH, 1.0);
+            float rough = clamp(payloadRoughness(), MIN_ROUGH, 1.0);
             float NoV = clamp(dot(payload.normal, -refractedDir), 0.0, 1.0);
             specAlbedo = rrSpecularAlbedo(f0, rough * rough, NoV);
         }
@@ -526,9 +540,7 @@ vec3 tracePath(vec3 ro, vec3 rd, float primaryConeSpread, inout uint seed) {
     bool showCelestial = true;
     for (int bounce = 0; bounce <= maxBounces; bounce++) {
         payload.hitT = -1.0;
-        payload.showCelestial = showCelestial ? 1.0 : 0.0;
-        payload.rayConeWidth = rayConeWidth;
-        payload.rayConeSpread = rayConeSpread;
+        payloadSetTraceState(showCelestial, rayConeWidth, rayConeSpread);
         // Radiance SBT records run any-hit only for true alpha cutout. Translucent/water go straight to
         // closest-hit for dielectric handling. Geometry is double-sided; the chit flips the normal.
         // Primary (bounce 0) is the camera ray (CULL_PRIMARY): sees particles but not the first-person
@@ -542,7 +554,7 @@ vec3 tracePath(vec3 ro, vec3 rd, float primaryConeSpread, inout uint seed) {
 
         if (payload.hitT < 0.0) {
             // Sky rewrite: world.rmiss computed the sky radiance (gradient + sun/moon disc + stars, gated
-            // by payload.showCelestial) and left it in payload.albedo. The disc visibility decision was
+            // by the packed show-celestial flag) and left it in payload.albedo. The disc visibility decision was
             // made on the CPU-of-the-path (showCelestial above), not here.
             vec3 sky = payload.albedo;
             if (bounce == 0) { // primary ray hit sky: guides describe "no surface"
@@ -572,6 +584,7 @@ vec3 tracePath(vec3 ro, vec3 rd, float primaryConeSpread, inout uint seed) {
         vec3 n = payload.normal; // oriented toward the incoming ray by the closest-hit
         vec3 hitPos = ro + rd * payload.hitT;
         rayConeWidth = max(rayConeWidth + rayConeSpread * max(payload.hitT, 0.0), RAY_CONE_MIN_WIDTH);
+        uint material = payloadMaterial();
 
         // Stained glass / ice (material 3): a thin colored dielectric. Stochastically
         // reflect (Fresnel glint) or transmit; on transmission the throughput is multiplied by the pane's
@@ -579,7 +592,7 @@ vec3 tracePath(vec3 ro, vec3 rd, float primaryConeSpread, inout uint seed) {
         // the transmission tint (texel rgb mixed toward white by 1 − opacity). Treated as a thin pane, so the
         // transmitted ray continues straight (no refraction bend) — like the particle path, the instance
         // stays double-sided and the normal already faces the incoming ray.
-        if (payload.material > 2.5) {
+        if (material == MATERIAL_GLASS) {
             vec3 glassTint = payload.albedo;
             float cosI = clamp(dot(-rd, n), 0.0, 1.0);
             float F = fresnelDielectric(cosI, 1.0, GLASS_IOR);
@@ -615,7 +628,7 @@ vec3 tracePath(vec3 ro, vec3 rd, float primaryConeSpread, inout uint seed) {
         // The instance mask keeps particles off shadow/GI rays, so this only ever fires at bounce 0, where
         // throughput == 1 and L += albedo writes the texel straight to the pixel (no emission/GI into the
         // scene — the v1 scope). Cutout is handled in world.rahit; here we just display and terminate.
-        if (payload.material > 1.5) {
+        if (material == MATERIAL_PARTICLE) {
             gv_normal = n;
             gv_albedo = payload.albedo; // RR demodulation target = the particle texel (keeps it sharp)
             gv_specAlb = vec3(0.0);
@@ -634,7 +647,7 @@ vec3 tracePath(vec3 ro, vec3 rd, float primaryConeSpread, inout uint seed) {
         // tracking decides air->water vs water->air from the path state, not the hit geometry, so the
         // duplicated FluidRenderer back-faces don't confuse the orientation; the normal `n` already
         // faces the incoming ray. The bounce cap bounds stacked refractions.
-        if (payload.material > 0.5) {
+        if (material == MATERIAL_WATER) {
             // W1: ripple the (near-flat) surface normal before any Fresnel/guide use → glints, broken
             // reflections, wobbling refraction. W2: this water body's biome tint (carried in payload.albedo
             // for water hits) sets the absorption applied to the next submerged segment.
@@ -685,14 +698,14 @@ vec3 tracePath(vec3 ro, vec3 rd, float primaryConeSpread, inout uint seed) {
         }
 
         vec3 albedo = payload.albedo;
-        float sss = payload.sss; // P6.5: LabPBR SSS strength (0 when absent; non-zero only for _s-mapped terrain/entities)
+        float sss = payloadSss(); // P6.5: LabPBR SSS strength (0 when absent; non-zero only for _s-mapped terrain/entities)
         vec3 p = hitPos + n * SURF_BIAS;
         vec3 v = -rd; // view direction (toward the camera / incoming ray)
 
         // P6.1 material split. Metals tint F0 by albedo and have no diffuse lobe; dielectrics use a
         // fixed 0.04 F0. With PBR disabled this collapses to a pure Lambertian surface (the legacy look).
-        float rough = pbr ? clamp(payload.roughness, MIN_ROUGH, 1.0) : 1.0;
-        float metal = pbr ? clamp(payload.metalness, 0.0, 1.0) : 0.0;
+        float rough = pbr ? clamp(payloadRoughness(), MIN_ROUGH, 1.0) : 1.0;
+        float metal = pbr ? clamp(payloadMetalness(), 0.0, 1.0) : 0.0;
         vec3 diffAlb = albedo * (1.0 - metal);
         // F0 comes from the chit (P6.2a): dielectric 0.04, a LabPBR custom/metal F0, or albedo for metals.
         vec3 F0 = pbr ? payload.f0 : mix(vec3(0.04), albedo, metal);
@@ -712,8 +725,9 @@ vec3 tracePath(vec3 ro, vec3 rd, float primaryConeSpread, inout uint seed) {
         // Block lights have no NEE yet, so emission is gathered purely by hitting emitters during the
         // walk (counted at every vertex, no double counting) — noisy for small emitters until ReSTIR
         // (P3.3), but temporal accumulation converges static views.
-        if (payload.emission > 0.0) {
-            L += throughput * albedo * payload.emission * EMISSIVE_STRENGTH;
+        float emission = payloadEmission();
+        if (emission > 0.0) {
+            L += throughput * albedo * emission * EMISSIVE_STRENGTH;
         }
 
         // NEE: direct light from the dominant celestial body (delta directional light = sun by day,

@@ -106,19 +106,26 @@ struct Payload {
     vec3 albedo;
     vec3 normal;
     float hitT;
-    float emission; // block light level 0..1 (stashed in prim normal.w during extraction)
     vec3 motionPrev; // world displacement since last frame (entity per-object MV); 0 for static terrain
-    float material;  // P5.2: 0 = opaque diffuse, 1 = water (smooth dielectric, handled in raygen)
-    float roughness; // P6.1: perceptual roughness for the GGX BRDF
-    float metalness; // P6.1: 0 = dielectric, 1 = conductor
     vec3 f0;         // P6.2a: specular reflectance at normal incidence (dielectric 0.04 / LabPBR / metal)
-    float showCelestial; // sky-disc gate (raygen-set, read by world.rmiss); unused here, kept for layout match
-    float sss;           // P6.5: LabPBR _s blue channel SSS strength (0 = no subsurface scattering)
-    float rayConeWidth;  // one-pixel footprint width at gl_WorldRayOriginEXT, in world units
-    float rayConeSpread; // footprint growth per world unit travelled by this ray
+    uint flags;       // bits 0..1 = material, bit 2 = show celestial disc on miss
+    uint roughMetal;  // packHalf2x16(vec2(roughness, metalness))
+    uint emissionSss; // packHalf2x16(vec2(emission, sss))
+    uint rayCone;     // packHalf2x16(vec2(width, spread))
 };
 layout(location = 0) rayPayloadInEXT Payload payload;
 hitAttributeEXT vec2 attribs;
+
+const uint MATERIAL_OPAQUE = 0u;
+const uint MATERIAL_WATER = 1u;
+const uint MATERIAL_PARTICLE = 2u;
+const uint MATERIAL_GLASS = 3u;
+
+void payloadSetPacked(uint material, float roughness, float metalness, float emission, float sss) {
+    payload.flags = material;
+    payload.roughMetal = packHalf2x16(vec2(roughness, metalness));
+    payload.emissionSss = packHalf2x16(vec2(emission, sss));
+}
 
 // P5.1b-2 dynamic entities: instances with this custom-index flag bit carry real captured ModelPart
 // geometry. Their gl_InstanceCustomIndexEXT (low bits) indexes the entity geometry table, not the
@@ -168,7 +175,8 @@ const float RAY_CONE_MIN_TEXEL_FOOTPRINT = 1.0e-4;
 const float RAY_CONE_MAX_LOD = 12.0;
 
 float rayConeHitWidth() {
-    return max(payload.rayConeWidth + payload.rayConeSpread * max(gl_HitTEXT, 0.0), RAY_CONE_MIN_WIDTH);
+    vec2 cone = unpackHalf2x16(payload.rayCone);
+    return max(cone.x + cone.y * max(gl_HitTEXT, 0.0), RAY_CONE_MIN_WIDTH);
 }
 
 float edgeTexelsPerWorld(vec3 p0, vec3 p1, vec2 uv0, vec2 uv1, vec2 textureSizePx) {
@@ -302,7 +310,6 @@ void main() {
         payload.albedo = textureLod(entityTex[nonuniformEXT(pslot)], puv, particleLod).rgb * pr.tint.rgb;
         payload.normal = pn;
         payload.hitT = gl_HitTEXT;
-        payload.emission = 0.0;
         // Per-particle motion vector: interpolate the captured per-vertex displacement (uniform across the
         // billboard's verts) with the same indices/barycentrics as the UV. dispAddr == 0 falls back to
         // rigidDisp, which particles write as zero unless a future path chooses otherwise.
@@ -312,11 +319,8 @@ void main() {
         } else {
             payload.motionPrev = g.rigidDisp.xyz;
         }
-        payload.material = 2.0;          // particle marker → raygen shows-and-terminates
-        payload.roughness = 1.0;
-        payload.metalness = 0.0;
         payload.f0 = vec3(0.0);
-        payload.sss = 0.0;
+        payloadSetPacked(MATERIAL_PARTICLE, 1.0, 0.0, 0.0, 0.0);
         return;
     }
     if ((gl_InstanceCustomIndexEXT & ENTITY_BIT) != 0) {
@@ -379,7 +383,6 @@ void main() {
         payload.albedo = albedo * ao;
         payload.normal = n;
         payload.hitT = gl_HitTEXT;
-        payload.emission = emission;
         // P5.1c-2: per-vertex motion vector — interpolate the captured per-vertex displacement with the
         // same indices/barycentrics used for the UV above. Rotation and skeletal/lid animation use a
         // per-vertex buffer; pure whole-object translation is packed into rigidDisp with no buffer.
@@ -389,11 +392,8 @@ void main() {
         } else {
             payload.motionPrev = g.rigidDisp.xyz;
         }
-        payload.material = 0.0;          // entities are opaque
-        payload.roughness = rough;
-        payload.metalness = metal;
         payload.f0 = f0;
-        payload.sss = sss;
+        payloadSetPacked(MATERIAL_OPAQUE, rough, metal, emission, sss);
         return;
     }
 
@@ -402,7 +402,7 @@ void main() {
     // (solid / cutout / translucent / water).
     // gl_PrimitiveID restarts at 0 per geometry, so re-add this geometry's triangle base to land in the
     // section's packed prim/index/uv arrays (concatenated in BUCKET order). Water prims keep tint.w == 1,
-    // so payload.material below is set from the prim exactly as before — no special-casing needed here.
+    // which is converted to the packed material enum below.
     uint pid = gl_PrimitiveID + sec.triBase[gl_GeometryIndexEXT];
     Prim pr = Prims(sec.primAddr).p[pid];
     vec3 n = normalize(pr.normal.xyz);
@@ -451,12 +451,8 @@ void main() {
         payload.normal = n;
         payload.hitT = gl_HitTEXT;
         payload.motionPrev = vec3(0.0);
-        payload.material = 3.0;
-        payload.roughness = 0.05;
-        payload.metalness = 0.0;
         payload.f0 = vec3(0.04);
-        payload.emission = 0.0;
-        payload.sss = 0.0;
+        payloadSetPacked(MATERIAL_GLASS, 0.05, 0.0, 0.0, 0.0);
         return;
     }
 
@@ -467,7 +463,7 @@ void main() {
     payload.normal = n;
     payload.hitT = gl_HitTEXT;
     payload.motionPrev = vec3(0.0); // static terrain: camera-only motion vector
-    payload.material = pr.tint.w;   // P5.2: 1 = water dielectric, 0 = opaque (set by extraction)
+    uint material = pr.tint.w > 0.5 ? MATERIAL_WATER : MATERIAL_OPAQUE;
 
     // Block-breaking overlay: opaque/cutout terrain (water skips — fluids aren't breakable, so
     // breakCount==0 short-circuits it anyway; translucent glass/ice is handled at its own early-return
@@ -493,9 +489,6 @@ void main() {
         decodeSpec(textureLod(blockSpecAtlas, uv, blockLod), payload.albedo, rough, metal, f0, emission, sss);
         if (!nonSolid) sss = 0.0; // SSS only on non-SOLID terrain (leaves/foliage); SOLID blocks opt out
     }
-    payload.roughness = rough;
-    payload.metalness = metal;
     payload.f0 = f0;
-    payload.emission = emission;
-    payload.sss = sss;
+    payloadSetPacked(material, rough, metal, emission, sss);
 }
