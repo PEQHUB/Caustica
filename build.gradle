@@ -103,17 +103,24 @@ abstract class CompileShaders extends DefaultTask {
 		def outDirFile = outDir.get().asFile
 		outDirFile.mkdirs()
 		def stages = ~/.*\.(rgen|rchit|rahit|rmiss|rcall|comp|vert|frag)$/
-		srcDir.get().asFile.listFiles().findAll { it.isFile() && it.name ==~ stages }.each { src ->
-			def spv = new File(outDirFile, "${src.name}.spv")
+		def compileOne = { File src, File spv, List<String> defines ->
 			execOps.exec {
 				// -g (OpLine/OpSource debug info), not -gVS: the NonSemantic.Shader.DebugInfo form (-gVS)
 				// emits OpExtInstWithForwardRefsKHR (SPV_KHR_relaxed_extended_instruction), which trips a
 				// validation error unless the shaderRelaxedExtendedInstruction device feature is enabled.
 				// -g keeps source-level debug info for Nsight/RenderDoc without needing that extension.
-				commandLine glslang.get(), "-V", "--target-env", "vulkan1.2", "-g", src.absolutePath, "-o", spv.absolutePath
+				commandLine([glslang.get(), "-V", "--target-env", "vulkan1.2", "-g"] + defines
+						+ [src.absolutePath, "-o", spv.absolutePath])
 			}
 			execOps.exec {
 				commandLine spirvVal.get(), "--target-env", "vulkan1.2", spv.absolutePath
+			}
+		}
+		srcDir.get().asFile.listFiles().findAll { it.isFile() && it.name ==~ stages }.each { src ->
+			def spv = new File(outDirFile, "${src.name}.spv")
+			compileOne(src, spv, [])
+			if (src.name == "world.rgen") {
+				compileOne(src, new File(outDirFile, "world_nv.rgen.spv"), ["-DCANDELA_SER_NV=1"])
 			}
 		}
 	}
