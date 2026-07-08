@@ -19,7 +19,6 @@ struct Prim {
 };
 struct Section {
     uint64_t primAddr;
-    uint64_t idxAddr;
     uint64_t uvAddr;
     uint triBase[4]; // fixed bucket triangle offsets: solid/cutout/translucent/water
 };
@@ -40,24 +39,16 @@ layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer En
 layout(binding = 2, set = 0) uniform sampler2D blockAtlas;
 layout(binding = 0, set = 1) uniform sampler2D entityTex[];
 
-// P6.4: per-frame push data lives in a host-visible BDA buffer (the old inline block hit the 256-byte
-// push-constant ceiling); only its 8-byte address is pushed. The any-hit reads just two table addresses,
-// so `pc` is a macro that lazily loads the needed field. std430 layout matches the CPU writer + raygen.
-struct WorldPush {
-    mat4 invViewProj;
-    vec3 camOffset;
-    uint64_t tableAddr;        // 80  section table
-    uint debugView; uint frameIndex;
-    mat4 prevViewProj;
-    vec3 camDelta; uint spp;
-    vec2 jitter;
-    uint64_t entityTableAddr;  // 184 entity geometry table
-    uint flags;
-    vec4 sunDir; vec4 lightDir; vec4 lightRadiance;
-};
-layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer WorldPushRef { WorldPush v; };
-layout(push_constant) uniform PushAddr { uint64_t worldPushAddr; } pcAddr;
-#define pc WorldPushRef(pcAddr.worldPushAddr).v
+// The any-hit only ever needs three scalars per invocation (Section/EntityGeom table addresses +
+// frameIndex for the alpha-dither salt), so they're pushed as real inline push constants rather than
+// read through the per-frame WorldPush BDA buffer (world.rgen/rchit) — that would cost an extra
+// global-memory load just to find the address of the load we actually want.
+layout(push_constant) uniform PushAddr {
+    uint64_t worldPushAddr;   // unused here; kept so the layout matches world.rgen/rchit/rmiss
+    uint64_t tableAddr;
+    uint64_t entityTableAddr;
+    uint frameIndex;
+} pcAddr;
 
 layout(location = 1) rayPayloadInEXT vec4 shadowVis;
 
@@ -90,7 +81,7 @@ const float ALPHA_DITHER_8X8[64] = float[64](
 float alphaDitherThreshold(uint salt) {
     uvec2 p = (uvec2(gl_LaunchIDEXT.xy) + uvec2(salt * 3u, salt * 5u)) & uvec2(7u);
     float base = ALPHA_DITHER_8X8[int(p.y * 8u + p.x)];
-    return fract(base + float((pc.frameIndex + salt) & 255u) * 0.61803398875);
+    return fract(base + float((pcAddr.frameIndex + salt) & 255u) * 0.61803398875);
 }
 
 void main() {
@@ -98,7 +89,7 @@ void main() {
     vec3 bary = vec3(1.0 - attribs.x - attribs.y, attribs.x, attribs.y);
 
     if ((gl_InstanceCustomIndexEXT & (ENTITY_BIT | PARTICLE_BIT)) != 0) {
-        EntityGeom g = EntityTable(pc.entityTableAddr).e[gl_InstanceCustomIndexEXT & IDX_MASK];
+        EntityGeom g = EntityTable(pcAddr.entityTableAddr).e[gl_InstanceCustomIndexEXT & IDX_MASK];
         Indices indices = Indices(g.idxAddr);
         UVs uvs = UVs(g.uvAddr);
         uint i0 = indices.i[3u * pid + 0u];
@@ -125,7 +116,7 @@ void main() {
         return;
     }
 
-    Section sec = SectionTable(pc.tableAddr).s[gl_InstanceCustomIndexEXT];
+    Section sec = SectionTable(pcAddr.tableAddr).s[gl_InstanceCustomIndexEXT];
     uint bucket = gl_GeometryIndexEXT;
     uint tri = gl_PrimitiveID + sec.triBase[bucket];
 

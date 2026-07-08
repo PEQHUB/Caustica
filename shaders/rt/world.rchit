@@ -17,7 +17,6 @@ struct Prim {
 };
 struct Section {
     uint64_t primAddr;
-    uint64_t idxAddr;
     uint64_t uvAddr;
     uint triBase[4]; // fixed bucket triangle offsets: solid/cutout/translucent/water
 };
@@ -60,9 +59,16 @@ layout(binding = 1, set = 1) uniform sampler2D entityNormalTex[];
 layout(binding = 2, set = 1) uniform sampler2D entitySpecTex[];
 
 // P6.4: per-frame push data lives in a host-visible BDA buffer (the old inline block hit the 256-byte
-// push-constant ceiling); only its 8-byte address is pushed. The hit shaders read just two table
-// addresses, so `pc` is a macro that lazily loads the needed field — no whole-struct copy per hit. The
-// std430 layout matches the CPU writer (RtComposite) and the raygen WorldPush exactly.
+// push-constant ceiling); only its 8-byte address is pushed. `pc` is a macro that lazily loads the
+// needed field — no whole-struct copy per hit. The std430 layout matches the CPU writer (RtComposite)
+// and the raygen WorldPush exactly.
+//
+// tableAddr/entityTableAddr are ALSO duplicated as real inline push constants (pcAddr.tableAddr /
+// pcAddr.entityTableAddr) below: they're read on every single hit (Section/EntityGeom fetch, the
+// hottest chain in the frame), so going through pcAddr.worldPushAddr first would cost an extra
+// global-memory load just to find the address of the load we actually want. Read them via pcAddr
+// directly instead of pc; pc/WorldPush still carries them (harmless duplication) for the fields
+// below (breaking overlay) that do need the cold BDA struct.
 //
 // Block-breaking overlay: xyz = the breaking block's position (rebased, matches gl_WorldRay*EXT
 // space), w = the bindless entityTex[] slot holding that block's destroy-stage texture (RtEntityTextures;
@@ -88,7 +94,12 @@ struct WorldPush {
     BreakEntry breaking[8]; // 432
 };
 layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer WorldPushRef { WorldPush v; };
-layout(push_constant) uniform PushAddr { uint64_t worldPushAddr; } pcAddr;
+layout(push_constant) uniform PushAddr {
+    uint64_t worldPushAddr;
+    uint64_t tableAddr;
+    uint64_t entityTableAddr;
+    uint frameIndex;
+} pcAddr;
 #define pc WorldPushRef(pcAddr.worldPushAddr).v
 
 struct Payload {
@@ -269,7 +280,7 @@ void main() {
     // (no lighting/GI/emission). Reached only by the primary ray (instance mask 0x02). Cutout: rahit.
     if ((gl_InstanceCustomIndexEXT & PARTICLE_BIT) != 0) {
         int idx = gl_InstanceCustomIndexEXT & IDX_MASK;
-        EntityGeom g = EntityTable(pc.entityTableAddr).e[idx];
+        EntityGeom g = EntityTable(pcAddr.entityTableAddr).e[idx];
         Prim pr = Prims(g.primAddr).p[gl_PrimitiveID];
         Indices ib = Indices(g.idxAddr);
         UVs uvb = UVs(g.uvAddr);
@@ -310,7 +321,7 @@ void main() {
     }
     if ((gl_InstanceCustomIndexEXT & ENTITY_BIT) != 0) {
         int eidx = gl_InstanceCustomIndexEXT & ~ENTITY_BIT;
-        EntityGeom g = EntityTable(pc.entityTableAddr).e[eidx];
+        EntityGeom g = EntityTable(pcAddr.entityTableAddr).e[eidx];
         Prim pr = Prims(g.primAddr).p[gl_PrimitiveID];
         // Rigid-reuse instances (still / spinning entities re-referencing a cached BLAS) carry a real
         // rotation in the instance transform; per-frame-built entities are identity. The cached prim
@@ -386,7 +397,7 @@ void main() {
         return;
     }
 
-    Section sec = SectionTable(pc.tableAddr).s[gl_InstanceCustomIndexEXT];
+    Section sec = SectionTable(pcAddr.tableAddr).s[gl_InstanceCustomIndexEXT];
     // Any-hit/SBT opt: the section BLAS has one fixed geometry per material bucket
     // (solid / cutout / translucent / water).
     // gl_PrimitiveID restarts at 0 per geometry, so re-add this geometry's triangle base to land in the

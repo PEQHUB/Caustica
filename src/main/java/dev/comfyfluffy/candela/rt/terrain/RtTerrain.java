@@ -73,7 +73,9 @@ import java.util.concurrent.Future;
  * tint, alpha cutout). Vertices are section-local (f32-exact); each TLAS instance carries a
  * translation {@code sectionOrigin − rebaseOrigin} (rebase = player block at the last rebuild, so
  * transforms stay small at any world coordinate) and an {@code instanceCustomIndex} into a BDA
- * section table ({@code {primAddr, idxAddr, uvAddr, triBase[4]}} per section) the hit shaders read.
+ * section table ({@code {primAddr, uvAddr, triBase[4]}} per section) the hit shaders read. The index
+ * buffer itself is retained only for the BLAS build (per-triangle corner UVs mean shading never needs
+ * an index-buffer read — lever B), so its address isn't duplicated into this table.
  *
  * <p>Tessellation reads only an immutable snapshot ({@link RenderSectionRegion}, captured on the render
  * thread via {@link RenderRegionCache} exactly as vanilla's chunk compiler does). CPU meshing runs on
@@ -120,7 +122,7 @@ public final class RtTerrain {
         return CandelaConfig.Rt.Terrain.MAX_INFLIGHT_SECTIONS.value();
     }
 
-    private static final int SECTION_ENTRY_BYTES = 40; // {u64 primAddr, u64 idxAddr, u64 uvAddr, u32 triBase[4]}
+    private static final int SECTION_ENTRY_BYTES = 32; // {u64 primAddr, u64 uvAddr, u32 triBase[4]}
     // Frames a retired resource must outlive before it's freed (> frames-in-flight). The frame counter
     // advances per composite; old TLAS/table/sections are freed this many frames after the swap.
     private static final int KEEP_FRAMES = 4;
@@ -255,7 +257,7 @@ public final class RtTerrain {
         return staticInstances;
     }
 
-    /** Section table device address: {@code {u64 primAddr, u64 idxAddr, u64 uvAddr, u32 triBase[4]}} per section, indexed by gl_InstanceCustomIndexEXT. */
+    /** Section table device address: {@code {u64 primAddr, u64 uvAddr, u32 triBase[4]}} per section, indexed by gl_InstanceCustomIndexEXT. */
     public long tableAddress() {
         return sectionTable.deviceAddress;
     }
@@ -1734,14 +1736,17 @@ public final class RtTerrain {
     }
 
     private void writeSectionEntry(SectionGeom g) {
+        // idxAddr is deliberately not part of this table: lever B (per-triangle corner UVs) means no
+        // shader ever reads a terrain section's index buffer for shading; it's only needed for the BLAS
+        // build, which reads g.indices directly. Dropping it keeps this record a clean 32-byte / 2-sector
+        // fetch on the hottest per-hit load in the frame instead of the old 40-byte stride.
         long base = sectionTable.mapped + (long) g.slot * SECTION_ENTRY_BYTES;
         MemoryUtil.memPutLong(base, g.material.deviceAddress);
-        MemoryUtil.memPutLong(base + 8, g.indices.deviceAddress);
-        MemoryUtil.memPutLong(base + 16, g.uvs.deviceAddress);
-        MemoryUtil.memPutInt(base + 24, g.triBase[0]);
-        MemoryUtil.memPutInt(base + 28, g.triBase[1]);
-        MemoryUtil.memPutInt(base + 32, g.triBase[2]);
-        MemoryUtil.memPutInt(base + 36, g.triBase[3]);
+        MemoryUtil.memPutLong(base + 8, g.uvs.deviceAddress);
+        MemoryUtil.memPutInt(base + 16, g.triBase[0]);
+        MemoryUtil.memPutInt(base + 20, g.triBase[1]);
+        MemoryUtil.memPutInt(base + 24, g.triBase[2]);
+        MemoryUtil.memPutInt(base + 28, g.triBase[3]);
     }
 
     private static RtAccel.Instance instanceFor(SectionGeom g, int rbx, int rby, int rbz) {

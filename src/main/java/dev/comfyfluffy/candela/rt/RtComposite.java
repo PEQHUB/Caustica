@@ -92,6 +92,13 @@ public final class RtComposite {
     private static final int MAX_BREAKING = 8;
     private static final int BREAKING_OFFSET = 432;
     private static final int WORLD_PUSH_SIZE = BREAKING_OFFSET + MAX_BREAKING * 16;
+    // Real inline push constants (fast constant-bank reads), separate from the WORLD_PUSH_SIZE BDA ring
+    // above. tableAddr/entityTableAddr/frameIndex are duplicated here so world.rchit/world.rahit's hottest
+    // per-hit lookups (Section/EntityGeom fetch) skip the extra global-memory load that dereferencing
+    // WorldPushRef(pcAddr.worldPushAddr) costs; everything else (matrices, sky, water, breaking) stays in
+    // the BDA struct since it's cold or only read once per ray-gen invocation.
+    // layout: worldPushAddr(@0, 8B) + tableAddr(@8, 8B) + entityTableAddr(@16, 8B) + frameIndex(@24, 4B)
+    private static final int WORLD_PUSH_CONST_SIZE = 32;
     private static final int GUIDE_COUNT = 6; // RR guide buffers bound at world-pipeline bindings 3..8
     // Frames a retired per-frame TLAS must outlive before it's freed (> frames-in-flight); matches
     // RtTerrain's deferred-free horizon. The frame TLAS is built + traced this frame, then freed once
@@ -450,7 +457,7 @@ public final class RtComposite {
             bindlessTextureCapacity = RtEntityTextures.maxTextures();
             worldPipeline = RtPipeline.create(ctx, "world.rgen.spv",
                     new String[]{"world.rmiss.spv", "shadow.rmiss.spv"}, "world.rchit.spv", "world.rahit.spv",
-                    Long.BYTES, true, GUIDE_COUNT, bindlessTextureCapacity, true, true);
+                    WORLD_PUSH_CONST_SIZE, true, GUIDE_COUNT, bindlessTextureCapacity, true, true);
             // Per-frame push data lives in this BDA ring; the pipeline only pushes its address.
             if (pushRing == null) {
                 pushRing = new RtBuffer[PUSH_RING];
@@ -820,8 +827,14 @@ public final class RtComposite {
             }
             VulkanCommandEncoder.memoryBarrier(cmd, stack); // TLAS build visible to the trace
 
-            // Push only the 8-byte device address of this frame's filled push-data slot.
-            ByteBuffer pushAddr = stack.malloc(Long.BYTES).putLong(0, pushBuf.deviceAddress);
+            // Push the BDA ring slot's address plus the small hot subset that rchit/rahit read on every
+            // hit (tableAddr/entityTableAddr/frameIndex) as real inline push constants, so those lookups
+            // don't pay for a second global-memory dereference through pcAddr.worldPushAddr first.
+            ByteBuffer pushAddr = stack.malloc(WORLD_PUSH_CONST_SIZE)
+                    .putLong(0, pushBuf.deviceAddress)
+                    .putLong(8, terrain.tableAddress())
+                    .putLong(16, fe.geomTableAddr())
+                    .putInt(24, (int) frameCounter);
             try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "world trace");
                  RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.trace")) {
                 active.trace(cmd, renderW, renderH, pushAddr);
