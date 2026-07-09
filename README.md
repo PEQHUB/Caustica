@@ -1,6 +1,6 @@
 # Candela
 
-Candela is an experimental ray-traced renderer for Minecraft's Vulkan backend.
+Candela is an experimental ray-traced renderer for Minecraft 26.2's Vulkan backend.
 It replaces the vanilla world view with hardware ray tracing and NVIDIA DLSS
 features while keeping Minecraft's familiar UI and gameplay intact.
 
@@ -19,14 +19,11 @@ changes while the renderer is being built.
 
 ## Requirements
 
-- Minecraft `26.2`
-- Fabric Loader `0.19.3` or newer
-- Fabric API for Minecraft `26.2`
-- Java `25`
-- Vulkan graphics backend enabled
+- **Vulkan graphics backend enabled**
 - A GPU and driver with Vulkan ray tracing support
 - NVIDIA RTX GPU and supported driver for DLSS features
 - HDR-capable display and OS HDR mode for HDR output
+- Install LabPBR resource pack like [SPBR](https://modrinth.com/resourcepack/spbr) for better visuals
 
 ## Installation
 
@@ -41,6 +38,8 @@ changes while the renderer is being built.
 - Candela is client-side only.
 - DLSS Ray Reconstruction and Frame Generation require supported NVIDIA
   hardware and drivers.
+- Use Java args to improve performance. Minecraft Launcher default:
+  `-XX:+UseCompactObjectHeaders -XX:+AlwaysPreTouch -XX:+UseStringDeduplication -XX:+UseZGC`
 - Frame Generation is experimental and needs to be enabled by modifying the configuration file.
 - HDR output requires an HDR swapchain and a correctly configured HDR display.
 - If Minecraft falls back to OpenGL after a crash, re-enable the Vulkan backend
