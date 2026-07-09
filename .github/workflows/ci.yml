@@ -2,7 +2,29 @@ name: CI
 
 on:
   push:
+    paths:
+      - ".github/workflows/**"
+      - "build.gradle"
+      - "settings.gradle"
+      - "gradle.properties"
+      - "gradle/**"
+      - "gradlew"
+      - "gradlew.bat"
+      - "native/**"
+      - "shaders/**"
+      - "src/**"
   pull_request:
+    paths:
+      - ".github/workflows/**"
+      - "build.gradle"
+      - "settings.gradle"
+      - "gradle.properties"
+      - "gradle/**"
+      - "gradlew"
+      - "gradlew.bat"
+      - "native/**"
+      - "shaders/**"
+      - "src/**"
 
 env:
   DLSS_SDK_REF: v310.7.0
