@@ -152,11 +152,11 @@ public final class RtDlssFg {
     /**
      * Record one DLSSG evaluation: generate interpolated frame {@code multiFrameIndex} of
      * {@code multiFrameCount} from the final {@code backbuffer} + HW {@code depth} + {@code mvec} into
-     * {@code outputInterp}. {@code hudless} (world+hand+screen-effects, no 2D GUI) and {@code ui}
-     * (premultiplied UI-only, from the {@code RtUiOverlay} redirect) help the driver avoid ghosting/smearing
-     * 2D UI in the generated frame; both are optional — pass 0 handles (view/image/format) to skip, same as
-     * {@code outputReal}. Matrices are jitter-free (NGX left-multiply layout); pass {@code null} to leave one
-     * out. Returns false on failure.
+     * {@code outputInterp}. {@code hudless} (the main scene before the combined UI overlay) and {@code ui}
+     * (premultiplied combined overlay: RT world overlays, hand/screen effects and GUI) help the driver avoid
+     * ghosting/smearing screen-fixed content in the generated frame; both are optional — pass 0 handles
+     * (view/image/format) to skip, same as {@code outputReal}. Matrices are jitter-free (NGX left-multiply
+     * layout); pass {@code null} to leave one out. Returns false on failure.
      */
     public boolean evaluate(long cmd,
             long backbufferView, long backbufferImage, int backbufferFormat,

@@ -71,47 +71,45 @@ public abstract class GameRendererMixin {
 		WorldRenderScaler.INSTANCE.begin(this.mainRenderTarget);
 	}
 
-	// HDR mode: redirect the held-item/hand render into the UI overlay so it composites over the HDR world
-	// (at paper white) instead of the SDR main target that the HDR present bypasses. try/finally guarantees
-	// the output overrides are cleared even if the hand render throws (a leak would route everything after
-	// into the overlay). Non-HDR frames are untouched.
+	// Redirect the held-item/hand render into the combined UI overlay. SDR and HDR then feed DLSS-FG the same
+	// shape: hudless excludes the screen-fixed hand, while pUI carries hand + screen effects + GUI overlays.
+	// try/finally guarantees the output overrides are cleared even if the hand render throws.
 	@WrapOperation(method = "renderLevel(Lnet/minecraft/client/DeltaTracker;)V",
 			at = @At(value = "INVOKE",
 					target = "Lnet/minecraft/client/renderer/GameRenderer;renderItemInHand(Lnet/minecraft/client/renderer/state/level/CameraRenderState;FLorg/joml/Matrix4fc;)V"))
 	private void candela$redirectHandToOverlay(GameRenderer self, CameraRenderState cameraState, float deltaPartialTick,
 			Matrix4fc modelViewMatrix, Operation<Void> original) {
-		boolean hdr = RtComposite.INSTANCE.isHdrPresentActive();
-		if (hdr) {
+		boolean redirect = RtUiOverlay.enabled();
+		if (redirect) {
 			RtUiOverlay.beginOutputRedirect(this.mainRenderTarget);
 		}
 		try {
 			original.call(self, cameraState, deltaPartialTick, modelViewMatrix);
 		} finally {
-			if (hdr) {
+			if (redirect) {
 				RtUiOverlay.endOutputRedirect();
 			}
 		}
 	}
 
-	// HDR mode: redirect the screen-effect flush (fire, underwater, view-blocking-block overlays submitted
-	// by ScreenEffectRenderer.submit) into the UI overlay, same as the hand. This is the renderAllFeatures
-	// call in the "screenEffects" section of renderLevel — distinct from the one inside renderItemInHand
-	// (that's a different method, so this @WrapOperation on renderLevel matches only the screen-effect flush).
+	// Redirect the screen-effect flush (fire, underwater, view-blocking-block overlays submitted by
+	// ScreenEffectRenderer.submit) into the same combined UI overlay as the hand. This is the renderAllFeatures
+	// call in the "screenEffects" section of renderLevel — distinct from the one inside renderItemInHand.
 	// The spyglass scope and worn-pumpkin blur are drawn by the GUI/HUD instead, so they already reach the
-	// overlay via the GuiRenderer redirect. try/finally guarantees the overrides clear even on a throw.
+	// overlay via the GuiRenderer redirect.
 	@WrapOperation(method = "renderLevel(Lnet/minecraft/client/DeltaTracker;)V",
 			at = @At(value = "INVOKE",
 					target = "Lnet/minecraft/client/renderer/feature/FeatureRenderDispatcher;renderAllFeatures(Lnet/minecraft/client/renderer/SubmitNodeStorage;)V"))
 	private void candela$redirectScreenEffectsToOverlay(FeatureRenderDispatcher self, SubmitNodeStorage storage,
 			Operation<Void> original) {
-		boolean hdr = RtComposite.INSTANCE.isHdrPresentActive();
-		if (hdr) {
+		boolean redirect = RtUiOverlay.enabled();
+		if (redirect) {
 			RtUiOverlay.beginOutputRedirect(this.mainRenderTarget);
 		}
 		try {
 			original.call(self, storage);
 		} finally {
-			if (hdr) {
+			if (redirect) {
 				RtUiOverlay.endOutputRedirect();
 			}
 		}
@@ -173,8 +171,8 @@ public abstract class GameRendererMixin {
 					target = "Lnet/minecraft/client/gui/render/GuiRenderer;render()V",
 					shift = At.Shift.AFTER))
 	private void candela$compositeUiOverlay(DeltaTracker deltaTracker, boolean advanceGameTime, CallbackInfo ci) {
-		// DLSS-FG quality: snapshot the world+hand+screen-effects before the combined UI overlay composites
-		// back onto mainRenderTarget below. The optional DLSSG UI resource carries that combined overlay.
+		// DLSS-FG quality: snapshot the main target before the combined UI overlay composites back below.
+		// Hand/screen effects, world overlays and GUI are carried by the optional DLSSG UI resource.
 		RtComposite.INSTANCE.captureFgHudless(this.mainRenderTarget);
 		dev.comfyfluffy.candela.rt.RtUiOverlay.compositeIfUsed();
 	}

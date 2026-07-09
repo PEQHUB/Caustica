@@ -1435,10 +1435,10 @@ public final class RtComposite {
      * {@link #fgHudlessImage} for {@link #fgInterpolate} to feed DLSSG as the "hudless" resource. Call from
      * {@code GameRendererMixin} right after {@code GuiRenderer.render()} but BEFORE
      * {@link RtUiOverlay#compositeIfUsed()} — at that point, when the UI overlay redirect is active, {@code
-     * main} still has no combined UI baked in (world overlays + GUI went to the overlay target instead).
-     * No-op (and {@link #fgInterpolate} passes 0/0/0 for hudless, same as always) unless both FG and the UI
-     * overlay redirect are active — capturing this without the redirect would just copy the ALREADY-composited
-     * backbuffer, which is useless as a distinct hudless input.
+     * main} still has no combined UI baked in (world overlays, hand/screen effects and GUI went to the
+     * overlay target instead). No-op (and {@link #fgInterpolate} passes 0/0/0 for hudless, same as always)
+     * unless both FG and the UI overlay redirect are active — capturing this without the redirect would just
+     * copy the ALREADY-composited backbuffer, which is useless as a distinct hudless input.
      */
     public void captureFgHudless(RenderTarget main) {
         if (!RtDlssFg.enabled() || !RtUiOverlay.enabled() || main == null || main.getColorTexture() == null) {
