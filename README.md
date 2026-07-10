@@ -11,6 +11,7 @@ changes while the renderer is being built.
 
 ## Links
 
+- [Discord](https://discord.gg/SeWCjyKu2)
 - [Modrinth](https://modrinth.com/mod/caustica)
 - [CurseForge](https://www.curseforge.com/minecraft/mc-mods/caustica/preview)
 - [Gallery](docs/gallery.md)
