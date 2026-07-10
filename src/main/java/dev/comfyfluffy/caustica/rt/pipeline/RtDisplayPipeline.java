@@ -23,6 +23,7 @@ import java.io.InputStream;
 import java.nio.ByteBuffer;
 import java.nio.LongBuffer;
 
+import dev.comfyfluffy.caustica.CausticaConfig;
 import dev.comfyfluffy.caustica.rt.RtContext;
 import dev.comfyfluffy.caustica.rt.RtDebugLabels;
 
@@ -31,8 +32,8 @@ import static dev.comfyfluffy.caustica.rt.RtContext.check;
 /** Compute pass that maps the display-res HDR RT image into an LDR image compatible with the main target. */
 public final class RtDisplayPipeline {
     private static final String SHADER_DIR = "/caustica/rt/";
-    /** Push constants: int hdrEnabled, float paperWhiteNits, float headroom. */
-    private static final int PUSH_BYTES = 3 * Integer.BYTES;
+    /** Keep this below Vulkan's 128-byte minimum push-constant guarantee. */
+    private static final int PUSH_BYTES = 96;
 
     private final RtContext ctx;
     private final long descriptorSetLayout;
@@ -145,17 +146,33 @@ public final class RtDisplayPipeline {
     }
 
     /**
-     * Run the display mapping. The SDR AgX output is always written (binding 0). When {@code hdrEnabled}, the
-     * PQ-encoded HDR image (binding 3) is also written using the paper-white/headroom mapping.
+     * Run the display mapping. The selected SDR output is always written (binding 0). When {@code hdrEnabled}, the
+     * PQ-encoded HDR image (binding 3) is also written using the selected HDR display mapper.
      */
-    public void dispatch(VkCommandBuffer cmd, int width, int height, boolean hdrEnabled, float paperWhiteNits, float headroom) {
+    public void dispatch(VkCommandBuffer cmd, int width, int height, boolean hdrEnabled) {
         try (MemoryStack stack = MemoryStack.stackPush(); RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "display compute")) {
             VK10.vkCmdBindPipeline(cmd, VK10.VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
             VK10.vkCmdBindDescriptorSets(cmd, VK10.VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayout, 0, stack.longs(descriptorSet), null);
             ByteBuffer push = stack.malloc(PUSH_BYTES);
             push.putInt(0, hdrEnabled ? 1 : 0);
-            push.putFloat(4, paperWhiteNits);
-            push.putFloat(8, headroom);
+            push.putInt(4, CausticaConfig.Rt.Hdr.tonemapModeId());
+            push.putInt(8, CausticaConfig.Rt.Sdr.tonemapModeId());
+            push.putFloat(12, CausticaConfig.Rt.Hdr.paperWhiteNits());
+            push.putFloat(16, CausticaConfig.Rt.Hdr.headroom());
+            push.putFloat(20, CausticaConfig.Rt.Hdr.PSYCHO_HIGHLIGHTS.value());
+            push.putFloat(24, CausticaConfig.Rt.Hdr.PSYCHO_SHADOWS.value());
+            push.putFloat(28, CausticaConfig.Rt.Hdr.PSYCHO_CONTRAST.value());
+            push.putFloat(32, CausticaConfig.Rt.Hdr.PSYCHO_PURITY.value());
+            push.putFloat(36, CausticaConfig.Rt.Hdr.PSYCHO_BLEACHING.value());
+            push.putFloat(40, CausticaConfig.Rt.Hdr.PSYCHO_HUE_RESTORE.value());
+            push.putFloat(44, CausticaConfig.Rt.Hdr.PSYCHO_ADAPT_CONTRAST.value());
+            push.putFloat(48, CausticaConfig.Rt.Hdr.PSYCHO_CLIP_POINT.value());
+            push.putFloat(52, CausticaConfig.Rt.Hdr.psychoWhiteCurveId());
+            push.putFloat(56, CausticaConfig.Rt.Hdr.PSYCHO_CONE_EXPONENT.value());
+            push.putFloat(60, CausticaConfig.Rt.Sdr.PSYCHO_PEAK.value());
+            for (int i = 0; i < 8; i++) {
+                push.putFloat(64 + i * Float.BYTES, CausticaConfig.Rt.Sdr.tonemapParam(i));
+            }
             VK10.vkCmdPushConstants(cmd, pipelineLayout, VK10.VK_SHADER_STAGE_COMPUTE_BIT, 0, push);
             VK10.vkCmdDispatch(cmd, (width + 15) / 16, (height + 15) / 16, 1);
         }

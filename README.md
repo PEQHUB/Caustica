@@ -1,6 +1,6 @@
 # Caustica
 
-Caustica is an experimental ray-traced renderer for Minecraft 26.2's Vulkan backend.
+Caustica is a ray-traced renderer for Minecraft 26.2's Vulkan backend.
 It replaces the vanilla world view with hardware ray tracing and NVIDIA DLSS
 features while keeping Minecraft's familiar UI and gameplay intact.
 
@@ -11,8 +11,9 @@ changes while the renderer is being built.
 
 ## Links
 
-- [Modrinth](https://modrinth.com/mod/caustica)
-- [CurseForge](https://www.curseforge.com/minecraft/mc-mods/caustica/preview)
+- [Upstream project](https://github.com/ComfyFluffy/Caustica)
+- [Upstream Modrinth releases](https://modrinth.com/mod/caustica)
+- [Upstream CurseForge releases](https://www.curseforge.com/minecraft/mc-mods/caustica/preview)
 - [Gallery](docs/gallery.md)
 
 ## Features
@@ -24,6 +25,13 @@ changes while the renderer is being built.
 - Dynamic entity rendering in the ray-traced scene
 - LabPBR-style material support
 - OMM (Opacity Micro-Map) + SER (Shader Execution Reordering) optimizations
+
+## Fork Improvements
+
+This fork adds an energy-preserving EON rough-diffuse BRDF, corrected Kulla-Conty
+GGX multiscattering, linear-light material ingestion, and selectable SDR/HDR tone
+mapping with a shared PsychoV implementation. HDR and SDR retain separate output
+gamut and transfer handling while sharing the same traced scene radiance.
 
 ## Requirements
 

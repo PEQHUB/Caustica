@@ -48,8 +48,9 @@ public final class RtHdr {
     /** Logs the resolved HDR config once (cheap; safe to call repeatedly — guarded by the surface log). */
     public static void logConfig() {
         CausticaMod.LOGGER.info(
-                "HDR config: enabled={} paperWhite={}nits peak={}nits -> {} (headroom={})",
+                "HDR config: enabled={} tonemap={} paperWhite={}nits peak={}nits -> {} (headroom={})",
                 CausticaConfig.Rt.Hdr.enabled(),
+                CausticaConfig.Rt.Hdr.TONEMAP_MODE.get(),
                 CausticaConfig.Rt.Hdr.PAPER_WHITE_NITS.value(), CausticaConfig.Rt.Hdr.PEAK_NITS.value(),
                 CausticaConfig.Rt.Hdr.enabled() ? "HDR display path active" : "SDR display path",
                 CausticaConfig.Rt.Hdr.headroom());

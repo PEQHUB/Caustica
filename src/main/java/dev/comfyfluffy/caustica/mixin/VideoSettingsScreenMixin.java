@@ -7,6 +7,7 @@ import java.util.List;
 import net.minecraft.client.OptionInstance;
 import net.minecraft.client.Options;
 import net.minecraft.client.gui.components.OptionsList;
+import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.client.gui.screens.options.VideoSettingsScreen;
 import net.minecraft.network.chat.Component;
 import org.spongepowered.asm.mixin.Mixin;
@@ -68,6 +69,8 @@ public abstract class VideoSettingsScreenMixin {
             return;
         }
         list.addHeader(CAUSTICA$RT_HEADER);
+        list.addSmall(RtVideoOptions.exposureOptions());
+        list.addBig(RtVideoOptions.tonemappingButton((Screen) (Object) this, list::applyUnsavedChanges));
         list.addSmall(RtVideoOptions.runtimeOptions());
     }
 

@@ -15,7 +15,7 @@ import java.util.Set;
 public final class RtMaterials {
     private RtMaterials() {}
 
-    private static final float DEFAULT_ROUGH = 0.9f;
+    private static final float DEFAULT_ROUGH = 0.99f;
     private static final float METAL_ROUGH = 0.3f;
     private static final float GLASS_ROUGH = 0.1f;
     private static final float SMOOTH_ROUGH = 0.35f;

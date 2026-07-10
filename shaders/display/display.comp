@@ -7,17 +7,52 @@ layout(binding = 1, set = 0, rgba16f) uniform readonly image2D rtImage; // HDR R
 layout(binding = 2, set = 0, r32f) uniform readonly image2D exposureImage; // 1x1 linear exposure scale
 layout(binding = 3, set = 0, rgba16f) uniform writeonly image2D hdrImage; // PQ-encoded ([0,1], ST.2084) HDR display
 
-// HDR display parameters. hdrEnabled gates the parallel PQ write; the SDR AgX path always runs because
-// vanilla main-target presentation still consumes LDR.
 layout(push_constant) uniform Push {
-    int hdrEnabled;        // 0 = SDR only, 1 = also write the PQ HDR image
-    float paperWhiteNits;  // absolute nits SDR paper white maps to
-    float headroom;        // highlight headroom above paper white (peakNits / paperWhiteNits, >= 1)
+    int hdrEnabled;       // 0 = SDR only, 1 = also write the PQ HDR image
+    int hdrTonemapMode;   // 0 = BT.2390 EETF, 1 = original Caustica rolloff, 2 = PsychoV
+    int sdrTonemapMode;   // 0 = PBR Neutral, 1 = Reinhard, 2 = ACES, 3 = AgX, 4+ = filmic/PsychoV
+    float paperWhiteNits; // absolute nits SDR paper white maps to
+    float headroom;       // highlight headroom above paper white (peakNits / paperWhiteNits, >= 1)
+    float psychoHighlights;
+    float psychoShadows;
+    float psychoContrast;
+    float psychoPurity;
+    float psychoBleaching;
+    float psychoHueRestore;
+    float psychoAdaptContrast;
+    float psychoClipPoint;
+    float psychoWhiteCurve; // 0 = Neutwo, 1 = Naka-Rushton
+    float psychoConeExponent;
+    float sdrPsychoPeak;
+    float sdrParam0;
+    float sdrParam1;
+    float sdrParam2;
+    float sdrParam3;
+    float sdrParam4;
+    float sdrParam5;
+    float sdrParam6;
+    float sdrParam7;
 } pc;
 
 // Tonemap seam: map HDR RT radiance to displayable LDR before copying back to the main target.
 // The path tracer emits true HDR radiance, so exposure is applied from the compositor-owned 1x1 image
 // before the AgX view transform. DLSS-RR still consumes HDR pre-tonemap.
+
+const int HDR_TONEMAP_EETF = 0;
+const int HDR_TONEMAP_CAUSTICA = 1;
+const int HDR_TONEMAP_PSYCHOV = 2;
+
+const int SDR_TONEMAP_PBR_NEUTRAL = 0;
+const int SDR_TONEMAP_REINHARD = 1;
+const int SDR_TONEMAP_ACES = 2;
+const int SDR_TONEMAP_AGX = 3;
+const int SDR_TONEMAP_LOTTES = 4;
+const int SDR_TONEMAP_FROSTBITE = 5;
+const int SDR_TONEMAP_UNCHARTED2 = 6;
+const int SDR_TONEMAP_GT = 7;
+const int SDR_TONEMAP_PSYCHOV = 8;
+
+const vec3 LUMA_BT709 = vec3(0.2126, 0.7152, 0.0722);
 
 const mat3 AGX_INSET = mat3(
     0.842479062253094, 0.042328242261012, 0.042375654905705,
@@ -46,30 +81,13 @@ vec3 agxDefaultContrast(vec3 x) {
         - 0.00232;
 }
 
-vec3 applyLook(vec3 color) {
-    const float contrast = 1.04;   // try 1.15, 1.25, 1.4
-    const float saturation = 1.05; // try 1.05-1.15 if AgX feels grey
-
-    color = clamp((color - 0.5) * contrast + 0.5, 0.0, 1.0);
-
-    float luma = dot(color, vec3(0.2126, 0.7152, 0.0722));
-    color = mix(vec3(luma), color, saturation);
-
-    return color;
-}
-
 vec3 agx(vec3 color) {
     color = AGX_INSET * max(color, vec3(0.0));
     color = clamp(log2(max(color, vec3(1.0e-10))), AGX_MIN_EV, AGX_MAX_EV);
     color = (color - AGX_MIN_EV) / (AGX_MAX_EV - AGX_MIN_EV);
     color = agxDefaultContrast(color);
-    // color = applyLook(color);
     color = AGX_OUTSET * color;
     return clamp(color, 0.0, 1.0);
-}
-
-vec3 tonemap(vec3 hdr, float exposure) {
-    return agx(hdr * exposure);
 }
 
 const float PQ_M1 = 0.1593017578125;
@@ -78,36 +96,657 @@ const float PQ_C1 = 0.8359375;
 const float PQ_C2 = 18.8515625;
 const float PQ_C3 = 18.6875;
 
+// ST.2084 / BT.2100 inverse EOTF: absolute nits to non-linear PQ signal.
 float pqEncode(float nits) {
     float y = pow(max(nits, 0.0) / 10000.0, PQ_M1);
     return pow((PQ_C1 + PQ_C2 * y) / (1.0 + PQ_C3 * y), PQ_M2);
 }
 
-// VK_COLOR_SPACE_HDR10_ST2084_EXT mandates BT.2020 primaries as its container gamut (not just the ST.2084
-// transfer function) — but every color we compute (textures, tonemap) is authored/blended in BT.709/sRGB
-// primaries. Feeding BT.709 numbers straight into a BT.2020-tagged buffer makes the display read them as
-// (more saturated) BT.2020 coordinates, oversaturating everything. This matrix converts linear-light
-// BT.709 -> BT.2020 right before the PQ encode, which is the container's actual gamut. (ITU-R BT.2087.)
+vec3 pqEncodeNits(vec3 nits) {
+    return vec3(pqEncode(nits.r), pqEncode(nits.g), pqEncode(nits.b));
+}
+
+vec3 linearToSrgb(vec3 c) {
+    c = clamp(c, 0.0, 1.0);
+    bvec3 hi = greaterThan(c, vec3(0.0031308));
+    vec3 lo = c * 12.92;
+    vec3 hiV = 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055;
+    return mix(lo, hiV, hi);
+}
+
+vec3 applyContrastSaturation(vec3 color, float contrast, float saturation) {
+    color = clamp((color - 0.5) * max(contrast, 0.0) + 0.5, 0.0, 1.0);
+    float luma = dot(color, LUMA_BT709);
+    return clamp(mix(vec3(luma), color, max(saturation, 0.0)), 0.0, 1.0);
+}
+
+// VK_COLOR_SPACE_HDR10_ST2084_EXT mandates BT.2020 primaries as its container gamut (not just
+// the ST.2084 transfer function), while Caustica's traced textures/light are BT.709/sRGB-oriented.
+// Convert linear-light BT.709 to BT.2020 before PQ encoding. Matrix values are from ITU-R BT.2087.
 const mat3 BT709_TO_BT2020 = mat3(
     0.6274039, 0.0690973, 0.0163916,
     0.3292830, 0.9195406, 0.0880132,
     0.0433131, 0.0113612, 0.8955953
 );
 
-// HDR display mapping: map exposed scene-linear radiance to absolute nits, then PQ-encode (ST.2084) for
-// direct presentation to a PQ/HDR10 swapchain. SDR-range values (<= 1.0 after exposure) stay identity so
-// paper white lands exactly at paperWhiteNits. Highlights above 1.0 roll off smoothly and asymptote to
-// `headroom`, i.e. the brightest pixels approach peakNits. No SDR clamp here — that is the point.
-vec3 tonemapHdr(vec3 hdr, float exposure) {
+const mat3 BT2020_TO_BT709 = mat3(
+     1.6604910, -0.1245505, -0.0181508,
+    -0.5876411,  1.1328999, -0.1005789,
+    -0.0728499, -0.0083494,  1.1187297
+);
+
+float safeDiv(float a, float b, float fallback) {
+    return abs(b) <= 1.0e-12 ? fallback : a / b;
+}
+
+// BT.2390 display mapping for a lower-peak PQ display. Per Report ITU-R BT.2390's EETF
+// steps, use unknown mastering endpoints LB=0, LW=10000 and target black Lmin=0, then apply
+// the 1:1 region plus Hermite knee in normalized PQ signal space.
+float bt2390EetfPq(float e) {
+    float targetPeakNits = clamp(pc.paperWhiteNits * pc.headroom, 1.0, 10000.0);
+    float maxLum = pqEncode(targetPeakNits);
+    float ks = clamp(1.5 * maxLum - 0.5, 0.0, 1.0);
+    float e1 = clamp(e, 0.0, 1.0);
+    if (e1 < ks || ks >= 0.999999) {
+        return e1;
+    }
+
+    float t = clamp((e1 - ks) / max(1.0 - ks, 1.0e-6), 0.0, 1.0);
+    float t2 = t * t;
+    float t3 = t2 * t;
+    float e2 = (2.0 * t3 - 3.0 * t2 + 1.0) * ks
+        + (t3 - 2.0 * t2 + t) * (1.0 - ks)
+        + (-2.0 * t3 + 3.0 * t2) * maxLum;
+    return clamp(e2, 0.0, 1.0);
+}
+
+vec3 tonemapHdrEetf(vec3 hdr, float exposure) {
+    vec3 paperReferred709 = max(hdr * exposure, vec3(0.0));
+    vec3 nits2020 = max(BT709_TO_BT2020 * (paperReferred709 * pc.paperWhiteNits), vec3(0.0));
+    vec3 pq = pqEncodeNits(nits2020);
+    return vec3(bt2390EetfPq(pq.r), bt2390EetfPq(pq.g), bt2390EetfPq(pq.b));
+}
+
+// Original Caustica HDR mapping retained as a compatibility option.
+vec3 tonemapHdrCaustica(vec3 hdr, float exposure) {
     vec3 c = max(hdr * exposure, vec3(0.0));
     vec3 lo = min(c, vec3(1.0));
     vec3 hi = max(c - vec3(1.0), vec3(0.0));
     float k = max(pc.headroom - 1.0, 0.0);
-    vec3 rolled = (k > 0.0) ? (k * hi) / (k + hi) : vec3(0.0); // -> k as hi -> inf
-    vec3 paperReferred = lo + rolled;                          // 1.0 == paper white, max -> headroom
-    vec3 nits709 = paperReferred * pc.paperWhiteNits;
-    vec3 nits2020 = BT709_TO_BT2020 * nits709;
-    return vec3(pqEncode(nits2020.r), pqEncode(nits2020.g), pqEncode(nits2020.b));
+    vec3 rolled = (k > 0.0) ? (k * hi) / (k + hi) : vec3(0.0);
+    vec3 paperReferred = lo + rolled;
+    vec3 nits2020 = max(BT709_TO_BT2020 * (paperReferred * pc.paperWhiteNits), vec3(0.0));
+    return pqEncodeNits(nits2020);
+}
+
+// PsychoV (RenoDX PsychoV-11 lineage): perceptual tonemapping in Stockman-Sharp LMS with
+// MacLeod-Boynton chromaticity. This HDR path operates in BT.2020 paper-relative linear light.
+// https://github.com/clshortfuse/renodx
+const mat3 PSYCHO_BT2020_TO_XYZ = mat3(
+    0.6369580483, 0.2627002120, 0.0000000000,
+    0.1446169036, 0.6779980715, 0.0280726930,
+    0.1688809752, 0.0593017165, 1.0609850577);
+
+const mat3 PSYCHO_XYZ_TO_BT2020 = mat3(
+     1.7166511880, -0.6666843518,  0.0176398574,
+    -0.3556707838,  1.6164812366, -0.0427706133,
+    -0.2533662814,  0.0157685458,  0.9421031212);
+
+const mat3 PSYCHO_XYZ_TO_LMS = mat3(
+    0.2670502842655792,  -0.38706882411220156, 0.026727793989083093,
+    0.8471990148492798,   1.165429935890458,   -0.02729131667566509,
+   -0.03470416612462053,  0.10302286696614202,  0.5333267257603284);
+
+const mat3 PSYCHO_LMS_TO_XYZ = mat3(
+     1.81146296,  0.60691241, -0.05972506,
+    -1.30814926,  0.41590626,  0.08684090,
+     0.37056946, -0.04084826,  1.85436177);
+
+const vec3 PSYCHO_MB_WEIGHTS = vec3(0.68990272, 0.34832189, 0.0371597);
+const vec2 PSYCHO_WHITE_D65 = vec2(0.31272, 0.32903);
+
+vec3 psychoSignPow(vec3 x, vec3 e) {
+    return vec3(
+        (x.x < 0.0 ? -1.0 : 1.0) * pow(abs(x.x), e.x),
+        (x.y < 0.0 ? -1.0 : 1.0) * pow(abs(x.y), e.y),
+        (x.z < 0.0 ? -1.0 : 1.0) * pow(abs(x.z), e.z));
+}
+
+vec3 psychoLMSFromBT2020(vec3 bt2020) {
+    return PSYCHO_XYZ_TO_LMS * (PSYCHO_BT2020_TO_XYZ * bt2020);
+}
+
+vec3 psychoBT2020FromLMS(vec3 lmsAbs) {
+    return PSYCHO_XYZ_TO_BT2020 * (PSYCHO_LMS_TO_XYZ * lmsAbs);
+}
+
+float psychoLuminanceFromLMS(vec3 lms) {
+    return dot(lms, vec3(0.68990272, 0.34832189, 0.0));
+}
+
+float psychoMBYFromLMS(vec3 lms) {
+    return PSYCHO_MB_WEIGHTS.x * lms.x + PSYCHO_MB_WEIGHTS.y * lms.y;
+}
+
+vec3 psychoMB2FromLMS(vec3 lms) {
+    const float eps = 1.0e-12;
+    float wl = PSYCHO_MB_WEIGHTS.x * lms.x;
+    float wm = PSYCHO_MB_WEIGHTS.y * lms.y;
+    float yMb = wl + wm;
+    if (yMb <= eps) {
+        return vec3(0.0);
+    }
+    float inv = safeDiv(1.0, yMb, 0.0);
+    return vec3(wl * inv, PSYCHO_MB_WEIGHTS.z * lms.z * inv, yMb);
+}
+
+vec3 psychoLMSFromMB2(vec3 mb2) {
+    float l = mb2.x;
+    float s = mb2.y;
+    float y = max(mb2.z, 0.0);
+    float L = safeDiv(l * y, PSYCHO_MB_WEIGHTS.x, 0.0);
+    float M = safeDiv((1.0 - l) * y, PSYCHO_MB_WEIGHTS.y, 0.0);
+    float S = safeDiv(s * y, PSYCHO_MB_WEIGHTS.z, 0.0);
+    return vec3(L, M, S);
+}
+
+vec3 psychoXYZFromxyY(vec3 xyY) {
+    vec3 xyz;
+    xyz.xz = vec2(xyY.x, 1.0 - xyY.x - xyY.y) / xyY.y * xyY.z;
+    xyz.y = xyY.z;
+    return xyz;
+}
+
+vec2 psychoWhiteD65Chromaticity() {
+    vec3 d65Xyz = psychoXYZFromxyY(vec3(PSYCHO_WHITE_D65, 1.0));
+    vec3 d65Lms = PSYCHO_XYZ_TO_LMS * d65Xyz;
+    return psychoMB2FromLMS(d65Lms).xy;
+}
+
+vec2 psychoMBFromLMS(vec3 lms) {
+    float yMb = psychoMBYFromLMS(lms);
+    if (yMb <= 0.0) {
+        return vec2(0.0);
+    }
+    return vec2(
+        safeDiv(PSYCHO_MB_WEIGHTS.x * lms.x, yMb, 0.0),
+        safeDiv(PSYCHO_MB_WEIGHTS.z * lms.z, yMb, 0.0));
+}
+
+vec2 psychoMBFromBT2020Primary(vec3 primaryRgb) {
+    vec3 xyz = PSYCHO_BT2020_TO_XYZ * primaryRgb;
+    vec3 lms = PSYCHO_XYZ_TO_LMS * xyz;
+    return psychoMBFromLMS(lms);
+}
+
+float psychoCross2(vec2 a, vec2 b) {
+    return a.x * b.y - a.y * b.x;
+}
+
+bool psychoRaySegmentHit2D(vec2 origin, vec2 dir, vec2 a, vec2 b, out float tHit) {
+    const float eps = 1.0e-20;
+    tHit = 0.0;
+    vec2 e = b - a;
+    float denom = psychoCross2(dir, e);
+    if (abs(denom) <= eps) {
+        return false;
+    }
+    vec2 ao = a - origin;
+    float t = psychoCross2(ao, e) / denom;
+    float u = psychoCross2(ao, dir) / denom;
+    if (t < 0.0 || u < 0.0 || u > 1.0) {
+        return false;
+    }
+    tHit = t;
+    return true;
+}
+
+float psychoRayMaxTBT2020(vec2 origin, vec2 direction, out bool hasSolution) {
+    const float intervalMax = 1.0e30;
+    const float eps = 1.0e-14;
+    hasSolution = false;
+    if (dot(direction, direction) <= eps) {
+        return 0.0;
+    }
+
+    vec2 r = psychoMBFromBT2020Primary(vec3(1.0, 0.0, 0.0));
+    vec2 g = psychoMBFromBT2020Primary(vec3(0.0, 1.0, 0.0));
+    vec2 b = psychoMBFromBT2020Primary(vec3(0.0, 0.0, 1.0));
+
+    float tBest = intervalMax;
+    float t;
+    bool hitAny = false;
+
+    if (psychoRaySegmentHit2D(origin, direction, r, g, t)) { tBest = min(tBest, t); hitAny = true; }
+    if (psychoRaySegmentHit2D(origin, direction, g, b, t)) { tBest = min(tBest, t); hitAny = true; }
+    if (psychoRaySegmentHit2D(origin, direction, b, r, t)) { tBest = min(tBest, t); hitAny = true; }
+
+    hasSolution = hitAny;
+    return hitAny ? max(tBest, 0.0) : 0.0;
+}
+
+vec3 psychoGamutCompress(vec3 lms) {
+    const float eps = 1.0e-14;
+    float yMb = psychoMBYFromLMS(abs(lms));
+    vec2 white = psychoWhiteD65Chromaticity();
+    vec2 mb0 = psychoMBFromLMS(lms);
+    vec2 direction = mb0 - white;
+    if (dot(direction, direction) < eps) {
+        return lms;
+    }
+
+    bool hasSolution;
+    float tMax = psychoRayMaxTBT2020(white, direction, hasSolution);
+    if (!hasSolution) {
+        return lms;
+    }
+
+    float whiteRatio = max(safeDiv(1.0 - tMax, tMax, 0.0), 0.0);
+    float whiteAdd = yMb * whiteRatio;
+    vec3 whiteUnitLms = psychoLMSFromMB2(vec3(white, 1.0));
+    return lms + whiteUnitLms * whiteAdd;
+}
+
+vec3 psychoRestoreHueMB2(vec3 lmsSource, vec3 lmsTarget, float amount) {
+    const float eps = 1.0e-6;
+    float restore = clamp(amount, 0.0, 1.0);
+    if (restore <= 0.0) {
+        return lmsTarget;
+    }
+
+    vec3 mbSource = psychoMB2FromLMS(lmsSource);
+    vec3 mbTarget = psychoMB2FromLMS(lmsTarget);
+    vec2 mbWhite = psychoWhiteD65Chromaticity();
+
+    vec2 sourceOffset = mbSource.xy - mbWhite;
+    vec2 targetOffset = mbTarget.xy - mbWhite;
+    float src2 = dot(sourceOffset, sourceOffset);
+    float tgt2 = dot(targetOffset, targetOffset);
+    if (src2 <= eps || tgt2 <= eps) {
+        return lmsTarget;
+    }
+
+    vec2 sourceDir = sourceOffset * inversesqrt(src2);
+    vec2 targetDir = targetOffset * inversesqrt(tgt2);
+    vec2 blendedDir = mix(targetDir, sourceDir, restore);
+    float blendedLen2 = dot(blendedDir, blendedDir);
+    if (blendedLen2 <= eps) {
+        blendedDir = targetDir;
+    } else {
+        blendedDir *= inversesqrt(blendedLen2);
+    }
+
+    float targetRadius = sqrt(tgt2);
+    vec2 mbRestoredXy = mbWhite + blendedDir * targetRadius;
+    return psychoLMSFromMB2(vec3(mbRestoredXy, mbTarget.z));
+}
+
+vec3 psychoScalePurityMB2(vec3 lms, float purityScale) {
+    const float eps = 1.0e-6;
+    if (abs(purityScale - 1.0) <= eps) {
+        return lms;
+    }
+    vec3 mb = psychoMB2FromLMS(lms);
+    vec2 mbWhite = psychoWhiteD65Chromaticity();
+    vec2 mbOffset = mb.xy - mbWhite;
+    vec2 direction = mbOffset;
+    float offsetLen = length(direction);
+    if (offsetLen < eps) {
+        return lms;
+    }
+
+    float desiredLen = offsetLen * max(purityScale, 0.0);
+    bool hasSolution;
+    float tMax = psychoRayMaxTBT2020(mbWhite, direction / offsetLen, hasSolution);
+    float maxLen = hasSolution ? tMax : offsetLen;
+    float clampedLen = min(desiredLen, maxLen * 0.98);
+    vec2 mbScaled = mbWhite + (direction / offsetLen) * clampedLen;
+    return psychoLMSFromMB2(vec3(mbScaled, mb.z));
+}
+
+float psychoContrastSafe(float x, float contrast, float midGray) {
+    float ratio = x / midGray;
+    float signedPow = (ratio < 0.0 ? -1.0 : 1.0) * pow(abs(ratio), max(contrast, 1.0e-4));
+    return signedPow * midGray;
+}
+
+float psychoHighlightsFn(float x, float highlights, float midGray) {
+    if (highlights > 1.0) {
+        return max(x, mix(x, midGray * pow(max(x / midGray, 0.0), highlights), x));
+    }
+    if (highlights < 1.0) {
+        return min(x, x / (1.0 + midGray * pow(max(x / midGray, 0.0), 2.0 - highlights) - x));
+    }
+    return x;
+}
+
+float psychoShadowsFn(float x, float shadows, float midGray) {
+    if (shadows > 1.0) {
+        return max(x, x * (1.0 + (x * midGray / max(pow(max(x / midGray, 0.0), shadows), 1.0e-6))));
+    }
+    if (shadows < 1.0) {
+        return clamp(x * (1.0 - (x * midGray / max(pow(max(x / midGray, 0.0), 2.0 - shadows), 1.0e-6))), 0.0, x);
+    }
+    return x;
+}
+
+float psychoNeutwo(float x, float peak) {
+    return (peak * x) * inversesqrt(x * x + peak * peak);
+}
+
+float psychoNeutwoClip(float x, float peak, float clip) {
+    float cc = clip * clip;
+    float pp = peak * peak;
+    float xx = x * x;
+    float numerator = clip * peak * x;
+    float denomSq = max(xx * (cc - pp) + cc * pp, 1.0e-12);
+    return numerator * inversesqrt(denomSq);
+}
+
+vec3 psychoNeutwoPerChannel(vec3 color, vec3 peak) {
+    return vec3(
+        psychoNeutwo(color.r, peak.r),
+        psychoNeutwo(color.g, peak.g),
+        psychoNeutwo(color.b, peak.b));
+}
+
+vec3 psychoNeutwoClipPerChannel(vec3 color, vec3 peak, vec3 clip) {
+    return vec3(
+        psychoNeutwoClip(color.r, peak.r, clip.r),
+        psychoNeutwoClip(color.g, peak.g, clip.g),
+        psychoNeutwoClip(color.b, peak.b, clip.b));
+}
+
+vec3 psychoNakaRushton(vec3 x, vec3 peak, vec3 gray, float coneExp) {
+    vec3 safePeak = max(peak, gray + vec3(1.0e-4));
+    vec3 n = max(coneExp, 1.0e-4) * safePeak / (safePeak - gray);
+    vec3 xN = psychoSignPow(x, n);
+    vec3 num = safePeak * xN;
+    vec3 den = pow(max(gray, vec3(1.0e-6)), n - 1.0) * (safePeak - gray) + xN;
+    return num / max(den, vec3(1.0e-6));
+}
+
+vec3 psychoTonemapBT2020(vec3 inputColor, float peakValue, bool compressToBT2020) {
+    const float kEps = 1.0e-6;
+    const float kHalfBleachTrolands = 20000.0;
+    vec3 lmsMidgrayRaw = psychoLMSFromBT2020(vec3(0.18));
+    float lumMidgray = psychoLuminanceFromLMS(lmsMidgrayRaw);
+
+    vec3 lmsColorRaw = psychoLMSFromBT2020(inputColor);
+    float lumCurrent = psychoLuminanceFromLMS(lmsColorRaw);
+    float lumTarget = lumCurrent;
+
+    if (pc.psychoHighlights != 1.0) {
+        lumTarget = psychoHighlightsFn(lumTarget, pc.psychoHighlights, lumMidgray);
+    }
+    if (pc.psychoShadows != 1.0) {
+        lumTarget = psychoShadowsFn(lumTarget, pc.psychoShadows, lumMidgray);
+    }
+    if (pc.psychoContrast != 1.0) {
+        lumTarget = psychoContrastSafe(lumTarget, pc.psychoContrast, lumMidgray);
+    }
+
+    float lumScale = safeDiv(lumTarget, lumCurrent, 1.0);
+    float clipPoint = pc.psychoClipPoint * lumScale;
+    vec3 lmsSceneUnit = lmsColorRaw * lumScale;
+    vec3 lmsMidgrayUnit = lmsMidgrayRaw;
+
+    if (pc.psychoPurity != 1.0) {
+        lmsSceneUnit = psychoScalePurityMB2(lmsSceneUnit, pc.psychoPurity);
+    }
+
+    vec3 lmsSceneUnitSource = lmsSceneUnit;
+    if (pc.psychoAdaptContrast != 1.0) {
+        vec3 lmsSigmaUnit = max(lmsMidgrayUnit, vec3(kEps));
+        float exponent = max(pc.psychoAdaptContrast, kEps);
+
+        vec3 ax = abs(lmsSceneUnit);
+        vec3 axN = pow(ax, vec3(exponent));
+        vec3 sN = pow(lmsSigmaUnit, vec3(exponent));
+        vec3 responseTarget = axN / max(axN + sN, vec3(kEps));
+        vec3 responseBaseline = ax / max(ax + lmsSigmaUnit, vec3(kEps));
+        vec3 gain = responseTarget / max(responseBaseline, vec3(kEps));
+        vec3 signRaw = vec3(
+            lmsSceneUnit.x < 0.0 ? -1.0 : 1.0,
+            lmsSceneUnit.y < 0.0 ? -1.0 : 1.0,
+            lmsSceneUnit.z < 0.0 ? -1.0 : 1.0);
+        lmsSceneUnit = signRaw * (ax * gain);
+
+        if (pc.psychoHueRestore > 0.0) {
+            lmsSceneUnit = psychoRestoreHueMB2(lmsSceneUnitSource, lmsSceneUnit, pc.psychoHueRestore);
+        }
+    }
+
+    vec3 lmsUnit = lmsSceneUnit;
+    if (pc.psychoBleaching != 0.0) {
+        float blendWeight = clamp(pc.psychoBleaching, 0.0, 1.0);
+        float adaptedLum = max(psychoLuminanceFromLMS(max(lmsUnit, vec3(0.0))), 0.18);
+        vec3 adaptedBt2020 = vec3(adaptedLum);
+        vec3 lmsAdaptedUnit = psychoLMSFromBT2020(adaptedBt2020);
+
+        vec3 stimulusNits = max(lmsAdaptedUnit, vec3(0.0)) * 100.0;
+        vec3 stimulusTrolands = stimulusNits * 4.0;
+        vec3 availabilityRaw = 1.0 / (1.0 + stimulusTrolands / max(kHalfBleachTrolands, kEps));
+        vec3 availability = mix(vec3(1.0), availabilityRaw, blendWeight);
+        lmsUnit = lmsUnit * max(availability, vec3(0.0));
+    }
+
+    float peak = max(peakValue, 0.25);
+    vec3 lmsPeakUnit = psychoLMSFromBT2020(vec3(peak));
+    vec3 lmsTonedUnit;
+    if (pc.psychoWhiteCurve > 0.5) {
+        lmsTonedUnit = psychoNakaRushton(lmsUnit, lmsPeakUnit, lmsMidgrayUnit, pc.psychoConeExponent);
+    } else if (clipPoint > peak) {
+        vec3 lmsClipUnit = psychoLMSFromBT2020(vec3(clipPoint));
+        lmsTonedUnit = psychoNeutwoClipPerChannel(lmsUnit, lmsPeakUnit, lmsClipUnit);
+    } else {
+        lmsTonedUnit = psychoNeutwoPerChannel(lmsUnit, lmsPeakUnit);
+    }
+
+    if (pc.psychoHueRestore > 0.0) {
+        lmsTonedUnit = psychoRestoreHueMB2(lmsUnit, lmsTonedUnit, pc.psychoHueRestore);
+    }
+
+    if (compressToBT2020) {
+        lmsTonedUnit = psychoGamutCompress(lmsTonedUnit);
+    }
+    vec3 mapped2020 = psychoBT2020FromLMS(lmsTonedUnit);
+    return compressToBT2020 ? max(mapped2020, vec3(0.0)) : mapped2020;
+}
+
+vec3 tonemapHdrPsychoV(vec3 hdr, float exposure) {
+    vec3 paperReferred709 = max(hdr * exposure, vec3(0.0));
+    vec3 paperReferred2020 = max(BT709_TO_BT2020 * paperReferred709, vec3(0.0));
+    vec3 mapped2020 = psychoTonemapBT2020(paperReferred2020, pc.headroom, true);
+    return pqEncodeNits(mapped2020 * pc.paperWhiteNits);
+}
+
+vec3 pbrNeutralTonemap(vec3 color) {
+    float startCompression = clamp(pc.sdrParam0, 0.0, 0.99);
+    float desaturation = max(pc.sdrParam1, 0.0);
+
+    color = max(color, vec3(0.0));
+    float x = min(color.r, min(color.g, color.b));
+    float offset = x < 0.08 ? x - 6.25 * x * x : 0.04;
+    color -= offset;
+
+    float peak = max(color.r, max(color.g, color.b));
+    if (peak < startCompression) {
+        return color;
+    }
+
+    float d = 1.0 - startCompression;
+    float newPeak = 1.0 - d * d / max(peak + d - startCompression, 1.0e-6);
+    color *= safeDiv(newPeak, peak, 1.0);
+
+    float g = 1.0 - 1.0 / (desaturation * (peak - newPeak) + 1.0);
+    return mix(color, vec3(newPeak), g);
+}
+
+vec3 luminanceTonemap(vec3 color, float lMapped, float lSource) {
+    return color * safeDiv(lMapped, lSource, 1.0);
+}
+
+vec3 reinhardExtendedTonemap(vec3 color) {
+    float l = dot(color, LUMA_BT709);
+    if (l < 1.0e-6) {
+        return color;
+    }
+    float lWhite = max(pc.sdrParam0, 1.0e-3);
+    float lWhite2 = lWhite * lWhite;
+    float lm = l * (1.0 + l / lWhite2) / (1.0 + l);
+    return luminanceTonemap(color, clamp(lm, 0.0, 1.0), l);
+}
+
+vec3 acesHillTonemap(vec3 color) {
+    color *= max(pc.sdrParam0, 0.0);
+    float l = dot(color, LUMA_BT709);
+    if (l < 1.0e-6) {
+        return color;
+    }
+    float lm = (l * (2.51 * l + 0.03)) / max(l * (2.43 * l + 0.59) + 0.14, 1.0e-6);
+    return luminanceTonemap(color, clamp(lm, 0.0, 1.0), l);
+}
+
+vec3 lottesTonemap(vec3 color) {
+    float l = dot(color, LUMA_BT709);
+    if (l < 1.0e-6) {
+        return color;
+    }
+
+    float a = max(pc.sdrParam0, 1.0e-3);
+    float d = max(pc.sdrParam1, 1.0e-3);
+    float hdrMax = max(pc.sdrParam2, 1.0e-3);
+    float midIn = max(pc.sdrParam3, 1.0e-3);
+    float midOut = max(pc.sdrParam4, 1.0e-3);
+    float hdrPow = pow(hdrMax, a * d);
+    float midPow = pow(midIn, a * d);
+    float denom = max((hdrPow - midPow) * midOut, 1.0e-6);
+    float b = (-pow(midIn, a) + pow(hdrMax, a) * midOut) / denom;
+    float c = (hdrPow * pow(midIn, a) - pow(hdrMax, a) * midPow * midOut) / denom;
+
+    float lm = pow(l, a) / max(pow(l, a * d) * b + c, 1.0e-6);
+    return luminanceTonemap(color, clamp(lm, 0.0, 1.0), l);
+}
+
+vec3 frostbiteTonemap(vec3 color) {
+    float l = dot(color, LUMA_BT709);
+    if (l < 1.0e-6) {
+        return color;
+    }
+
+    float linearEnd = clamp(pc.sdrParam0, 0.0, 1.0);
+    float shoulderStrength = max(pc.sdrParam1, 0.0);
+    float lm = l <= linearEnd
+        ? l
+        : linearEnd + (1.0 - linearEnd) * (1.0 - exp(-(l - linearEnd) * shoulderStrength));
+    return luminanceTonemap(color, clamp(lm, 0.0, 1.0), l);
+}
+
+float hablePartial(float x, float a, float b, float c, float d, float e, float f) {
+    return ((x * (a * x + c * b) + d * e) / max(x * (a * x + b) + d * f, 1.0e-6)) - e / f;
+}
+
+vec3 uncharted2Tonemap(vec3 color) {
+    float l = dot(color, LUMA_BT709);
+    if (l < 1.0e-6) {
+        return color;
+    }
+
+    float a = max(pc.sdrParam0, 1.0e-4);
+    float b = max(pc.sdrParam1, 1.0e-4);
+    float c = max(pc.sdrParam2, 0.0);
+    float d = max(pc.sdrParam3, 1.0e-4);
+    float e = max(pc.sdrParam4, 0.0);
+    float f = max(pc.sdrParam5, 1.0e-4);
+    float w = max(pc.sdrParam6, 1.0e-3);
+    float whiteScale = max(hablePartial(w, a, b, c, d, e, f), 1.0e-6);
+    float lm = hablePartial(l, a, b, c, d, e, f) / whiteScale;
+    return luminanceTonemap(color, clamp(lm, 0.0, 1.0), l);
+}
+
+vec3 gtTonemap(vec3 color) {
+    float l = dot(color, LUMA_BT709);
+    if (l < 1.0e-6) {
+        return color;
+    }
+
+    const float p = 1.0;
+    float a = max(pc.sdrParam0, 1.0e-3);
+    float m = clamp(pc.sdrParam1, 1.0e-4, 0.99);
+    float linearLength = max(pc.sdrParam2, 1.0e-4);
+    float c = max(pc.sdrParam3, 1.0e-4);
+    float b = pc.sdrParam4;
+
+    float l0 = ((p - m) * linearLength) / a;
+    float s0 = m + l0;
+    float s1 = m + a * l0;
+    float c2 = (a * p) / max(p - s1, 1.0e-6);
+    float cp = -c2 / p;
+
+    float w0 = 1.0 - smoothstep(0.0, m, l);
+    float w2 = step(m + l0, l);
+    float w1 = 1.0 - w0 - w2;
+
+    float toe = m * pow(max(l / m, 0.0), c) + b;
+    float shoulder = p - (p - s1) * exp(cp * (l - s0));
+    float lm = toe * w0 + l * w1 + shoulder * w2;
+    return luminanceTonemap(color, clamp(lm, 0.0, 1.0), l);
+}
+
+vec3 tonemapSdrPsychoV(vec3 color) {
+    vec3 color2020 = max(BT709_TO_BT2020 * color, vec3(0.0));
+    vec3 mapped2020 = psychoTonemapBT2020(color2020, max(pc.sdrPsychoPeak, 1.0), false);
+    vec3 mapped709 = BT2020_TO_BT709 * mapped2020;
+    float luma = clamp(dot(mapped709, LUMA_BT709), 0.0, 1.0);
+    vec3 chroma = mapped709 - vec3(luma);
+    float scale = 1.0;
+    for (int i = 0; i < 3; ++i) {
+        if (chroma[i] < 0.0) {
+            scale = min(scale, luma / -chroma[i]);
+        } else if (chroma[i] > 0.0) {
+            scale = min(scale, (1.0 - luma) / chroma[i]);
+        }
+    }
+    return clamp(vec3(luma) + chroma * clamp(scale, 0.0, 1.0), 0.0, 1.0);
+}
+
+vec3 tonemapSdr(vec3 hdr, float exposure) {
+    vec3 color = max(hdr * exposure, vec3(0.0));
+    vec3 mapped;
+
+    if (pc.sdrTonemapMode == SDR_TONEMAP_AGX) {
+        return applyContrastSaturation(agx(color), pc.sdrParam0, pc.sdrParam1);
+    } else if (pc.sdrTonemapMode == SDR_TONEMAP_PBR_NEUTRAL) {
+        mapped = pbrNeutralTonemap(color);
+    } else if (pc.sdrTonemapMode == SDR_TONEMAP_REINHARD) {
+        mapped = reinhardExtendedTonemap(color);
+    } else if (pc.sdrTonemapMode == SDR_TONEMAP_ACES) {
+        mapped = acesHillTonemap(color);
+    } else if (pc.sdrTonemapMode == SDR_TONEMAP_LOTTES) {
+        mapped = lottesTonemap(color);
+    } else if (pc.sdrTonemapMode == SDR_TONEMAP_FROSTBITE) {
+        mapped = frostbiteTonemap(color);
+    } else if (pc.sdrTonemapMode == SDR_TONEMAP_UNCHARTED2) {
+        mapped = uncharted2Tonemap(color);
+    } else if (pc.sdrTonemapMode == SDR_TONEMAP_GT) {
+        mapped = gtTonemap(color);
+    } else if (pc.sdrTonemapMode == SDR_TONEMAP_PSYCHOV) {
+        mapped = tonemapSdrPsychoV(color);
+    } else {
+        return applyContrastSaturation(agx(color), pc.sdrParam0, pc.sdrParam1);
+    }
+    return linearToSrgb(mapped);
+}
+
+vec3 tonemapHdr(vec3 hdr, float exposure) {
+    if (pc.hdrTonemapMode == HDR_TONEMAP_CAUSTICA) {
+        return tonemapHdrCaustica(hdr, exposure);
+    }
+    if (pc.hdrTonemapMode == HDR_TONEMAP_PSYCHOV) {
+        return tonemapHdrPsychoV(hdr, exposure);
+    }
+    return tonemapHdrEetf(hdr, exposure);
 }
 
 void main() {
@@ -119,7 +758,7 @@ void main() {
 
     vec4 rt = imageLoad(rtImage, pix);
     float exposure = max(imageLoad(exposureImage, ivec2(0)).r, 0.0);
-    vec3 ldr = tonemap(rt.rgb, exposure);
+    vec3 ldr = tonemapSdr(rt.rgb, exposure);
     imageStore(outputImage, pix, vec4(ldr, 1.0));
 
     if (pc.hdrEnabled != 0) {

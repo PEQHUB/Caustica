@@ -59,7 +59,7 @@ public final class CausticaConfig {
             Rt.ENABLED, Rt.Composite.SPP, Rt.Composite.MAX_BOUNCES, Rt.Terrain.ASYNC_DISPATCH_PER_TICK, Rt.Omm.ENABLED,
             Rt.Entities.ENABLED, Rt.Entities.GLOW_ENABLED, Rt.EntityTextures.MAX_TEXTURES, Rt.DlssRr.ENABLED, Rt.Fg.ENABLED,
             Rt.Reflex.ENABLED, Rt.Exposure.MODE, Rt.BufferPool.STATS, Rt.FrameStats.ENABLED,
-            Rt.Hdr.ENABLED, Ngx.PATH,
+            Rt.Sdr.TONEMAP_MODE, Rt.Hdr.ENABLED, Rt.Hdr.TONEMAP_MODE, Ngx.PATH,
         };
     }
 
@@ -99,10 +99,17 @@ public final class CausticaConfig {
         FILE.setComment("reflex",
                 " NVIDIA Reflex (VK_NV_low_latency2). Default off; gated additionally by device support.\n"
                         + " minimum-interval-us: 0 = no framerate cap (Reflex just paces submission).");
+        FILE.setComment("sdr",
+                " SDR display mapping for the vanilla main target. tonemap-mode defaults to agx to preserve\n"
+                        + " Caustica's existing SDR look. Other modes are pbr-neutral, reinhard, aces, lottes,\n"
+                        + " frostbite, uncharted2, gt, and psychov. Nested tables hold per-tonemapper tuning\n"
+                        + " controls; only the selected mode's controls are pushed to the display shader.");
         FILE.setComment("hdr",
                 " HDR display output (ST.2084/PQ). When enabled the swapchain is created in PQ automatically\n"
                         + " (falls back to SDR if the surface doesn't advertise it). paper-white-nits / peak-nits\n"
-                        + " drive the scene-HDR -> display mapping.");
+                        + " drive the scene-HDR -> display mapping. tonemap-mode selects the HDR display map:\n"
+                        + " eetf is the BT.2390 PQ electrical-electrical transfer function; caustica is the\n"
+                        + " original Caustica highlight rolloff; psychov is the perceptual PsychoV map.");
     }
 
     private static Path resolveConfigPath() {
@@ -721,6 +728,187 @@ public final class CausticaConfig {
             }
         }
 
+        /** SDR output controls for the vanilla main target. */
+        public static final class Sdr {
+            public static final String TONEMAP_PBR_NEUTRAL = "pbr-neutral";
+            public static final String TONEMAP_REINHARD = "reinhard";
+            public static final String TONEMAP_ACES = "aces";
+            public static final String TONEMAP_AGX = "agx";
+            public static final String TONEMAP_LOTTES = "lottes";
+            public static final String TONEMAP_FROSTBITE = "frostbite";
+            public static final String TONEMAP_UNCHARTED2 = "uncharted2";
+            public static final String TONEMAP_GT = "gt";
+            public static final String TONEMAP_PSYCHOV = "psychov";
+
+            public static final int TONEMAP_ID_PBR_NEUTRAL = 0;
+            public static final int TONEMAP_ID_REINHARD = 1;
+            public static final int TONEMAP_ID_ACES = 2;
+            public static final int TONEMAP_ID_AGX = 3;
+            public static final int TONEMAP_ID_LOTTES = 4;
+            public static final int TONEMAP_ID_FROSTBITE = 5;
+            public static final int TONEMAP_ID_UNCHARTED2 = 6;
+            public static final int TONEMAP_ID_GT = 7;
+            public static final int TONEMAP_ID_PSYCHOV = 8;
+
+            public static final StringSetting TONEMAP_MODE =
+                    string("caustica.rt.sdr.tonemapMode", "sdr.tonemap-mode", TONEMAP_AGX, Sdr::sanitizeTonemapMode);
+            public static final FloatSetting AGX_CONTRAST =
+                    clampedFloat("caustica.rt.sdr.agx.contrast", "sdr.agx.contrast", 1.0f, 0.0f, 2.0f);
+            public static final FloatSetting AGX_SATURATION =
+                    clampedFloat("caustica.rt.sdr.agx.saturation", "sdr.agx.saturation", 1.0f, 0.0f, 3.0f);
+            public static final FloatSetting PBR_START_COMPRESSION =
+                    clampedFloat("caustica.rt.sdr.pbrNeutral.startCompression", "sdr.pbr-neutral.start-compression", 0.76f, 0.0f, 0.99f);
+            public static final FloatSetting PBR_DESATURATION =
+                    clampedFloat("caustica.rt.sdr.pbrNeutral.desaturation", "sdr.pbr-neutral.desaturation", 0.15f, 0.0f, 1.0f);
+            public static final FloatSetting REINHARD_WHITE_POINT =
+                    clampedFloat("caustica.rt.sdr.reinhard.whitePoint", "sdr.reinhard.white-point", 4.0f, 1.0f, 20.0f);
+            public static final FloatSetting ACES_EXPOSURE =
+                    clampedFloat("caustica.rt.sdr.aces.exposure", "sdr.aces.exposure", 1.0f, 0.0f, 4.0f);
+            public static final FloatSetting LOTTES_CONTRAST =
+                    clampedFloat("caustica.rt.sdr.lottes.contrast", "sdr.lottes.contrast", 2.0f, 0.1f, 5.0f);
+            public static final FloatSetting LOTTES_SHOULDER =
+                    clampedFloat("caustica.rt.sdr.lottes.shoulder", "sdr.lottes.shoulder", 1.0f, 0.1f, 5.0f);
+            public static final FloatSetting LOTTES_HDR_MAX =
+                    clampedFloat("caustica.rt.sdr.lottes.hdrMax", "sdr.lottes.hdr-max", 16.0f, 1.0f, 64.0f);
+            public static final FloatSetting LOTTES_MID_IN =
+                    clampedFloat("caustica.rt.sdr.lottes.midIn", "sdr.lottes.mid-in", 0.18f, 0.01f, 1.0f);
+            public static final FloatSetting LOTTES_MID_OUT =
+                    clampedFloat("caustica.rt.sdr.lottes.midOut", "sdr.lottes.mid-out", 0.18f, 0.01f, 1.0f);
+            public static final FloatSetting FROSTBITE_LINEAR_END =
+                    clampedFloat("caustica.rt.sdr.frostbite.linearEnd", "sdr.frostbite.linear-end", 0.25f, 0.0f, 1.0f);
+            public static final FloatSetting FROSTBITE_SHOULDER_STRENGTH =
+                    clampedFloat("caustica.rt.sdr.frostbite.shoulderStrength", "sdr.frostbite.shoulder-strength", 2.0f, 0.0f, 8.0f);
+            public static final FloatSetting UNCHARTED_A =
+                    clampedFloat("caustica.rt.sdr.uncharted2.a", "sdr.uncharted2.a", 0.15f, 0.01f, 1.0f);
+            public static final FloatSetting UNCHARTED_B =
+                    clampedFloat("caustica.rt.sdr.uncharted2.b", "sdr.uncharted2.b", 0.50f, 0.01f, 2.0f);
+            public static final FloatSetting UNCHARTED_C =
+                    clampedFloat("caustica.rt.sdr.uncharted2.c", "sdr.uncharted2.c", 0.10f, 0.0f, 1.0f);
+            public static final FloatSetting UNCHARTED_D =
+                    clampedFloat("caustica.rt.sdr.uncharted2.d", "sdr.uncharted2.d", 0.20f, 0.01f, 2.0f);
+            public static final FloatSetting UNCHARTED_E =
+                    clampedFloat("caustica.rt.sdr.uncharted2.e", "sdr.uncharted2.e", 0.02f, 0.0f, 1.0f);
+            public static final FloatSetting UNCHARTED_F =
+                    clampedFloat("caustica.rt.sdr.uncharted2.f", "sdr.uncharted2.f", 0.30f, 0.01f, 2.0f);
+            public static final FloatSetting UNCHARTED_WHITE_POINT =
+                    clampedFloat("caustica.rt.sdr.uncharted2.whitePoint", "sdr.uncharted2.white-point", 11.2f, 1.0f, 32.0f);
+            public static final FloatSetting GT_CONTRAST =
+                    clampedFloat("caustica.rt.sdr.gt.contrast", "sdr.gt.contrast", 1.0f, 0.1f, 4.0f);
+            public static final FloatSetting GT_LINEAR_START =
+                    clampedFloat("caustica.rt.sdr.gt.linearStart", "sdr.gt.linear-start", 0.22f, 0.01f, 0.99f);
+            public static final FloatSetting GT_LINEAR_LENGTH =
+                    clampedFloat("caustica.rt.sdr.gt.linearLength", "sdr.gt.linear-length", 0.4f, 0.01f, 4.0f);
+            public static final FloatSetting GT_BLACK_CURVE =
+                    clampedFloat("caustica.rt.sdr.gt.blackCurve", "sdr.gt.black-curve", 1.33f, 0.1f, 4.0f);
+            public static final FloatSetting GT_BLACK_LIFT =
+                    clampedFloat("caustica.rt.sdr.gt.blackLift", "sdr.gt.black-lift", 0.0f, -0.5f, 0.5f);
+            public static final FloatSetting PSYCHO_PEAK =
+                    clampedFloat("caustica.rt.sdr.psychov.peak", "sdr.psychov.peak", 2.0f, 0.5f, 8.0f);
+
+            private Sdr() {
+            }
+
+            public static int tonemapModeId() {
+                return switch (TONEMAP_MODE.get()) {
+                    case TONEMAP_PBR_NEUTRAL -> TONEMAP_ID_PBR_NEUTRAL;
+                    case TONEMAP_REINHARD -> TONEMAP_ID_REINHARD;
+                    case TONEMAP_ACES -> TONEMAP_ID_ACES;
+                    case TONEMAP_LOTTES -> TONEMAP_ID_LOTTES;
+                    case TONEMAP_FROSTBITE -> TONEMAP_ID_FROSTBITE;
+                    case TONEMAP_UNCHARTED2 -> TONEMAP_ID_UNCHARTED2;
+                    case TONEMAP_GT -> TONEMAP_ID_GT;
+                    case TONEMAP_PSYCHOV -> TONEMAP_ID_PSYCHOV;
+                    default -> TONEMAP_ID_AGX;
+                };
+            }
+
+            public static float tonemapParam(int index) {
+                return switch (TONEMAP_MODE.get()) {
+                    case TONEMAP_PBR_NEUTRAL -> switch (index) {
+                        case 0 -> PBR_START_COMPRESSION.value();
+                        case 1 -> PBR_DESATURATION.value();
+                        default -> 0.0f;
+                    };
+                    case TONEMAP_REINHARD -> index == 0 ? REINHARD_WHITE_POINT.value() : 0.0f;
+                    case TONEMAP_ACES -> index == 0 ? ACES_EXPOSURE.value() : 0.0f;
+                    case TONEMAP_LOTTES -> switch (index) {
+                        case 0 -> LOTTES_CONTRAST.value();
+                        case 1 -> LOTTES_SHOULDER.value();
+                        case 2 -> LOTTES_HDR_MAX.value();
+                        case 3 -> LOTTES_MID_IN.value();
+                        case 4 -> LOTTES_MID_OUT.value();
+                        default -> 0.0f;
+                    };
+                    case TONEMAP_FROSTBITE -> switch (index) {
+                        case 0 -> FROSTBITE_LINEAR_END.value();
+                        case 1 -> FROSTBITE_SHOULDER_STRENGTH.value();
+                        default -> 0.0f;
+                    };
+                    case TONEMAP_UNCHARTED2 -> switch (index) {
+                        case 0 -> UNCHARTED_A.value();
+                        case 1 -> UNCHARTED_B.value();
+                        case 2 -> UNCHARTED_C.value();
+                        case 3 -> UNCHARTED_D.value();
+                        case 4 -> UNCHARTED_E.value();
+                        case 5 -> UNCHARTED_F.value();
+                        case 6 -> UNCHARTED_WHITE_POINT.value();
+                        default -> 0.0f;
+                    };
+                    case TONEMAP_GT -> switch (index) {
+                        case 0 -> GT_CONTRAST.value();
+                        case 1 -> GT_LINEAR_START.value();
+                        case 2 -> GT_LINEAR_LENGTH.value();
+                        case 3 -> GT_BLACK_CURVE.value();
+                        case 4 -> GT_BLACK_LIFT.value();
+                        default -> 0.0f;
+                    };
+                    case TONEMAP_PSYCHOV -> 0.0f;
+                    default -> switch (index) {
+                        case 0 -> AGX_CONTRAST.value();
+                        case 1 -> AGX_SATURATION.value();
+                        default -> 0.0f;
+                    };
+                };
+            }
+
+            private static String sanitizeTonemapMode(String value) {
+                if (value != null) {
+                    String normalized = value.trim().toLowerCase().replace('_', '-');
+                    if ("pbr".equals(normalized) || "neutral".equals(normalized)
+                            || "pbrneutral".equals(normalized) || TONEMAP_PBR_NEUTRAL.equals(normalized)) {
+                        return TONEMAP_PBR_NEUTRAL;
+                    }
+                    if ("reinhard-extended".equals(normalized) || TONEMAP_REINHARD.equals(normalized)) {
+                        return TONEMAP_REINHARD;
+                    }
+                    if ("aces-hill".equals(normalized) || TONEMAP_ACES.equals(normalized)) {
+                        return TONEMAP_ACES;
+                    }
+                    if (TONEMAP_AGX.equals(normalized)) {
+                        return TONEMAP_AGX;
+                    }
+                    if (TONEMAP_LOTTES.equals(normalized)) {
+                        return TONEMAP_LOTTES;
+                    }
+                    if (TONEMAP_FROSTBITE.equals(normalized)) {
+                        return TONEMAP_FROSTBITE;
+                    }
+                    if ("uncharted".equals(normalized) || "uncharted-2".equals(normalized)
+                            || TONEMAP_UNCHARTED2.equals(normalized)) {
+                        return TONEMAP_UNCHARTED2;
+                    }
+                    if ("gran-turismo".equals(normalized) || TONEMAP_GT.equals(normalized)) {
+                        return TONEMAP_GT;
+                    }
+                    if (TONEMAP_PSYCHOV.equals(normalized) || "psycho".equals(normalized)
+                            || "psychovisual".equals(normalized) || "psycho-visual".equals(normalized)) {
+                        return TONEMAP_PSYCHOV;
+                    }
+                }
+                return TONEMAP_AGX;
+            }
+        }
+
         /**
          * HDR display output. When enabled the swapchain is created in PQ (ST.2084/HDR10 — the display-ready
          * encoding both HDR10 swapchains and DLSS Frame Generation require; whatever pixel format the surface
@@ -729,11 +917,42 @@ public final class CausticaConfig {
          * {@code paperWhiteNits}, and highlights roll off toward {@code peakNits}.
          */
         public static final class Hdr {
+            public static final String TONEMAP_EETF = "eetf";
+            public static final String TONEMAP_CAUSTICA = "caustica";
+            public static final String TONEMAP_PSYCHOV = "psychov";
+
+            public static final int TONEMAP_ID_EETF = 0;
+            public static final int TONEMAP_ID_CAUSTICA = 1;
+            public static final int TONEMAP_ID_PSYCHOV = 2;
+
             public static final BooleanSetting ENABLED = bool("caustica.rt.hdr", "hdr.enabled", false);
+            public static final StringSetting TONEMAP_MODE =
+                    string("caustica.rt.hdr.tonemapMode", "hdr.tonemap-mode", TONEMAP_EETF, Hdr::sanitizeTonemapMode);
             public static final FloatSetting PAPER_WHITE_NITS =
-                    clampedFloat("caustica.rt.hdr.paperWhiteNits", "hdr.paper-white-nits", 200.0f, 80.0f, 500.0f);
+                    clampedFloat("caustica.rt.hdr.paperWhiteNits", "hdr.paper-white-nits", 200.0f, 80.0f, 1000.0f);
             public static final FloatSetting PEAK_NITS =
-                    clampedFloat("caustica.rt.hdr.peakNits", "hdr.peak-nits", 1000.0f, 80.0f, 5000.0f);
+                    clampedFloat("caustica.rt.hdr.peakNits", "hdr.peak-nits", 1000.0f, 80.0f, 10000.0f);
+            public static final FloatSetting PSYCHO_HIGHLIGHTS =
+                    clampedFloat("caustica.rt.hdr.psychov.highlights", "hdr.psychov.highlights", 1.0f, 0.0f, 3.0f);
+            public static final FloatSetting PSYCHO_SHADOWS =
+                    clampedFloat("caustica.rt.hdr.psychov.shadows", "hdr.psychov.shadows", 1.0f, 0.0f, 3.0f);
+            public static final FloatSetting PSYCHO_CONTRAST =
+                    clampedFloat("caustica.rt.hdr.psychov.contrast", "hdr.psychov.contrast", 1.0f, 0.0f, 3.0f);
+            public static final FloatSetting PSYCHO_PURITY =
+                    clampedFloat("caustica.rt.hdr.psychov.purity", "hdr.psychov.purity", 1.0f, 0.0f, 3.0f);
+            public static final FloatSetting PSYCHO_BLEACHING =
+                    clampedFloat("caustica.rt.hdr.psychov.bleaching", "hdr.psychov.bleaching", 0.0f, 0.0f, 1.0f);
+            public static final FloatSetting PSYCHO_HUE_RESTORE =
+                    clampedFloat("caustica.rt.hdr.psychov.hue-restore", "hdr.psychov.hue-restore", 0.0f, 0.0f, 1.0f);
+            public static final FloatSetting PSYCHO_ADAPT_CONTRAST =
+                    clampedFloat("caustica.rt.hdr.psychov.adapt-contrast", "hdr.psychov.adapt-contrast", 1.0f, 0.0f, 3.0f);
+            public static final FloatSetting PSYCHO_CLIP_POINT =
+                    clampedFloat("caustica.rt.hdr.psychov.clip-point", "hdr.psychov.clip-point", 100.0f, 1.0f, 1000.0f);
+            public static final FloatSetting PSYCHO_CONE_EXPONENT =
+                    clampedFloat("caustica.rt.hdr.psychov.cone-exponent", "hdr.psychov.cone-exponent", 1.0f, 0.1f, 3.0f);
+            public static final StringSetting PSYCHO_WHITE_CURVE =
+                    string("caustica.rt.hdr.psychov.whiteCurve", "hdr.psychov.white-curve", "naka-rushton",
+                            Hdr::sanitizePsychoWhiteCurve);
 
             // Snapshot of ENABLED as resolved at startup (system property / config file), before any
             // in-session edit from the options screen. The swapchain's pixel format (PQ vs SDR) is fixed
@@ -763,6 +982,44 @@ public final class CausticaConfig {
             /** Highlight headroom above paper white, in paper-white-referred units ({@code >= 1}). */
             public static float headroom() {
                 return Math.max(1.0f, PEAK_NITS.value() / Math.max(1.0f, PAPER_WHITE_NITS.value()));
+            }
+
+            public static int tonemapModeId() {
+                return switch (TONEMAP_MODE.get()) {
+                    case TONEMAP_CAUSTICA -> TONEMAP_ID_CAUSTICA;
+                    case TONEMAP_PSYCHOV -> TONEMAP_ID_PSYCHOV;
+                    default -> TONEMAP_ID_EETF;
+                };
+            }
+
+            public static float psychoWhiteCurveId() {
+                return "neutwo".equals(PSYCHO_WHITE_CURVE.get()) ? 0.0f : 1.0f;
+            }
+
+            private static String sanitizeTonemapMode(String value) {
+                if (value != null) {
+                    String normalized = value.trim().toLowerCase();
+                    if (TONEMAP_CAUSTICA.equals(normalized)) {
+                        return TONEMAP_CAUSTICA;
+                    }
+                    if (TONEMAP_PSYCHOV.equals(normalized) || "psycho".equals(normalized)
+                            || "psychovisual".equals(normalized)) {
+                        return TONEMAP_PSYCHOV;
+                    }
+                    // Common typo for the BT.2390 display map. PQ itself defines an EOTF; this mode is an EETF.
+                    if (TONEMAP_EETF.equals(normalized) || "eotf".equals(normalized)
+                            || "bt2390".equals(normalized) || "bt.2390".equals(normalized)) {
+                        return TONEMAP_EETF;
+                    }
+                }
+                return TONEMAP_EETF;
+            }
+
+            private static String sanitizePsychoWhiteCurve(String value) {
+                if (value != null && "neutwo".equalsIgnoreCase(value.trim())) {
+                    return "neutwo";
+                }
+                return "naka-rushton";
             }
         }
     }
