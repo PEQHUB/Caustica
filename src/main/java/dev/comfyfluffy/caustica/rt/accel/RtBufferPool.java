@@ -33,6 +33,11 @@ public final class RtBufferPool {
     private long created;
     private long reused;
     private long statsCounter;
+    // Cumulative CPU time spent inside acquire()/release() themselves (map/deque bookkeeping),
+    // not GPU work — baseline for the A/B comparison against the upcoming pool replacement.
+    private long acquireNanos;
+    private long releaseNanos;
+    private long releaseCalls;
 
     public RtBufferPool() {
         this(null);
@@ -50,27 +55,41 @@ public final class RtBufferPool {
 
     /** Acquire a buffer with capacity ≥ {@code minSize}, reusing a free one if available. */
     public RtBuffer acquire(RtContext ctx, long minSize, int usage, boolean hostVisible, String label) {
+        boolean timed = CausticaConfig.Rt.BufferPool.STATS.value();
+        long start = timed ? System.nanoTime() : 0L;
         long bucket = ceilPow2(Math.max(minSize, MIN_BUCKET));
         ArrayDeque<RtBuffer> list = free.get(new PoolKey(usage, hostVisible, bucket));
+        RtBuffer buf;
         if (list != null && !list.isEmpty()) {
             reused++;
-            return list.pop();
+            buf = list.pop();
+        } else {
+            created++;
+            if (onCreate != null) {
+                onCreate.run();
+            }
+            buf = ctx.createBuffer(bucket, usage, hostVisible, label + " bucket " + bucket + "B");
         }
-        created++;
-        if (onCreate != null) {
-            onCreate.run();
+        if (timed) {
+            acquireNanos += System.nanoTime() - start;
         }
-        return ctx.createBuffer(bucket, usage, hostVisible, label + " bucket " + bucket + "B");
+        return buf;
     }
 
     /** Return a buffer to the pool for reuse, or destroy it if the free-list for its bucket is full. */
     public void release(RtBuffer b) {
+        boolean timed = CausticaConfig.Rt.BufferPool.STATS.value();
+        long start = timed ? System.nanoTime() : 0L;
         PoolKey key = new PoolKey(b.usage, b.hostVisible, b.size);
         ArrayDeque<RtBuffer> list = free.computeIfAbsent(key, k -> new ArrayDeque<>());
         if (list.size() >= MAX_FREE_PER_KEY) {
             b.destroy();
         } else {
             list.push(b);
+        }
+        if (timed) {
+            releaseNanos += System.nanoTime() - start;
+            releaseCalls++;
         }
     }
 
@@ -97,8 +116,14 @@ public final class RtBufferPool {
                 freeCount++;
             }
         }
-        CausticaMod.LOGGER.info("RT buffer pool: created={} reused={} | free {} buffers, {} KiB",
-                created, reused, freeCount, freeBytes / 1024);
+        long acquireCalls = created + reused;
+        double acquireAvgUs = acquireCalls == 0 ? 0.0 : acquireNanos / 1000.0 / acquireCalls;
+        double releaseAvgUs = releaseCalls == 0 ? 0.0 : releaseNanos / 1000.0 / releaseCalls;
+        CausticaMod.LOGGER.info("RT buffer pool: created={} reused={} | free {} buffers, {} KiB | "
+                        + "acquire avg={}us total={}ms ({} calls), release avg={}us total={}ms ({} calls)",
+                created, reused, freeCount, freeBytes / 1024,
+                String.format("%.2f", acquireAvgUs), acquireNanos / 1_000_000, acquireCalls,
+                String.format("%.2f", releaseAvgUs), releaseNanos / 1_000_000, releaseCalls);
     }
 
     private static long ceilPow2(long v) {
