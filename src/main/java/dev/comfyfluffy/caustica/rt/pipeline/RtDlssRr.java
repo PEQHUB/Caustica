@@ -22,8 +22,15 @@ import java.lang.foreign.ValueLayout;
  */
 public final class RtDlssRr {
     public static final RtDlssRr INSTANCE = new RtDlssRr();
-    public static boolean enabled() {
+
+    /** The user-facing setting. This does not imply that NGX/RR is currently usable. */
+    public static boolean configured() {
         return CausticaConfig.Rt.DlssRr.ENABLED.value();
+    }
+
+    /** Kept for existing callers that only need the configured state. */
+    public static boolean enabled() {
+        return configured();
     }
 
     // DLSS feature flags. IsHDR (bit 0): color is linear HDR (rgba16f) — RR requires it ("HDR Color
@@ -68,6 +75,26 @@ public final class RtDlssRr {
 
     public boolean isReady() {
         return initialized && !failed && !isNull(feature);
+    }
+
+    /** Whether the configured RR path may be attempted this frame. */
+    public boolean isOperational() {
+        return configured() && !failed;
+    }
+
+    /** Discard temporal history without changing availability or recreating the feature. */
+    public void requestHistoryReset() {
+        resetHistory = true;
+        lastFrameNanos = 0L;
+    }
+
+    /** Allow an explicit render-state invalidation to retry RR after a transient failure. */
+    public void resetFailureLatch() {
+        if (failed) {
+            failed = false;
+            requestHistoryReset();
+            CausticaMod.LOGGER.info("DLSS-RR failure latch cleared; retrying RR");
+        }
     }
 
     /**
@@ -118,45 +145,47 @@ public final class RtDlssRr {
             }
             return true;
         } catch (Throwable t) {
-            failed = true;
-            CausticaMod.LOGGER.error("DLSS-RR evaluate failed; RT composite continues without it", t);
+            fail("DLSS-RR evaluate failed; RT composite continues without it", t);
             return false;
         }
     }
 
     /**
      * Asks NGX what render resolution the current quality mode expects for the given display size.
-     * Returns {@code null} only when RR is off (or already disabled from an earlier failure elsewhere)
-     * — in that state there is no feature to query and the caller should trace at full resolution.
-     * Once RR is active, a failed query (stale shim, old driver, bad NGX result) throws instead of
-     * silently falling back, so a broken render/display sync is never masked.
+     * Returns {@code null} when RR is off or unavailable. Query/init failures latch RR off, but remain
+     * isolated from the core RT renderer so the caller can trace at full resolution without jitter.
      */
     public int[] queryOptimalRenderSize(int displayWidth, int displayHeight) {
-        if (!enabled() || failed) {
+        if (!isOperational()) {
             return null;
         }
-        if (!(((GpuDeviceAccessor) RenderSystem.getDevice()).caustica$getBackend() instanceof VulkanDevice device)) {
+        try {
+            if (!(((GpuDeviceAccessor) RenderSystem.getDevice()).caustica$getBackend() instanceof VulkanDevice device)) {
+                throw new IllegalStateException("DLSS-RR requires the Vulkan backend");
+            }
+            ensureInitialized(device);
+            if (!lib.hasQueryOptimalDlssd()) {
+                throw new IllegalStateException("ngxshim is missing ngxshim_query_optimal_dlssd (stale native shim)");
+            }
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment outWidth = arena.allocate(ValueLayout.JAVA_INT);
+                MemorySegment outHeight = arena.allocate(ValueLayout.JAVA_INT);
+                MemorySegment outSharpness = arena.allocate(ValueLayout.JAVA_FLOAT);
+                int rc = lib.queryOptimalDlssd(displayWidth, displayHeight, quality(), outWidth, outHeight, outSharpness);
+                if (NgxRuntime.ngxFailed(rc)) {
+                    throw new IllegalStateException("ngxshim_query_optimal_dlssd failed: 0x" + Integer.toHexString(rc));
+                }
+                int renderWidth = outWidth.get(ValueLayout.JAVA_INT, 0);
+                int renderHeight = outHeight.get(ValueLayout.JAVA_INT, 0);
+                if (renderWidth <= 0 || renderHeight <= 0) {
+                    throw new IllegalStateException("ngxshim_query_optimal_dlssd returned invalid render size "
+                            + renderWidth + "x" + renderHeight);
+                }
+                return new int[] { renderWidth, renderHeight };
+            }
+        } catch (Throwable t) {
+            fail("DLSS-RR optimal-size query failed; using native-resolution RT", t);
             return null;
-        }
-        ensureInitialized(device);
-        if (!lib.hasQueryOptimalDlssd()) {
-            throw new IllegalStateException("ngxshim is missing ngxshim_query_optimal_dlssd (stale native shim)");
-        }
-        try (Arena arena = Arena.ofConfined()) {
-            MemorySegment outWidth = arena.allocate(ValueLayout.JAVA_INT);
-            MemorySegment outHeight = arena.allocate(ValueLayout.JAVA_INT);
-            MemorySegment outSharpness = arena.allocate(ValueLayout.JAVA_FLOAT);
-            int rc = lib.queryOptimalDlssd(displayWidth, displayHeight, quality(), outWidth, outHeight, outSharpness);
-            if (NgxRuntime.ngxFailed(rc)) {
-                throw new IllegalStateException("ngxshim_query_optimal_dlssd failed: 0x" + Integer.toHexString(rc));
-            }
-            int renderWidth = outWidth.get(ValueLayout.JAVA_INT, 0);
-            int renderHeight = outHeight.get(ValueLayout.JAVA_INT, 0);
-            if (renderWidth <= 0 || renderHeight <= 0) {
-                throw new IllegalStateException(
-                        "ngxshim_query_optimal_dlssd returned invalid render size " + renderWidth + "x" + renderHeight);
-            }
-            return new int[] { renderWidth, renderHeight };
         }
     }
 
@@ -166,7 +195,7 @@ public final class RtDlssRr {
      * caller falls back to the non-RR path.
      */
     public boolean ensureFeature(long cmd, int renderWidth, int renderHeight, int displayWidth, int displayHeight) {
-        if (!enabled() || failed) {
+        if (!isOperational()) {
             return false;
         }
         if (!(((GpuDeviceAccessor) RenderSystem.getDevice()).caustica$getBackend() instanceof VulkanDevice device)) {
@@ -193,14 +222,13 @@ public final class RtDlssRr {
                 featureDisplayHeight = displayHeight;
                 featureQuality = quality;
                 featurePreset = preset;
-                resetHistory = true; // a fresh feature has no temporal history
+                requestHistoryReset(); // a fresh feature has no temporal history
                 CausticaMod.LOGGER.info("DLSS-RR feature created: {}x{} -> {}x{} (quality {}, preset {})",
                         renderWidth, renderHeight, displayWidth, displayHeight, quality, preset);
             }
             return true;
         } catch (Throwable t) {
-            failed = true;
-            CausticaMod.LOGGER.error("DLSS-RR setup failed; RT composite continues without it", t);
+            fail("DLSS-RR setup failed; RT composite continues without it", t);
             return false;
         }
     }
@@ -236,6 +264,8 @@ public final class RtDlssRr {
         }
         initialized = false;
         lib = null;
+        failed = false;
+        requestHistoryReset();
     }
 
     private void releaseFeature(VulkanDevice device) {
@@ -254,6 +284,19 @@ public final class RtDlssRr {
 
     private static boolean isNull(MemorySegment segment) {
         return segment == null || segment.equals(MemorySegment.NULL);
+    }
+
+    private void fail(String message, Throwable t) {
+        failed = true;
+        // Keep the handle alive until the queue is drained, but force an explicit retry to recreate it.
+        featureRenderWidth = -1;
+        featureRenderHeight = -1;
+        featureDisplayWidth = -1;
+        featureDisplayHeight = -1;
+        featureQuality = Integer.MIN_VALUE;
+        featurePreset = Integer.MIN_VALUE;
+        requestHistoryReset();
+        CausticaMod.LOGGER.error(message, t);
     }
 
     private static void putNgxLeftMultiplyMatrix(Matrix4fc m, MemorySegment dst) {

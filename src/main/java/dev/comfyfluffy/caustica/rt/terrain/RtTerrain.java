@@ -1479,9 +1479,16 @@ public final class RtTerrain {
 
     private void destroyPreparedSection(PreparedSection ps) {
         RtAccel.freeBlasScratch(List.of(ps.blas()));
-        SectionGeom g = new SectionGeom(ps.key(), ps.positions(), ps.indices(), ps.uvs(), ps.material(),
-                ps.blas().accel, ps.triBase(), ps.sx(), ps.sy(), ps.sz());
+        releaseBuildInputs(ps);
+        SectionGeom g = new SectionGeom(ps.key(), ps.uvs(), ps.material(), ps.blas().accel,
+                ps.triBase(), ps.sx(), ps.sy(), ps.sz());
         g.destroy();
+    }
+
+    /** Position/index data is consumed by the BLAS build only; hit shaders use the retained UV/material buffers. */
+    private static void releaseBuildInputs(PreparedSection ps) {
+        ps.indices().destroy();
+        ps.positions().destroy();
     }
 
     /** Pure-CPU worker result: tessellated mesh plus optional opacity micromap input for its cutout bucket. */
@@ -1611,8 +1618,11 @@ public final class RtTerrain {
         }
 
         for (PreparedSection ps : prepared) {
-            SectionGeom g = new SectionGeom(ps.key(), ps.positions(), ps.indices(), ps.uvs(), ps.material(),
-                    ps.blas().accel, ps.triBase(), ps.sx(), ps.sy(), ps.sz());
+            // applyBuildChanges runs only after the async build fence completes. The BLAS has consumed its
+            // geometry inputs by this point, and terrain hit shaders address only material + UV data.
+            releaseBuildInputs(ps);
+            SectionGeom g = new SectionGeom(ps.key(), ps.uvs(), ps.material(), ps.blas().accel,
+                    ps.triBase(), ps.sx(), ps.sy(), ps.sz());
             if (!desired.contains(ps.key())) {
                 // Left the window while its batched BLAS build was in flight (window sync keeps running
                 // during builds). Never published — retire the fresh, unreferenced geometry.
@@ -1782,8 +1792,8 @@ public final class RtTerrain {
 
     private void writeSectionEntry(SectionGeom g) {
         // idxAddr is deliberately not part of this table: lever B (per-triangle corner UVs) means no
-        // shader ever reads a terrain section's index buffer for shading; it's only needed for the BLAS
-        // build, which reads g.indices directly. Dropping it keeps this record a clean 32-byte / 2-sector
+        // shader ever reads a terrain section's index buffer for shading; it's only needed while preparing
+        // and building the BLAS. Dropping it keeps this record a clean 32-byte / 2-sector
         // fetch on the hottest per-hit load in the frame instead of the old 40-byte stride.
         long base = sectionTable.mapped + (long) g.slot * SECTION_ENTRY_BYTES;
         MemoryUtil.memPutLong(base, g.material.deviceAddress);
@@ -1891,8 +1901,9 @@ public final class RtTerrain {
             ctx.freeAsync(pending.op());
             RtAccel.freeBlasScratch(pending.blas());
             for (PreparedSection ps : pending.prepared()) {
-                SectionGeom g = new SectionGeom(ps.key(), ps.positions(), ps.indices(), ps.uvs(), ps.material(),
-                        ps.blas().accel, ps.triBase(), ps.sx(), ps.sy(), ps.sz());
+                releaseBuildInputs(ps);
+                SectionGeom g = new SectionGeom(ps.key(), ps.uvs(), ps.material(), ps.blas().accel,
+                        ps.triBase(), ps.sx(), ps.sy(), ps.sz());
                 g.destroy();
             }
             for (SectionGeom g : pending.removed()) {
@@ -1966,11 +1977,9 @@ public final class RtTerrain {
         return (int) (key >> 52);
     }
 
-    /** GPU residency for one section: geometry buffers + BLAS + world section origin. */
+    /** GPU residency for one section: shading buffers + BLAS + world section origin. */
     private static final class SectionGeom {
         final long key;
-        final RtBuffer positions;
-        final RtBuffer indices;
         final RtBuffer uvs;
         final RtBuffer material;
         final RtAccel blas;
@@ -1981,11 +1990,9 @@ public final class RtTerrain {
         int slot = -1;
         int instanceIndex = -1;
 
-        SectionGeom(long key, RtBuffer positions, RtBuffer indices, RtBuffer uvs, RtBuffer material,
-                    RtAccel blas, int[] triBase, int sx, int sy, int sz) {
+        SectionGeom(long key, RtBuffer uvs, RtBuffer material, RtAccel blas,
+                    int[] triBase, int sx, int sy, int sz) {
             this.key = key;
-            this.positions = positions;
-            this.indices = indices;
             this.uvs = uvs;
             this.material = material;
             this.blas = blas;
@@ -1999,8 +2006,6 @@ public final class RtTerrain {
             blas.destroy();
             material.destroy();
             uvs.destroy();
-            indices.destroy();
-            positions.destroy();
         }
     }
 

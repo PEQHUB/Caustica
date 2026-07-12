@@ -262,8 +262,11 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
         float3 ep2 = mul(entityO2w, HitTriangleVertexPosition(2));
         float entityLod = rayConeTextureLod(rayCone, texSizePx(entityTex[NonUniformResourceIndex(texSlot)]),
                 ep0, ep1, ep2, euv[e0], euv[e1], euv[e2]);
-        float blockEntityLod = rayConeTextureLod(rayCone, texSizePx(blockAtlas),
-                ep0, ep1, ep2, euv[e0], euv[e1], euv[e2]);
+        float blockEntityLod = 0.0;
+        if (pr.mat.z > 1.5 || pr.mat.w > 1.5) {
+            blockEntityLod = rayConeTextureLod(rayCone, texSizePx(blockAtlas),
+                    ep0, ep1, ep2, euv[e0], euv[e1], euv[e2]);
+        }
 
         float3 albedo = srgbToLinear(entityTex[NonUniformResourceIndex(texSlot)].SampleLevel(euvCoord, entityLod).rgb) * pr.tint.rgb;
         float rough = pr.mat.x;          // heuristic material default
@@ -321,6 +324,30 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
     // flip below and carried in the payload so raygen can set inWater from hit orientation instead of
     // toggling parity per crossing (a single missing/extra face no longer desyncs the rest of the path).
     bool entering = dot(WorldRayDirection(), n) < 0.0;
+
+    // Fluid capture guarantees water has no LabPBR maps. Resolve it before UV, position-fetch, texture,
+    // and ray-cone LOD work; the path tracer only consumes its geometric normal and biome tint.
+    bool plainWater = pr.tint.w > 0.5 && pr.tint.w < 1.5 && pr.mat.z <= 0.5 && pr.mat.w <= 0.5;
+    if (plainWater) {
+        float3 vdir = -WorldRayDirection();
+        if (dot(n, vdir) < 0.0) {
+            n = -n;
+        }
+        payload.albedo = tint;
+        payload.normal = n;
+        payload.hitT = RayTCurrent();
+        payload.motionPrev = float3(0.0, 0.0, 0.0);
+        float rough = pr.mat.x;
+        float metal = pr.mat.y;
+        payload.f0 = lerp(float3(0.04, 0.04, 0.04), tint, metal);
+        float ew = pr.normal.w;
+        float emission = ew >= 1.5 ? ew - 2.0 : ew;
+        payloadSetPacked(payload, MATERIAL_WATER, rough, metal, emission, 0.0);
+        if (entering) {
+            payload.flags |= PAYLOAD_WATER_ENTERING;
+        }
+        return;
+    }
 
     // Lever B: per-triangle corner UVs in primitive order. uvs[3*pid + k] is a contiguous,
     // directly-addressed load (no index buffer, no scattered vertex-UV gather), so it issues as soon as

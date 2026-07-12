@@ -254,7 +254,6 @@ public abstract class VulkanGpuSurfaceMixin {
 		if (rt.isHdrPresentActive()) {
 			VulkanCommandEncoder enc = (VulkanCommandEncoder) commandEncoder;
 			rt.presentHdr(enc, swapchainImage, this.swapchainWidth, this.swapchainHeight, acquireSem, presentSem);
-			caustica$presentGeneratedFramesHdr(enc, rt);
 			ci.cancel();
 			return;
 		}
@@ -296,30 +295,7 @@ public abstract class VulkanGpuSurfaceMixin {
 		RtFramePresenter.INSTANCE.prepareExtraFrames((VulkanCommandEncoder) commandEncoder, this.device,
 				this.swapchain, this.swapchainImages, this.presentSemaphores,
 				this.swapchainWidth, this.swapchainHeight,
-				srcView, srcImage, textureView.getWidth(0), textureView.getHeight(0), generatedCount, false);
-	}
-
-	/**
-	 * DLSS-FG on the HDR present path: same extra-present mechanism as {@link #caustica$presentGeneratedFrames},
-	 * but sourced from the HDR backbuffer ({@link RtComposite#hdrBackbufferView()}/{@code hdrBackbufferImage()})
-	 * since HDR frames never reach that TAIL inject (HEAD cancels {@code blitFromTexture} above). No-op if FG
-	 * isn't active or the HDR backbuffer isn't available (shouldn't happen right after a successful
-	 * {@code presentHdr} call, but mirrors the defensive {@code srcImage == 0L} check in the SDR path).
-	 */
-	@Unique
-	private void caustica$presentGeneratedFramesHdr(VulkanCommandEncoder enc, RtComposite rt) {
-		if (this.currentImageIndex < 0 || !RtFramePresenter.INSTANCE.isActive()) {
-			return;
-		}
-		long hdrView = rt.hdrBackbufferView();
-		long hdrImage = rt.hdrBackbufferImage();
-		if (hdrImage == 0L) {
-			return;
-		}
-		int generatedCount = dev.comfyfluffy.caustica.rt.pipeline.RtDlssFg.INSTANCE.effectiveMultiFrameCount();
-		RtFramePresenter.INSTANCE.prepareExtraFrames(enc, this.device, this.swapchain, this.swapchainImages,
-				this.presentSemaphores, this.swapchainWidth, this.swapchainHeight,
-				hdrView, hdrImage, this.swapchainWidth, this.swapchainHeight, generatedCount, true);
+				srcView, srcImage, textureView.getWidth(0), textureView.getHeight(0), generatedCount);
 	}
 
 	// Present the FG-generated frame(s) acquired/recorded at blitFromTexture TAIL — at present() HEAD, after

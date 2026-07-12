@@ -40,18 +40,14 @@ import java.nio.LongBuffer;
  * image(s) before MC presents the real one, giving display order generated-then-real.
  *
  * <p>The generated frame is {@link RtDlssFg}'s real DLSSG-interpolated output (via
- * {@link RtComposite#fgInterpolate}); when there's simply no captured RT frame this tick (menu/loading/
- * transition — routine) it falls back to duplicating the real frame for just that one frame (see
- * {@code interpFallbackDuplicate} in the present-rate log), but a genuine FG failure is fatal (see that
- * method's docs) rather than silently duplicating forever. Called from both present paths — the normal SDR
- * {@code blitFromTexture} TAIL, and (via {@code hdrBackbuffer=true}) explicitly from inside the HDR present
- * hook, since the HDR/PQ path cancels {@code blitFromTexture} at HEAD and never reaches the TAIL inject.
- * Gated by {@code caustica.rt.fg} (default off).
+ * {@link RtComposite#fgInterpolate}). Presentation is gated on a fresh SDR RT frame, valid Reflex state,
+ * and a positive driver-reported generated-frame count; paused/menu/HDR frames do not enter this path.
  */
 public final class RtFramePresenter {
     public static final RtFramePresenter INSTANCE = new RtFramePresenter();
 
-    private static final long ACQUIRE_TIMEOUT_NS = 5_000_000_000L;
+    // Generated frames are optional. Never let an unavailable extra swapchain image stall the real frame.
+    private static final long ACQUIRE_TIMEOUT_NS = 0L;
 
     private static final long LOG_INTERVAL_NS = 1_000_000_000L;
 
@@ -70,52 +66,54 @@ public final class RtFramePresenter {
     private int realFramesInWindow;
     private int generatedFramesInWindow;
     private int interpOkInWindow;
-    private int interpFallbackInWindow;
+    private int interpSkippedInWindow;
 
     private RtFramePresenter() {
     }
 
-    /** Whether FG extra-present should run this frame (enabled, available, in a world). */
+    /** Whether a fresh, supported SDR RT frame is available for interpolation this frame. */
     public boolean isActive() {
-        return !failed && RtDlssFg.enabled() && RtDlssFg.INSTANCE.isAvailable()
-                && Minecraft.getInstance().level != null;
+        Minecraft minecraft = Minecraft.getInstance();
+        return !failed && RtDlssFg.INSTANCE.isSdrReady()
+                && RtComposite.INSTANCE.hasCurrentFrameForFg()
+                && minecraft.level != null && !minecraft.isPaused();
     }
 
     /**
      * Acquire {@code generatedCount} extra swapchain images and record a Y-flipped blit of {@code srcImage}
      * (the final rendered frame, GENERAL layout) into each, using Minecraft's command encoder {@code enc} so
      * the work rides MC's next {@code submit()}. The presents happen later in {@link #flushPendingPresents}.
-     * Blits DLSSG's real interpolated output per generated frame, or a duplicate of the real frame when RT
-     * simply isn't producing frames this tick (routine). A genuine DLSSG failure latches FG off for the
-     * session — see {@link RtComposite#fgInterpolate}.
-     *
-     * @param hdrBackbuffer whether {@code backbufferView}/{@code srcImage} is the PQ HDR backbuffer
-     *     ({@link RtComposite#hdrBackbufferView()}, already UI-composited) rather than the SDR main target —
-     *     selects DLSSG's HDR backbuffer format/flag in {@link RtComposite#fgInterpolate}.
+     * Blits DLSSG's real interpolated SDR output per generated frame. A genuine DLSSG failure latches FG
+     * off for the session rather than silently duplicating frames.
      */
     public void prepareExtraFrames(VulkanCommandEncoder enc, VulkanDevice device, long swapchain,
             LongList swapchainImages, long[] presentSemaphores, int swapW, int swapH,
-            long backbufferView, long srcImage, int srcW, int srcH, int generatedCount, boolean hdrBackbuffer) {
+            long backbufferView, long srcImage, int srcW, int srcH, int generatedCount) {
         pendingCount = 0;
-        if (failed || swapchain == 0L || srcImage == 0L || generatedCount <= 0) {
+        if (failed || swapchain == 0L || !RtReflex.INSTANCE.isOperationalFor(swapchain)
+                || backbufferView == 0L || srcImage == 0L || srcW != swapW || srcH != swapH
+                || generatedCount <= 0) {
             return;
         }
         try {
-            ensureCapacity(device, swapchainImages.size() + 1, generatedCount);
-            for (int i = 0; i < generatedCount; i++) {
-                // null = no captured RT frame this tick (menu/loading/transition — routine, not a bug): fall
-                // back to duplicating the real frame for just this one frame. A genuine FG failure instead
-                // throws, caught below, which disables FG for the session.
+            int actualGeneratedCount = Math.min(generatedCount, Math.max(0, swapchainImages.size() - 1));
+            if (actualGeneratedCount <= 0) {
+                return;
+            }
+            ensureCapacity(device, swapchainImages.size() + 1, actualGeneratedCount);
+            for (int i = 0; i < actualGeneratedCount; i++) {
                 RtImage interp = RtComposite.INSTANCE.fgInterpolate(enc, backbufferView, srcImage,
-                        swapW, swapH, i + 1, generatedCount, hdrBackbuffer);
-                if (interp != null) {
-                    interpOkInWindow++;
-                } else {
-                    interpFallbackInWindow++;
+                        swapW, swapH, i + 1, actualGeneratedCount);
+                if (interp == null) {
+                    // Fresh-frame gating should make this rare, but a transition can invalidate RT state
+                    // between isActive() and this hook. Skip optional presents instead of duplicating a frame.
+                    interpSkippedInWindow++;
+                    return;
                 }
-                long blitSrc = interp != null ? interp.image : srcImage;
-                int copyW = Math.min(swapW, interp != null ? interp.width : srcW);
-                int copyH = Math.min(swapH, interp != null ? interp.height : srcH);
+                interpOkInWindow++;
+                long blitSrc = interp.image;
+                int copyW = Math.min(swapW, interp.width);
+                int copyH = Math.min(swapH, interp.height);
 
                 long acquireSem = acquireSemaphores[acquireCursor];
                 acquireCursor = (acquireCursor + 1) % acquireSemaphores.length;
@@ -197,15 +195,15 @@ public final class RtFramePresenter {
         double totalFps = (realFramesInWindow + generatedFramesInWindow) / seconds;
         CausticaMod.LOGGER.info(
                 "[FG present-rate] real={} gen={} realFps={} totalPresentFps={} configuredMultiFrameCount={} "
-                        + "interpOk={} interpFallbackDuplicate={}",
+                        + "interpOk={} interpSkipped={}",
                 realFramesInWindow, generatedFramesInWindow,
                 String.format("%.1f", realFps), String.format("%.1f", totalFps),
-                RtDlssFg.INSTANCE.effectiveMultiFrameCount(), interpOkInWindow, interpFallbackInWindow);
+                RtDlssFg.INSTANCE.effectiveMultiFrameCount(), interpOkInWindow, interpSkippedInWindow);
         logWindowStartNs = now;
         realFramesInWindow = 0;
         generatedFramesInWindow = 0;
         interpOkInWindow = 0;
-        interpFallbackInWindow = 0;
+        interpSkippedInWindow = 0;
     }
 
     private void recordBlit(VulkanCommandEncoder enc, long srcImage, long dstImage, int copyW, int copyH,
@@ -290,5 +288,6 @@ public final class RtFramePresenter {
         acquireSemaphores = new long[0];
         acquireCursor = 0;
         pendingCount = 0;
+        failed = false;
     }
 }

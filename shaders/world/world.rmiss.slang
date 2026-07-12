@@ -222,6 +222,20 @@ float3 stars(float3 dir, float starBrightness, float VdotS, float4 celestial) {
 [shader("miss")]
 void main(inout Payload payload) {
     WorldPush pc = ConstPtr<WorldPush>(pcAddr.worldPushAddr)[0];
+    // Debug views consume primary-hit guides rather than radiance. Their reflection/refraction probes
+    // only need hit-vs-miss state, so avoid the nested atmosphere integration for every debug miss.
+    if (pc.debugView != 0u) {
+        payload.albedo = float3(0.0, 0.0, 0.0);
+        payload.hitT = -1.0;
+        payload.normal = float3(0.0, 0.0, 0.0);
+        payload.motionPrev = float3(0.0, 0.0, 0.0);
+        payload.f0 = float3(0.0, 0.0, 0.0);
+        payload.flags = 0u;
+        payload.roughMetal = packHalf2(float2(1.0, 0.0));
+        payload.emissionSss = packHalf2(float2(0.0, 0.0));
+        payload.rayCone = 0u;
+        return;
+    }
     float3 dir = normalize(WorldRayDirection());
     float day = pc.sunDir.w;
     float3 sd = pc.sunDir.xyz;

@@ -91,6 +91,16 @@ public final class RtReflex {
         return sleepModeSwapchain;
     }
 
+    /** True only after Reflex pacing was successfully initialized for some live swapchain. */
+    public boolean isOperational() {
+        return enabled() && !failed && sleepModeSwapchain != 0L && timelineSemaphore != 0L;
+    }
+
+    /** True only when Reflex pacing belongs to the exact swapchain about to present. */
+    public boolean isOperationalFor(long swapchain) {
+        return isOperational() && swapchain == sleepModeSwapchain;
+    }
+
     /**
      * Apply (or refresh) the sleep-mode config on {@code swapchain}. Cheap no-op when already applied for
      * this exact swapchain handle with unchanged boost/interval config; safe to call every frame from the

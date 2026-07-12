@@ -8,6 +8,7 @@ import dev.comfyfluffy.caustica.CausticaMod;
 import dev.comfyfluffy.caustica.mixin.GpuDeviceAccessor;
 import dev.comfyfluffy.caustica.ngx.NgxLibrary;
 import dev.comfyfluffy.caustica.ngx.NgxRuntime;
+import dev.comfyfluffy.caustica.rt.RtReflex;
 
 import org.joml.Matrix4fc;
 import org.lwjgl.vulkan.VK10;
@@ -48,6 +49,15 @@ public final class RtDlssFg {
 
     public boolean isAvailable() {
         return available;
+    }
+
+    /**
+     * Whether the current session can safely produce SDR generated frames. The direct-NGX backend is
+     * deliberately disabled for HDR until it has a supported RGB10/PQ input and presentation path.
+     */
+    public boolean isSdrReady() {
+        return enabled() && !failed && !CausticaConfig.Rt.Hdr.enabled()
+                && RtReflex.INSTANCE.isOperational() && available && multiFrameCountMax > 0;
     }
 
     /** Driver-reported maximum multi-frame-generation count (1 = 2x only); 0 until probed. */
@@ -104,7 +114,7 @@ public final class RtDlssFg {
      * it into the supplied recording command buffer. Returns false (and disables itself) on failure.
      */
     public boolean ensureFeature(long cmd, int width, int height, int renderWidth, int renderHeight, int backbufferFormat) {
-        if (!enabled() || failed) {
+        if (!enabled() || failed || CausticaConfig.Rt.Hdr.enabled() || !RtReflex.INSTANCE.isOperational()) {
             return false;
         }
         if (!(((GpuDeviceAccessor) RenderSystem.getDevice()).caustica$getBackend() instanceof VulkanDevice device)) {
@@ -122,6 +132,9 @@ public final class RtDlssFg {
             }
             if (!available) {
                 throw new IllegalStateException("DLSS Frame Generation is not available on this system");
+            }
+            if (multiFrameCountMax <= 0) {
+                throw new IllegalStateException("DLSS Frame Generation reported no supported generated-frame count");
             }
             if (featureWidth != width || featureHeight != height
                     || featureRenderWidth != renderWidth || featureRenderHeight != renderHeight
@@ -231,6 +244,10 @@ public final class RtDlssFg {
         }
         initialized = false;
         lib = null;
+        failed = false;
+        probed = false;
+        available = false;
+        multiFrameCountMax = 0;
     }
 
     private void releaseFeature(VulkanDevice device) {

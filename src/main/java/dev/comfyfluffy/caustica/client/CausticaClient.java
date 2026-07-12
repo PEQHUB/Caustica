@@ -67,6 +67,7 @@ public final class CausticaClient implements ClientModInitializer {
 		// world-unique). Resource reloads do NOT fire this; that path is handled separately.
 		InvalidateRenderStateCallback.EVENT.register(() -> {
 			RtTerrain.requestFullClear();
+			RtComposite.INSTANCE.requestTemporalReset();
 			RtComposite.INSTANCE.resetFailureLatch(); // F3+A doubles as manual RT recovery after a latched failure
 		});
 
