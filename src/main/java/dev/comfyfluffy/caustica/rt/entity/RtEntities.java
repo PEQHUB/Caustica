@@ -1387,7 +1387,8 @@ public final class RtEntities {
                 && slot.updatesSinceBuild < refitRebuildInterval();
         if (canUpdate) {
             RtFrameStats.FRAME.count("refits", 1);
-            RtBuffer scratch = allocBuffer(ctx, slot.updateScratchSize, storage, false, label + " refit scratch");
+            RtBuffer scratch = allocBuffer(ctx, RtAccel.scratchBufferSize(ctx, slot.updateScratchSize), storage, false,
+                    label + " refit scratch");
             build.blas.add(RtAccel.refitUpdate(slot.accel, scratch, positions.deviceAddress, indices.deviceAddress, vertCount, idxCount, false,
                     label + " BLAS refit"));
             build.refitScratch.add(scratch);

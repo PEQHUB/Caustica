@@ -26,6 +26,7 @@ import org.lwjgl.vulkan.VkImageCreateInfo;
 import org.lwjgl.vulkan.VkImageMemoryBarrier;
 import org.lwjgl.vulkan.VkImageViewCreateInfo;
 import org.lwjgl.vulkan.VkPhysicalDevice;
+import org.lwjgl.vulkan.VkPhysicalDeviceAccelerationStructurePropertiesKHR;
 import org.lwjgl.vulkan.VkPhysicalDeviceProperties2;
 import org.lwjgl.vulkan.VkPhysicalDeviceRayTracingPipelinePropertiesKHR;
 import org.lwjgl.vulkan.VkSubmitInfo;
@@ -53,15 +54,17 @@ public final class RtContext {
     private final VulkanQueue graphicsQueue;
     private final int shaderGroupHandleSize;
     private final int shaderGroupBaseAlignment;
+    private final int accelerationStructureScratchAlignment;
     private long commandPool;
 
-    private RtContext(VulkanDevice device, long vma, int handleSize, int baseAlign) {
+    private RtContext(VulkanDevice device, long vma, int handleSize, int baseAlign, int scratchAlign) {
         this.device = device;
         this.vk = device.vkDevice();
         this.vma = vma;
         this.graphicsQueue = device.graphicsQueue();
         this.shaderGroupHandleSize = handleSize;
         this.shaderGroupBaseAlignment = baseAlign;
+        this.accelerationStructureScratchAlignment = scratchAlign;
     }
 
     /** The RT context for the current Vulkan device, or null if RT/Vulkan isn't available. */
@@ -106,10 +109,14 @@ public final class RtContext {
             // RT pipeline limits for SBT layout.
             VkPhysicalDeviceRayTracingPipelinePropertiesKHR rtProps = VkPhysicalDeviceRayTracingPipelinePropertiesKHR
                     .calloc(stack).sType(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_PROPERTIES_KHR);
+            VkPhysicalDeviceAccelerationStructurePropertiesKHR asProps =
+                    VkPhysicalDeviceAccelerationStructurePropertiesKHR.calloc(stack).sType$Default();
+            rtProps.pNext(asProps.address());
             VkPhysicalDeviceProperties2 props2 = VkPhysicalDeviceProperties2.calloc(stack).sType$Default().pNext(rtProps.address());
             VK12.vkGetPhysicalDeviceProperties2(phys, props2);
 
-            return new RtContext(device, pVma.get(0), rtProps.shaderGroupHandleSize(), rtProps.shaderGroupBaseAlignment());
+            return new RtContext(device, pVma.get(0), rtProps.shaderGroupHandleSize(), rtProps.shaderGroupBaseAlignment(),
+                    asProps.minAccelerationStructureScratchOffsetAlignment());
         }
     }
 
@@ -131,6 +138,10 @@ public final class RtContext {
 
     public int shaderGroupBaseAlignment() {
         return shaderGroupBaseAlignment;
+    }
+
+    public int accelerationStructureScratchAlignment() {
+        return accelerationStructureScratchAlignment;
     }
 
     /** Create a VMA buffer; {@code SHADER_DEVICE_ADDRESS} is always added so it has a device address. */
