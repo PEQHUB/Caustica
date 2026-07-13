@@ -59,6 +59,7 @@
 	"caustica.options.rt.hdrTonemap.tooltip": "How the HDR image is mapped to the PQ swapchain. BT.2390 EETF is the standards-based default; Caustica Rolloff preserves the original behavior.",
 	"caustica.options.rt.hdrTonemap.eetf": "BT.2390 EETF",
 	"caustica.options.rt.hdrTonemap.psychov": "PsychoV",
+	"caustica.options.rt.hdrTonemap.psychov23": "PsychoV23",
 	"caustica.options.rt.hdrTonemap.caustica": "Caustica Rolloff",
 
 	"caustica.options.rt.hdrPsychoHighlights": "PsychoV Highlights",

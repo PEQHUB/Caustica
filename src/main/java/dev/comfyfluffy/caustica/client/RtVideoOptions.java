@@ -381,6 +381,7 @@ public final class RtVideoOptions {
             new OptionInstance.Enum<>(List.of(
                     CausticaConfig.Rt.Hdr.TONEMAP_EETF,
                     CausticaConfig.Rt.Hdr.TONEMAP_PSYCHOV,
+                    CausticaConfig.Rt.Hdr.TONEMAP_PSYCHOV23,
                     CausticaConfig.Rt.Hdr.TONEMAP_CAUSTICA), Codec.STRING),
             setting.configuredValue(),
             setting::set);

@@ -122,7 +122,7 @@ public final class CausticaConfig {
                         + " (falls back to SDR if the surface doesn't advertise it). paper-white-nits / peak-nits\n"
                         + " drive the scene-HDR -> display mapping. tonemap-mode selects the HDR display map:\n"
                         + " eetf is the BT.2390 PQ electrical-electrical transfer function; caustica is the\n"
-                        + " original Caustica highlight rolloff; psychov is the perceptual PsychoV map.");
+                        + " original Caustica highlight rolloff; psychov and psychov23 are perceptual PsychoV maps.");
     }
 
     private static Path resolveConfigPath() {
@@ -1049,10 +1049,12 @@ public final class CausticaConfig {
             public static final String TONEMAP_EETF = "eetf";
             public static final String TONEMAP_CAUSTICA = "caustica";
             public static final String TONEMAP_PSYCHOV = "psychov";
+            public static final String TONEMAP_PSYCHOV23 = "psychov23";
 
             public static final int TONEMAP_ID_EETF = 0;
             public static final int TONEMAP_ID_CAUSTICA = 1;
             public static final int TONEMAP_ID_PSYCHOV = 2;
+            public static final int TONEMAP_ID_PSYCHOV23 = 3;
 
             public static final BooleanSetting ENABLED = bool("caustica.rt.hdr", "hdr.enabled", false);
             public static final StringSetting TONEMAP_MODE =
@@ -1119,6 +1121,7 @@ public final class CausticaConfig {
                 return switch (TONEMAP_MODE.get()) {
                     case TONEMAP_CAUSTICA -> TONEMAP_ID_CAUSTICA;
                     case TONEMAP_PSYCHOV -> TONEMAP_ID_PSYCHOV;
+                    case TONEMAP_PSYCHOV23 -> TONEMAP_ID_PSYCHOV23;
                     default -> TONEMAP_ID_EETF;
                 };
             }
@@ -1136,6 +1139,10 @@ public final class CausticaConfig {
                     if (TONEMAP_PSYCHOV.equals(normalized) || "psycho".equals(normalized)
                             || "psychovisual".equals(normalized)) {
                         return TONEMAP_PSYCHOV;
+                    }
+                    if (TONEMAP_PSYCHOV23.equals(normalized) || "psycho-v23".equals(normalized)
+                            || "psychov-23".equals(normalized) || "psycho-visual-23".equals(normalized)) {
+                        return TONEMAP_PSYCHOV23;
                     }
                     // Common typo for the BT.2390 display map. PQ itself defines an EOTF; this mode is an EETF.
                     if (TONEMAP_EETF.equals(normalized) || "eotf".equals(normalized)

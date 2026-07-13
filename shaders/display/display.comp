@@ -9,7 +9,7 @@ layout(binding = 3, set = 0, rgba16f) uniform writeonly image2D hdrImage; // PQ-
 
 layout(push_constant) uniform Push {
     int hdrEnabled;       // 0 = SDR only, 1 = also write the PQ HDR image
-    int hdrTonemapMode;   // 0 = BT.2390 EETF, 1 = original Caustica rolloff, 2 = PsychoV
+    int hdrTonemapMode;   // 0 = BT.2390 EETF, 1 = Caustica rolloff, 2 = PsychoV, 3 = PsychoV23
     int sdrTonemapMode;   // 0 = PBR Neutral, 1 = Reinhard, 2 = ACES, 3 = AgX, 4+ = filmic/PsychoV
     float paperWhiteNits; // absolute nits SDR paper white maps to
     float headroom;       // highlight headroom above paper white (peakNits / paperWhiteNits, >= 1)
@@ -42,6 +42,7 @@ layout(push_constant) uniform Push {
 const int HDR_TONEMAP_EETF = 0;
 const int HDR_TONEMAP_CAUSTICA = 1;
 const int HDR_TONEMAP_PSYCHOV = 2;
+const int HDR_TONEMAP_PSYCHOV23 = 3;
 
 const int SDR_TONEMAP_PBR_NEUTRAL = 0;
 const int SDR_TONEMAP_REINHARD = 1;
@@ -965,7 +966,7 @@ vec3 psycho23CopySign(vec3 magnitude, vec3 source) {
             source.z < 0.0 ? -abs(magnitude.z) : abs(magnitude.z));
 }
 
-vec3 tonemapSdrPsychoV23(vec3 color) {
+vec3 psychoV23Linear(vec3 color, float peakValue) {
     const float highlights = 1.0;
     const float shadows = 1.0;
     const float contrast = 1.0;
@@ -974,7 +975,7 @@ vec3 tonemapSdrPsychoV23(vec3 color) {
     const float compression = 1.0;
 
     vec3 lmsIn = psycho23LMSFromBT709(color);
-    vec3 lmsPeak = psycho23LMSFromBT709(vec3(PSYCHO23_PEAK));
+    vec3 lmsPeak = psycho23LMSFromBT709(vec3(peakValue));
     vec3 adaptiveStateLms = psycho23LMSFromBT709(vec3(0.18));
     vec3 desiredBackgroundStateLms = adaptiveStateLms;
     vec3 anchorIn = max(adaptiveStateLms, vec3(PSYCHO23_EPSILON));
@@ -1018,7 +1019,18 @@ vec3 tonemapSdrPsychoV23(vec3 color) {
 
     vec3 outputLms = psycho23UnweighLMS(
             psycho23FromAdaptiveRelativeWeightedLMS(displayScaledRelativeWeighted, adaptiveStateLms));
-    return clamp(psycho23BT709FromLMS(outputLms), 0.0, 1.0);
+    return psycho23BT709FromLMS(outputLms);
+}
+
+vec3 tonemapSdrPsychoV23(vec3 color) {
+    return clamp(psychoV23Linear(color, PSYCHO23_PEAK), 0.0, 1.0);
+}
+
+vec3 tonemapHdrPsychoV23(vec3 hdr, float exposure) {
+    vec3 paperReferred709 = max(hdr * exposure, vec3(0.0));
+    vec3 mapped709 = max(psychoV23Linear(paperReferred709, max(pc.headroom, 1.0)), vec3(0.0));
+    vec3 mapped2020 = max(BT709_TO_BT2020 * mapped709, vec3(0.0));
+    return pqEncodeNits(mapped2020 * pc.paperWhiteNits);
 }
 
 vec3 tonemapSdr(vec3 hdr, float exposure) {
@@ -1054,6 +1066,9 @@ vec3 tonemapSdr(vec3 hdr, float exposure) {
 vec3 tonemapHdr(vec3 hdr, float exposure) {
     if (pc.hdrTonemapMode == HDR_TONEMAP_CAUSTICA) {
         return tonemapHdrCaustica(hdr, exposure);
+    }
+    if (pc.hdrTonemapMode == HDR_TONEMAP_PSYCHOV23) {
+        return tonemapHdrPsychoV23(hdr, exposure);
     }
     if (pc.hdrTonemapMode == HDR_TONEMAP_PSYCHOV) {
         return tonemapHdrPsychoV(hdr, exposure);
