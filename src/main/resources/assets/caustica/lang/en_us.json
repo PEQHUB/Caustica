@@ -29,6 +29,7 @@
 	"caustica.options.rt.sdrTonemap.uncharted2": "Uncharted 2",
 	"caustica.options.rt.sdrTonemap.gt": "GT",
 	"caustica.options.rt.sdrTonemap.psychov": "PsychoV",
+	"caustica.options.rt.sdrTonemap.psychov23": "PsychoV23",
 
 	"caustica.options.rt.spp": "Samples Per Pixel",
 	"caustica.options.rt.spp.tooltip": "Path-tracing samples taken per pixel each frame. Higher is cleaner but more demanding.",
@@ -85,7 +86,7 @@
 	"caustica.options.rt.dlssQuality.5": "DLAA",
 
 	"caustica.options.rt.debugView": "Debug View",
-	"caustica.options.rt.debugView.tooltip": "Visualize an intermediate ray-tracing buffer instead of the final image.",
+	"caustica.options.rt.debugView.tooltip": "Visualize an intermediate ray-tracing buffer instead of the final image. Tonemapper Comparison shows the selected SDR mapper on the left and PsychoV23 on the right.",
 	"caustica.options.rt.debugView.0": "Off",
 	"caustica.options.rt.debugView.1": "Normals",
 	"caustica.options.rt.debugView.2": "Albedo",
@@ -94,6 +95,7 @@
 	"caustica.options.rt.debugView.5": "Motion",
 	"caustica.options.rt.debugView.6": "Specular",
 	"caustica.options.rt.debugView.7": "Specular Motion",
+	"caustica.options.rt.debugView.8": "Tonemapper Comparison",
 	"caustica.options.rt.tonemapping": "Tone Mapping...",
 	"caustica.options.rt.tonemapping.tooltip": "Open SDR and HDR tone-mapping controls.",
 	"caustica.options.rt.tonemapping.title": "Tone Mapping",

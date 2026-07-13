@@ -65,5 +65,6 @@
 	"caustica.options.rt.debugView.4": "Шероховатость",
 	"caustica.options.rt.debugView.5": "Движение",
 	"caustica.options.rt.debugView.6": "Зеркальность",
-	"caustica.options.rt.debugView.7": "Зеркальное движение"
+	"caustica.options.rt.debugView.7": "Зеркальное движение",
+	"caustica.options.rt.debugView.8": "Сравнение тонмапперов"
 }

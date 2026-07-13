@@ -65,5 +65,6 @@
 	"caustica.options.rt.debugView.4": "Rugosità",
 	"caustica.options.rt.debugView.5": "Movimento",
 	"caustica.options.rt.debugView.6": "Speculare",
-	"caustica.options.rt.debugView.7": "Movimento speculare"
+	"caustica.options.rt.debugView.7": "Movimento speculare",
+	"caustica.options.rt.debugView.8": "Confronto tonemapper"
 }

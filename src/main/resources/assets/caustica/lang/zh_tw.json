@@ -65,5 +65,6 @@
 	"caustica.options.rt.debugView.4": "粗糙度",
 	"caustica.options.rt.debugView.5": "運動",
 	"caustica.options.rt.debugView.6": "鏡面反射",
-	"caustica.options.rt.debugView.7": "鏡面運動"
+	"caustica.options.rt.debugView.7": "鏡面運動",
+	"caustica.options.rt.debugView.8": "色調映射器比較"
 }

@@ -65,5 +65,6 @@
 	"caustica.options.rt.debugView.4": "粗さ",
 	"caustica.options.rt.debugView.5": "モーション",
 	"caustica.options.rt.debugView.6": "スペキュラー",
-	"caustica.options.rt.debugView.7": "スペキュラーモーション"
+	"caustica.options.rt.debugView.7": "スペキュラーモーション",
+	"caustica.options.rt.debugView.8": "トーンマッパー比較"
 }

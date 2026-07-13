@@ -33,7 +33,7 @@ import static dev.comfyfluffy.caustica.rt.RtContext.check;
 public final class RtDisplayPipeline {
     private static final String SHADER_DIR = "/caustica/rt/";
     /** Keep this below Vulkan's 128-byte minimum push-constant guarantee. */
-    private static final int PUSH_BYTES = 96;
+    private static final int PUSH_BYTES = 100;
 
     private final RtContext ctx;
     private final long descriptorSetLayout;
@@ -173,6 +173,7 @@ public final class RtDisplayPipeline {
             for (int i = 0; i < 8; i++) {
                 push.putFloat(64 + i * Float.BYTES, CausticaConfig.Rt.Sdr.tonemapParam(i));
             }
+            push.putInt(96, CausticaConfig.Rt.Composite.DEBUG_VIEW.value());
             VK10.vkCmdPushConstants(cmd, pipelineLayout, VK10.VK_SHADER_STAGE_COMPUTE_BIT, 0, push);
             VK10.vkCmdDispatch(cmd, (width + 15) / 16, (height + 15) / 16, 1);
         }

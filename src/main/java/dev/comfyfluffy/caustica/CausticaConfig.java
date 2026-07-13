@@ -115,8 +115,8 @@ public final class CausticaConfig {
         FILE.setComment("sdr",
                 " SDR display mapping for the vanilla main target. tonemap-mode defaults to agx to preserve\n"
                         + " Caustica's existing SDR look. Other modes are pbr-neutral, reinhard, aces, lottes,\n"
-                        + " frostbite, uncharted2, gt, and psychov. Nested tables hold per-tonemapper tuning\n"
-                        + " controls; only the selected mode's controls are pushed to the display shader.");
+                        + " frostbite, uncharted2, gt, psychov, and the experimental psychov23. Nested tables hold\n"
+                        + " per-tonemapper tuning controls; only the selected mode's controls are pushed to the display shader.");
         FILE.setComment("hdr",
                 " HDR display output (ST.2084/PQ). When enabled the swapchain is created in PQ automatically\n"
                         + " (falls back to SDR if the surface doesn't advertise it). paper-white-nits / peak-nits\n"
@@ -607,6 +607,7 @@ public final class CausticaConfig {
         }
 
         public static final class Composite {
+            public static final int DEBUG_VIEW_TONEMAP_COMPARISON = 8;
             public static final IntSetting DEBUG_VIEW = intValue("caustica.rt.debugView", "composite.debug-view", 0);
             public static final IntSetting SPP = intAtLeast("caustica.rt.spp", "composite.spp", 1, 1);
             public static final IntSetting MAX_BOUNCES =
@@ -859,6 +860,7 @@ public final class CausticaConfig {
             public static final String TONEMAP_UNCHARTED2 = "uncharted2";
             public static final String TONEMAP_GT = "gt";
             public static final String TONEMAP_PSYCHOV = "psychov";
+            public static final String TONEMAP_PSYCHOV23 = "psychov23";
 
             public static final int TONEMAP_ID_PBR_NEUTRAL = 0;
             public static final int TONEMAP_ID_REINHARD = 1;
@@ -869,6 +871,7 @@ public final class CausticaConfig {
             public static final int TONEMAP_ID_UNCHARTED2 = 6;
             public static final int TONEMAP_ID_GT = 7;
             public static final int TONEMAP_ID_PSYCHOV = 8;
+            public static final int TONEMAP_ID_PSYCHOV23 = 9;
 
             public static final StringSetting TONEMAP_MODE =
                     string("caustica.rt.sdr.tonemapMode", "sdr.tonemap-mode", TONEMAP_AGX, Sdr::sanitizeTonemapMode);
@@ -938,6 +941,7 @@ public final class CausticaConfig {
                     case TONEMAP_UNCHARTED2 -> TONEMAP_ID_UNCHARTED2;
                     case TONEMAP_GT -> TONEMAP_ID_GT;
                     case TONEMAP_PSYCHOV -> TONEMAP_ID_PSYCHOV;
+                    case TONEMAP_PSYCHOV23 -> TONEMAP_ID_PSYCHOV23;
                     default -> TONEMAP_ID_AGX;
                 };
             }
@@ -983,6 +987,7 @@ public final class CausticaConfig {
                         default -> 0.0f;
                     };
                     case TONEMAP_PSYCHOV -> 0.0f;
+                    case TONEMAP_PSYCHOV23 -> 0.0f;
                     default -> switch (index) {
                         case 0 -> AGX_CONTRAST.value();
                         case 1 -> AGX_SATURATION.value();
@@ -1023,6 +1028,10 @@ public final class CausticaConfig {
                     if (TONEMAP_PSYCHOV.equals(normalized) || "psycho".equals(normalized)
                             || "psychovisual".equals(normalized) || "psycho-visual".equals(normalized)) {
                         return TONEMAP_PSYCHOV;
+                    }
+                    if (TONEMAP_PSYCHOV23.equals(normalized) || "psycho-v23".equals(normalized)
+                            || "psychov-23".equals(normalized) || "psycho-visual-23".equals(normalized)) {
+                        return TONEMAP_PSYCHOV23;
                     }
                 }
                 return TONEMAP_AGX;

@@ -65,5 +65,6 @@
 	"caustica.options.rt.debugView.4": "Rauheit",
 	"caustica.options.rt.debugView.5": "Bewegung",
 	"caustica.options.rt.debugView.6": "Spiegelnd",
-	"caustica.options.rt.debugView.7": "Spiegelnde Bewegung"
+	"caustica.options.rt.debugView.7": "Spiegelnde Bewegung",
+	"caustica.options.rt.debugView.8": "Tonemapper-Vergleich"
 }

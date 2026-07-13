@@ -23,6 +23,9 @@ import net.minecraft.network.chat.Component;
  */
 public final class RtVideoOptions {
     private static final List<Integer> DLSS_QUALITY_ORDER = List.of(3, 0, 1, 2, 5);
+     private static final List<Integer> DEBUG_VIEW_ORDER = List.of(
+             0, 1, 2, 3, 4, 5, 6, 7,
+             CausticaConfig.Rt.Composite.DEBUG_VIEW_TONEMAP_COMPARISON);
 
     private RtVideoOptions() {
     }
@@ -296,7 +299,8 @@ public final class RtVideoOptions {
                     CausticaConfig.Rt.Sdr.TONEMAP_FROSTBITE,
                     CausticaConfig.Rt.Sdr.TONEMAP_UNCHARTED2,
                     CausticaConfig.Rt.Sdr.TONEMAP_GT,
-                    CausticaConfig.Rt.Sdr.TONEMAP_PSYCHOV), Codec.STRING),
+                    CausticaConfig.Rt.Sdr.TONEMAP_PSYCHOV,
+                    CausticaConfig.Rt.Sdr.TONEMAP_PSYCHOV23), Codec.STRING),
             setting.configuredValue(),
             setting::set);
     }

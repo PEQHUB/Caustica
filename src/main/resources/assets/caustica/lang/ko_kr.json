@@ -65,5 +65,6 @@
 	"caustica.options.rt.debugView.4": "거칠기",
 	"caustica.options.rt.debugView.5": "모션",
 	"caustica.options.rt.debugView.6": "스페큘러",
-	"caustica.options.rt.debugView.7": "스페큘러 모션"
+	"caustica.options.rt.debugView.7": "스페큘러 모션",
+	"caustica.options.rt.debugView.8": "톤 매퍼 비교"
 }

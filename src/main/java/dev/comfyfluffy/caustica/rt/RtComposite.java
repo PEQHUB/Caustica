@@ -810,13 +810,15 @@ public final class RtComposite {
             // RR drives the upscale: trace + jitter at render res, DLSS-RR denoises+upscales to display.
             // Jitter is suppressed for the no-RR reference and for the debug guide views (raw inspection).
             int debugView = debugView();
+            int worldDebugView = debugView == CausticaConfig.Rt.Composite.DEBUG_VIEW_TONEMAP_COMPARISON
+                    ? 0 : debugView;
             if (lastDebugView != Integer.MIN_VALUE && debugView != lastDebugView) {
                 fgReset = true;
                 rrProducedPreviousFrame = false;
                 RtDlssRr.INSTANCE.requestHistoryReset();
             }
             lastDebugView = debugView;
-            boolean rrPath = renderSizeRrEnabled && RtDlssRr.INSTANCE.isOperational() && debugView == 0;
+            boolean rrPath = renderSizeRrEnabled && RtDlssRr.INSTANCE.isOperational() && worldDebugView == 0;
             if (rrPath && !rrProducedPreviousFrame) {
                 RtDlssRr.INSTANCE.requestHistoryReset();
             }
@@ -906,7 +908,7 @@ public final class RtComposite {
                     new Float3((float) (camX - terrain.blockX), (float) (camY - terrain.blockY),
                             (float) (camZ - terrain.blockZ)),
                     terrain.tableAddress(),
-                    debugView,
+                    worldDebugView,
                     (int) frameCounter,
                     mvPushMatrix,
                     new Float3(mvCamDeltaX, mvCamDeltaY, mvCamDeltaZ),
