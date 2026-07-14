@@ -10,6 +10,7 @@
 #include "sl_version.h"
 
 #include "streamline_bridge.h"
+#include "streamline_bridge_resources.h"
 
 int main() {
     static_assert(sizeof(slbridge_abi_info) == 36);
@@ -32,6 +33,17 @@ int main() {
     static_assert(sizeof(slbridge_dlssg_options) == 72);
     static_assert(sizeof(slbridge_dlssg_state) == 48);
     static_assert(sizeof(slbridge_reflex_options) == 8);
+
+    slbridge_resource_desc rrTexture{};
+    rrTexture.image = 0x1000;
+    rrTexture.view = 0x2000;
+    rrTexture.memory = 0;
+    rrTexture.width = 1920;
+    rrTexture.height = 1080;
+    rrTexture.valid = 1;
+    if (!slbridge::detail::isCompleteDlssdVulkanTexture(rrTexture)) {
+        return 2;
+    }
     static_assert(sizeof(slbridge_reflex_state) == 88);
     static_assert(static_cast<uint32_t>(sl::PCLMarker::eSimulationStart) == SLBRIDGE_PCL_SIMULATION_START);
     static_assert(static_cast<uint32_t>(sl::PCLMarker::eSimulationEnd) == SLBRIDGE_PCL_SIMULATION_END);

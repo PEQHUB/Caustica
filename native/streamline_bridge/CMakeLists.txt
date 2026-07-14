@@ -42,3 +42,12 @@ target_include_directories(streamlinebridge_abi_test PRIVATE
     "${VULKAN_SDK}/Include")
 target_compile_definitions(streamlinebridge_abi_test PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
 add_test(NAME streamlinebridge_abi_test COMMAND streamlinebridge_abi_test)
+
+add_executable(streamlinebridge_production_init_test streamline_bridge_production_init_test.cpp)
+target_include_directories(streamlinebridge_production_init_test PRIVATE
+    "${STREAMLINE_SDK}/include"
+    "${VULKAN_SDK}/Include")
+target_compile_definitions(streamlinebridge_production_init_test PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_link_libraries(streamlinebridge_production_init_test PRIVATE streamlinebridge)
+set_target_properties(streamlinebridge_production_init_test PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${STREAMLINE_BRIDGE_OUTPUT_DIR}")

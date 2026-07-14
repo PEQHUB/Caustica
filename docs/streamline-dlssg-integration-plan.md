@@ -27,7 +27,7 @@ The implementation must never acquire, render, or present generated swapchain im
    encode Streamline C++ struct sizes or offsets.
 9. Streamline exclusively owns Ray Reconstruction, DLSS-G, and the Reflex/PCL integration. Caustica never
    initializes a second direct-NGX client in the same process or device lifetime.
-10. Production mode verifies NVIDIA signatures and requires a valid application ID before initialization.
+10. Production mode verifies NVIDIA signatures, uses the embedded Project ID, and treats a numeric application ID as optional metadata.
 
 ## Ownership model
 

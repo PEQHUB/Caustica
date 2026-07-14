@@ -63,9 +63,12 @@ dependencies {
 	// ModConfigSpec is built on.
 	include implementation("com.electronwill.night-config:core:3.8.3")
 	include implementation("com.electronwill.night-config:toml:3.8.3")
+	testImplementation "org.junit.jupiter:junit-jupiter:5.11.4"
+	testRuntimeOnly "org.junit.platform:junit-platform-launcher:1.11.4"
 }
 
-def streamlineVariant = (findProperty("streamlineVariant") ?: "development")
+// Production is the normal artifact. Development plugins remain an explicit diagnostics-only build.
+def streamlineVariant = (findProperty("streamlineVariant") ?: "production")
 		.toString().toLowerCase(java.util.Locale.ROOT)
 if (!(streamlineVariant in ["development", "production"])) {
 	throw new GradleException("Unknown Streamline variant '${streamlineVariant}'. Expected 'development' or 'production'.")
@@ -241,25 +244,85 @@ def streamlineSdkVendorRoot = { File sdkRoot ->
 	new File(sdkRoot, streamlineVariant == "development" ? "bin/x64/development" : "bin/x64")
 }
 
+def streamlineBridgeSourceDir = file("native/streamline_bridge")
+def streamlineBridgeBuildDir = file("native/streamline_bridge/build")
+def streamlineBridgeCmakeConfig = streamlineBridgeConfig.capitalize()
+def streamlineBridgeOutput = new File(layout.buildDirectory.get().asFile,
+		"native/streamline_bridge/${streamlineBridgeConfig}/streamlinebridge.dll")
+def streamlineBridgeInitTestOutput = new File(layout.buildDirectory.get().asFile,
+		"native/streamline_bridge/${streamlineBridgeConfig}/streamlinebridge_production_init_test.exe")
+def vulkanSdkEnv = providers.environmentVariable("VULKAN_SDK")
+
+def configureStreamlineBridge = tasks.register("configureStreamlineBridge", Exec) {
+	group = "build"
+	description = "Configures the Windows x64 Streamline bridge."
+	onlyIf { streamlinePlatform != null }
+	inputs.files(fileTree(streamlineBridgeSourceDir) { include "CMakeLists.txt", "*.h" })
+	inputs.property("streamlineSdk", streamlineSdkEnv.orElse(""))
+	inputs.property("vulkanSdk", vulkanSdkEnv.orElse(""))
+	outputs.file(new File(streamlineBridgeBuildDir, "CMakeCache.txt"))
+	doFirst {
+		def sdkRoot = streamlineSdkRootProvider.orNull
+		def vulkanRoot = vulkanSdkEnv.orNull
+		if (sdkRoot == null) {
+			throw new GradleException("STREAMLINE_SDK environment variable is not set.")
+		}
+		if (!vulkanRoot) {
+			throw new GradleException("VULKAN_SDK environment variable is not set.")
+		}
+		commandLine "cmake", "-S", streamlineBridgeSourceDir.absolutePath,
+				"-B", streamlineBridgeBuildDir.absolutePath, "-A", "x64",
+				"-DSTREAMLINE_SDK=${sdkRoot.absolutePath}", "-DVULKAN_SDK=${file(vulkanRoot).absolutePath}"
+	}
+}
+
+def buildStreamlineBridge = tasks.register("buildStreamlineBridge", Exec) {
+	group = "build"
+	description = "Builds the Windows x64 Streamline bridge."
+	onlyIf { streamlinePlatform != null }
+	dependsOn(configureStreamlineBridge)
+	inputs.files(fileTree(streamlineBridgeSourceDir) { include "*.cpp", "*.h", "CMakeLists.txt" })
+	outputs.file(streamlineBridgeOutput)
+	doFirst {
+		commandLine "cmake", "--build", streamlineBridgeBuildDir.absolutePath,
+				"--config", streamlineBridgeCmakeConfig, "--parallel"
+	}
+}
+
+def testStreamlineBridge = tasks.register("testStreamlineBridge", Exec) {
+	group = "verification"
+	description = "Runs the native Streamline bridge ABI tests."
+	onlyIf { streamlinePlatform != null }
+	dependsOn(buildStreamlineBridge)
+	commandLine "ctest", "--test-dir", streamlineBridgeBuildDir.absolutePath,
+			"-C", streamlineBridgeCmakeConfig, "--output-on-failure"
+}
+
+def testPackagedStreamlineBridge = tasks.register("testPackagedStreamlineBridge", Exec) {
+	group = "verification"
+	description = "Initializes the exact packaged production Streamline directory."
+	onlyIf { streamlinePlatform != null && streamlineVariant == "production" }
+	dependsOn("bundleStreamlineNatives")
+	doFirst {
+		def packagedDirectory = new File(streamlineNativeGenRoot.get().asFile,
+				"caustica/natives/windows-x64")
+		if (!streamlineBridgeInitTestOutput.isFile()) {
+			throw new GradleException("Missing production initialization test: ${streamlineBridgeInitTestOutput}")
+		}
+		commandLine streamlineBridgeInitTestOutput.absolutePath,
+				packagedDirectory.absolutePath,
+				new File(layout.buildDirectory.get().asFile,
+						"test-results/streamline-production-init").absolutePath
+	}
+}
+
 def verifyStreamlineProductionInputs = tasks.register("verifyStreamlineProductionInputs") {
 	group = "verification"
-	description = "Verifies the production Streamline SDK variant, application ID, and Authenticode signatures."
+	description = "Verifies the production Streamline SDK variant and Authenticode signatures."
 	onlyIf { streamlineVariant == "production" && streamlinePlatform != null }
 	doLast {
 		if (streamlinePlatform == null) {
 			throw new GradleException("Streamline production artifacts are Windows x64 only.")
-		}
-		def applicationId = System.getenv("NVIDIA_APPLICATION_ID")?.trim()
-		if (!applicationId) {
-			throw new GradleException("NVIDIA_APPLICATION_ID is required for Streamline production artifacts.")
-		}
-		try {
-			def parsedApplicationId = Long.parseLong(applicationId)
-			if (parsedApplicationId <= 0L || parsedApplicationId > 0xFFFFFFFFL) {
-				throw new NumberFormatException("out of uint32 range")
-			}
-		} catch (NumberFormatException exception) {
-			throw new GradleException("NVIDIA_APPLICATION_ID must be an unsigned non-zero 32-bit integer.", exception)
 		}
 		def sdkRoot = streamlineSdkRootProvider.orNull
 		if (sdkRoot == null) {
@@ -297,12 +360,12 @@ def bundleStreamlineNatives = tasks.register("bundleStreamlineNatives") {
 		inputs.files(fileTree(streamlineSdkVendorRoot(sdkForInputs)) {
 			include streamlineVendorNames
 		}).withPropertyName("streamlineSdk.${streamlineVariant}")
-		inputs.file(new File(layout.buildDirectory.get().asFile, "native/streamline_bridge/${streamlineBridgeConfig}/streamlinebridge.dll"))
+		inputs.file(streamlineBridgeOutput)
 			.withPropertyName("streamlineBridge")
 	}
 	outputs.dir(streamlineNativeGenRoot)
 	outputs.upToDateWhen { false }
-	dependsOn(verifyStreamlineProductionInputs)
+	dependsOn(verifyStreamlineProductionInputs, buildStreamlineBridge)
 
 	doLast {
 		delete(streamlineNativeGenRoot)
@@ -314,8 +377,7 @@ def bundleStreamlineNatives = tasks.register("bundleStreamlineNatives") {
 			throw new GradleException("STREAMLINE_SDK environment variable is not set.")
 		}
 		def vendorRoot = streamlineSdkVendorRoot(sdkRoot)
-		def bridge = new File(layout.buildDirectory.get().asFile,
-				"native/streamline_bridge/${streamlineBridgeConfig}/streamlinebridge.dll")
+		def bridge = streamlineBridgeOutput
 		def missing = []
 		if (!bridge.isFile()) {
 			missing << "${bridge} (build native/streamline_bridge first)"
@@ -343,6 +405,14 @@ def bundleStreamlineNatives = tasks.register("bundleStreamlineNatives") {
 }
 
 sourceSets.main.resources.srcDir(files(streamlineNativeGenRoot).builtBy(bundleStreamlineNatives))
+
+tasks.withType(Test).configureEach {
+	useJUnitPlatform()
+}
+
+tasks.named("check").configure {
+	dependsOn(testStreamlineBridge, testPackagedStreamlineBridge)
+}
 
 tasks.withType(JavaCompile).configureEach {
 	it.options.release = 25

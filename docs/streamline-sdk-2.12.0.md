@@ -7,26 +7,40 @@ Caustica's DLSS Frame Generation path is pinned to NVIDIA Streamline SDK 2.12.0.
 - Official manual-hooking guide: <https://github.com/NVIDIA-RTX/Streamline/blob/v2.12.0/docs/ProgrammingGuideManualHooking.md>
 
 The zip is an external build input. Extract it and set `STREAMLINE_SDK` to the
-extraction directory. Build the bridge before assembling a Windows x64 jar:
+extraction directory. `VULKAN_SDK` must point at a Vulkan SDK installation.
+The Gradle build configures, builds, and tests the native bridge as part of the
+normal task graph:
 
 ```powershell
-cmake -S native/streamline_bridge -B native/streamline_bridge/build -G "Visual Studio 17 2022" -A x64 `
-  -DSTREAMLINE_SDK="$env:STREAMLINE_SDK" -DVULKAN_SDK="$env:VULKAN_SDK"
-cmake --build native/streamline_bridge/build --config Release --target streamlinebridge streamlinebridge_abi_test
-ctest --test-dir native/streamline_bridge/build -C Release --output-on-failure
+$env:STREAMLINE_SDK = 'C:\path\to\streamline-sdk-2.12.0'
+$env:VULKAN_SDK = 'C:\VulkanSDK\1.4.341.1'
+./gradlew.bat check
 ```
 
-Development packaging is the default and uses the SDK's unsigned/watermarked
-`bin/x64/development` binaries. Production packaging is explicit:
+Production packaging is the default and uses the signed SDK binaries from
+`bin/x64`:
 
 ```powershell
-./gradlew.bat build -PstreamlineVariant=production
+./gradlew.bat clean build
 ```
 
-Production requires `NVIDIA_APPLICATION_ID`, uses the non-development
-`bin/x64` directory, and verifies Authenticode signatures during packaging.
+Development packaging is an explicit diagnostic build and uses the SDK's
+unsigned/watermarked `bin/x64/development` binaries:
+
+```powershell
+./gradlew.bat build -PstreamlineVariant=development
+```
+
+Caustica embeds its NVIDIA Project ID in the bridge. A numeric
+`NVIDIA_APPLICATION_ID` is optional and defaults to zero. Production packaging
+verifies the Authenticode signature of every packaged DLL. Before `slInit`, the
+bridge also applies Streamline's secondary signature check to
+`sl.interposer.dll`; NVIDIA's NGX feature DLLs are Authenticode-verified but do
+not all carry that secondary Streamline signature.
+
 The selected variant is embedded in `caustica/streamline.properties`, so the
 runtime cannot accidentally initialize a production package as development.
-The bridge repeats signature verification before `slInit`. The Java FFM layer
-loads only `streamlinebridge.dll`; Java does not bind Streamline's C++ SDK
-structs directly.
+Production refuses a loose `caustica.streamline.path` override and extracts to
+a variant-specific native directory, preventing stale development configuration
+from affecting production. The Java FFM layer loads only
+`streamlinebridge.dll`; Java does not bind Streamline's C++ SDK structs directly.
