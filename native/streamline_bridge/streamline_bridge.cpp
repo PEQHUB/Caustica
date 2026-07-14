@@ -27,6 +27,7 @@
 #include "sl_version.h"
 
 #include "streamline_bridge.h"
+#include "streamline_bridge_resources.h"
 
 namespace {
 
@@ -305,11 +306,11 @@ std::wstring pluginPath(const wchar_t* path) {
 }
 
 bool verifyProductionBinaries(const std::filesystem::path& directory) {
-    constexpr std::array<const wchar_t*, 9> files = {
-        L"sl.interposer.dll", L"sl.common.dll", L"sl.dlss_d.dll", L"sl.dlss_g.dll",
-        L"sl.reflex.dll", L"sl.pcl.dll", L"nvngx_dlssd.dll", L"nvngx_dlssg.dll",
-        L"NvLowLatencyVk.dll",
-    };
+    // Streamline's custom embedded-signature verifier applies to the interposer. Official NGX and
+    // low-latency payloads carry ordinary Authenticode signatures, not Streamline's secondary
+    // certificate; applying verifyEmbeddedSignature to those official binaries rejects every valid
+    // production package. Gradle verifies Authenticode across the complete packaged DLL set.
+    constexpr std::array<const wchar_t*, 1> files = { L"sl.interposer.dll" };
     for (const wchar_t* file : files) {
         const auto path = directory / file;
         if (!std::filesystem::is_regular_file(path) || !sl::security::verifyEmbeddedSignature(path.c_str())) {
@@ -1095,8 +1096,7 @@ SLBRIDGE_EXPORT int32_t slbridge_evaluate_dlssd(uint64_t frame_token, uint32_t v
     bool hasSpecularMotion = false;
     for (uint32_t i = 0; i < resource_count; i++) {
         const auto& descriptor = resources[i];
-        if (!descriptor.valid || descriptor.image == 0 || descriptor.view == 0 || descriptor.memory == 0
-                || descriptor.width == 0 || descriptor.height == 0) {
+        if (!slbridge::detail::isCompleteDlssdVulkanTexture(descriptor)) {
             setError("Streamline DLSS-RR received an incomplete Vulkan resource descriptor");
             return -1;
         }

@@ -272,5 +272,4 @@ public abstract class VulkanGpuSurfaceMixin {
 		RtComposite.INSTANCE.submitStreamlineFrame((VulkanCommandEncoder) commandEncoder,
 				this.swapchainWidth, this.swapchainHeight, this.swapchainImageFormat, false);
 	}
-
 }
