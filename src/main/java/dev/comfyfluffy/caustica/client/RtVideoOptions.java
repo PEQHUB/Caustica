@@ -6,6 +6,8 @@ import dev.comfyfluffy.caustica.CausticaConfig.BooleanSetting;
 import dev.comfyfluffy.caustica.CausticaConfig.FloatSetting;
 import dev.comfyfluffy.caustica.CausticaConfig.IntSetting;
 import dev.comfyfluffy.caustica.CausticaConfig.StringSetting;
+import dev.comfyfluffy.caustica.rt.pipeline.RtDlssFg;
+import dev.comfyfluffy.caustica.streamline.StreamlineRuntime;
 import java.util.List;
 import java.util.Locale;
 import net.minecraft.client.Minecraft;
@@ -48,6 +50,97 @@ public final class RtVideoOptions {
             .width(Button.BIG_WIDTH)
             .tooltip(Tooltip.create(Component.translatable("caustica.options.rt.tonemapping.tooltip")))
             .build();
+    }
+
+    public static Button frameGenerationButton(Screen parent, Runnable beforeOpen) {
+        return Button.builder(
+                Component.translatable("caustica.options.rt.frameGeneration"),
+                button -> {
+                    beforeOpen.run();
+                    Minecraft.getInstance().setScreenAndShow(
+                            new RtFrameGenerationOptionsScreen(parent, Minecraft.getInstance().options));
+                })
+            .width(Button.BIG_WIDTH)
+            .tooltip(Tooltip.create(Component.translatable("caustica.options.rt.frameGeneration.tooltip")))
+            .build();
+    }
+
+    public static OptionInstance<?>[] frameGenerationOptions() {
+        List<String> modes = List.of("off", "fixed", "dynamic", "auto");
+        int reportedMaximum = RtDlssFg.INSTANCE.multiFrameCountMax();
+        // Streamline 2.12 supports at most five generated frames (6x). Until the plugin has been attached
+        // to a swapchain and reports this adapter's cap, keep the complete range discoverable; submission
+        // clamps the saved selection to the reported limit before it reaches Streamline.
+        int maximumGenerated = reportedMaximum > 0 ? reportedMaximum : 5;
+        java.util.ArrayList<OptionInstance<?>> options = new java.util.ArrayList<>();
+        options.add(new OptionInstance<>(
+                "caustica.options.rt.fg.mode",
+                OptionInstance.cachedConstantTooltip(Component.translatable("caustica.options.rt.fg.mode.tooltip")),
+                (caption, value) -> Component.translatable("caustica.options.rt.fg.mode." + value),
+                new OptionInstance.Enum<>(modes, Codec.STRING),
+                modes.contains(CausticaConfig.Rt.Fg.mode()) ? CausticaConfig.Rt.Fg.mode() : "off",
+                CausticaConfig.Rt.Fg::setMode));
+        options.add(new OptionInstance<>(
+                "caustica.options.rt.fg.multiplier",
+                OptionInstance.cachedConstantTooltip(Component.translatable("caustica.options.rt.fg.multiplier.tooltip")),
+                (caption, generated) -> Options.genericValueLabel(caption,
+                        Component.literal((generated + 1) + "x")),
+                new OptionInstance.IntRange(1, maximumGenerated),
+                Math.clamp(CausticaConfig.Rt.Fg.MULTI_FRAME_COUNT.value(), 1, maximumGenerated),
+                CausticaConfig.Rt.Fg.MULTI_FRAME_COUNT::set));
+        options.add(new OptionInstance<>(
+                "caustica.options.rt.fg.dynamicTarget",
+                OptionInstance.cachedConstantTooltip(Component.translatable("caustica.options.rt.fg.dynamicTarget.tooltip")),
+                (caption, fps) -> Options.genericValueLabel(caption,
+                        fps == 0 ? Component.translatable("caustica.options.rt.fg.autoRefresh")
+                                : Component.literal(fps + " FPS")),
+                new OptionInstance.IntRange(0, 360),
+                Math.clamp(Math.round(CausticaConfig.Rt.Fg.DYNAMIC_TARGET_FPS.value()), 0, 360),
+                value -> CausticaConfig.Rt.Fg.DYNAMIC_TARGET_FPS.set(value.floatValue())));
+        options.add(bool("caustica.options.rt.fg.uiRecomposition", CausticaConfig.Rt.Fg.UI_RECOMPOSITION));
+        options.add(bool("caustica.options.rt.fg.fullscreenMenu", CausticaConfig.Rt.Fg.FULLSCREEN_MENU_DETECTION));
+        options.add(reflexMode());
+        options.add(reflexFrameLimit());
+        options.add(new OptionInstance<>(
+                "caustica.options.rt.fg.queueParallelism",
+                OptionInstance.cachedConstantTooltip(Component.translatable("caustica.options.rt.fg.queueParallelism.tooltip")),
+                (caption, value) -> Component.translatable("caustica.options.rt.fg.queueParallelism." + value),
+                new OptionInstance.Enum<>(List.of("safe", "no-client-queues"), Codec.STRING),
+                CausticaConfig.Rt.Fg.QUEUE_PARALLELISM.get(),
+                CausticaConfig.Rt.Fg.QUEUE_PARALLELISM::set));
+        if (!StreamlineRuntime.productionVariant()) {
+            options.add(bool("caustica.options.rt.fg.showInterpolated", CausticaConfig.Rt.Fg.SHOW_ONLY_INTERPOLATED));
+        }
+        return options.toArray(OptionInstance<?>[]::new);
+    }
+
+    private static OptionInstance<String> reflexMode() {
+        String current = !CausticaConfig.Rt.Reflex.ENABLED.value() ? "off"
+                : CausticaConfig.Rt.Reflex.LOW_LATENCY_BOOST.value() ? "boost" : "on";
+        return new OptionInstance<>(
+                "caustica.options.rt.fg.reflex",
+                OptionInstance.cachedConstantTooltip(Component.translatable("caustica.options.rt.fg.reflex.tooltip")),
+                (caption, value) -> Component.translatable("caustica.options.rt.fg.reflex." + value),
+                new OptionInstance.Enum<>(List.of("off", "on", "boost"), Codec.STRING),
+                current,
+                value -> {
+                    CausticaConfig.Rt.Reflex.ENABLED.set(!"off".equals(value));
+                    CausticaConfig.Rt.Reflex.LOW_LATENCY_BOOST.set("boost".equals(value));
+                });
+    }
+
+    private static OptionInstance<Integer> reflexFrameLimit() {
+        int interval = CausticaConfig.Rt.Reflex.MINIMUM_INTERVAL_US.value();
+        int fps = interval > 0 ? Math.clamp(Math.round(1_000_000.0f / interval), 1, 360) : 0;
+        return new OptionInstance<>(
+                "caustica.options.rt.fg.reflexLimit",
+                OptionInstance.cachedConstantTooltip(Component.translatable("caustica.options.rt.fg.reflexLimit.tooltip")),
+                (caption, value) -> Options.genericValueLabel(caption,
+                        value == 0 ? Component.translatable("caustica.options.rt.fg.unlimited")
+                                : Component.literal(value + " FPS")),
+                new OptionInstance.IntRange(0, 360), fps,
+                value -> CausticaConfig.Rt.Reflex.MINIMUM_INTERVAL_US.set(
+                        value == 0 ? 0 : Math.max(1, Math.round(1_000_000.0f / value))));
     }
 
     /** Runtime-tunable RT options, in display order. Paired two-per-row by OptionsList.addSmall. */

@@ -26,6 +26,7 @@ public final class CausticaClient implements ClientModInitializer {
 		// The GpuDevice exists well before the first tick, so a one-shot at tick start
 		// runs on the render thread with the device idle between frames.
 		ClientTickEvents.START_CLIENT_TICK.register(client -> {
+			dev.comfyfluffy.caustica.streamline.StreamlineSwapchainCoordinator.INSTANCE.synchronizeRequestedState();
 			if (!VanillaRenderController.rtRuntimeWorkRequested()) {
 				if (rtInitDone) {
 					shutdownRt();
@@ -68,11 +69,14 @@ public final class CausticaClient implements ClientModInitializer {
 		InvalidateRenderStateCallback.EVENT.register(() -> {
 			RtTerrain.requestFullClear();
 			RtComposite.INSTANCE.requestTemporalReset();
-			RtComposite.INSTANCE.resetFailureLatch(); // F3+A doubles as manual RT recovery after a latched failure
+			if (VanillaRenderController.INSTANCE.shouldResetRtFailureLatchForInvalidation()) {
+				RtComposite.INSTANCE.resetFailureLatch(); // F3+A doubles as manual RT recovery after a latched failure
+			}
 		});
 
 		ClientLifecycleEvents.CLIENT_STOPPING.register(client -> {
 			shutdownRt();
+			dev.comfyfluffy.caustica.rt.pipeline.RtDlssFg.INSTANCE.destroy();
 		});
 	}
 
@@ -93,13 +97,9 @@ public final class CausticaClient implements ClientModInitializer {
 		RtComposite.INSTANCE.destroy();
 		RtEntityTextures.INSTANCE.reset();
 		RtBlockMaterials.INSTANCE.destroy();
-		dev.comfyfluffy.caustica.rt.pipeline.RtDlssFg.INSTANCE.destroy();
-		if (ctx != null) {
-			dev.comfyfluffy.caustica.rt.RtFramePresenter.INSTANCE.destroy(ctx.device());
-			dev.comfyfluffy.caustica.rt.RtReflex.INSTANCE.destroy(ctx.device().vkDevice());
-		}
-		// Shut NGX down once, after every feature (RR + FG) has been released above.
-		dev.comfyfluffy.caustica.ngx.NgxRuntime.INSTANCE.shutdown();
+		// RtComposite released the RR viewport resources above. Keep Streamline itself alive across
+		// resource/RT reloads; the VulkanDevice close hook performs the one process-wide shutdown after
+		// every Streamline feature has stopped using the shared Vulkan device.
 		if (ctx != null) {
 			ctx.destroy();
 		}

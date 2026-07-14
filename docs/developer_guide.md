@@ -4,27 +4,27 @@
 
 1. Install the Vulkan SDK from <https://vulkan.lunarg.com/sdk/home>.
    The installer sets `VULKAN_SDK` automatically.
-2. Download the DLSS SDK from <https://github.com/NVIDIA/DLSS/releases>.
-   Extract it, then set `DLSS_SDK` to the folder you extracted.
+2. Download NVIDIA Streamline SDK 2.12.0 and set `STREAMLINE_SDK` to the extracted root.
 
    To set it permanently for your Windows user account, run PowerShell with:
 
    ```powershell
-   [Environment]::SetEnvironmentVariable("DLSS_SDK", "C:\path\to\dlss-sdk", "User")
+   [Environment]::SetEnvironmentVariable("STREAMLINE_SDK", "C:\path\to\streamline-sdk", "User")
    ```
 
    Restart your terminal after setting it. To set it only for the current
    PowerShell session, use:
 
    ```powershell
-   $env:DLSS_SDK = "C:\path\to\dlss-sdk"
+   $env:STREAMLINE_SDK = "C:\path\to\streamline-sdk"
    ```
 
-3. Configure and build the native shim:
+3. Configure, build, and test the Streamline bridge:
 
 ```powershell
-cmake -S native/ngx_shim -B build/cmake/ngx_shim/release -DCMAKE_BUILD_TYPE=Release
-cmake --build build/cmake/ngx_shim/release --config Release
+cmake -S native/streamline_bridge -B native/streamline_bridge/build -A x64
+cmake --build native/streamline_bridge/build --config Release
+ctest --test-dir native/streamline_bridge/build -C Release --output-on-failure
 ```
 
 4. Run the client:
@@ -36,49 +36,31 @@ $env:JAVA_TOOL_OPTIONS = "-Xmx8G -XX:+UseCompactObjectHeaders -XX:+AlwaysPreTouc
 
 ## Linux
 
-Set `DLSS_SDK` and `VULKAN_SDK` before configuring CMake:
-
-```bash
-export DLSS_SDK=/path/to/dlss-sdk
-export VULKAN_SDK=/path/to/vulkan-sdk
-```
-
-`DLSS_SDK` must contain the NGX headers and static library. `VULKAN_SDK` must
-contain Vulkan headers.
-
-Then configure and build the native shim:
-
-```bash
-cmake -S native/ngx_shim -B build/cmake/ngx_shim/release -DCMAKE_BUILD_TYPE=Release
-cmake --build build/cmake/ngx_shim/release
-```
-
-On NixOS, enter the development shell from `flake.nix` instead of setting up
-the toolchain by hand:
+The Java renderer and shaders can be developed on Linux through the Nix shell, but the Streamline
+DLSS-RR/DLSSG bridge and its NVIDIA runtime bundle are Windows x64 components:
 
 ```bash
 nix develop
-cmake -S native/ngx_shim -B build/cmake/ngx_shim/release -DCMAKE_BUILD_TYPE=Release
-cmake --build build/cmake/ngx_shim/release
+./gradlew compileJava compileShaders
 ```
 
 ## Native Bundling
 
-Gradle bundles NGX natives for the current host platform by default:
+On Windows x64, Gradle bundles the Streamline bridge and the pinned Streamline DLSS-RR, DLSSG,
+Reflex, and PCL runtime libraries:
 
-```bash
-./gradlew build
+```powershell
+.\gradlew.bat build
 ```
 
-Release builds that already have both platform shims available can request a
-cross-platform native bundle:
+DLSS-RR and DLSSG share one Streamline frame token for each application frame. DLSS-RR evaluates
+on viewport `1` with the raw render-space constants and resources; DLSSG uses viewport `0` with
+the final present-space constants and resources. Keep those viewport IDs distinct: Streamline
+accepts only one common-constants packet for a given frame token and viewport.
 
-```bash
-./gradlew build -PngxPlatforms=windows-x64,linux-x64
-```
+Run the Vulkan RT client on Windows with:
 
-Run the Vulkan RT/DLSS-RR client with:
-
-```bash
-JAVA_TOOL_OPTIONS='-Xmx8G -XX:+UseCompactObjectHeaders -XX:+AlwaysPreTouch -XX:+UseStringDeduplication -XX:+UseZGC' nvidia-offload ./gradlew runClient --args='--renderDebugLabels --graphicsBackend VULKAN'
+```powershell
+$env:JAVA_TOOL_OPTIONS = "-Xmx8G -XX:+UseCompactObjectHeaders -XX:+AlwaysPreTouch -XX:+UseStringDeduplication -XX:+UseZGC"
+.\gradlew.bat runClient --args="--renderDebugLabels --graphicsBackend VULKAN"
 ```

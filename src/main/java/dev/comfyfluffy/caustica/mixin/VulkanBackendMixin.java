@@ -1,17 +1,26 @@
 package dev.comfyfluffy.caustica.mixin;
 
 import com.llamalad7.mixinextras.sugar.Local;
+import com.llamalad7.mixinextras.injector.wrapmethod.WrapMethod;
+import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
 import com.mojang.blaze3d.shaders.GpuDebugOptions;
 import com.mojang.blaze3d.shaders.ShaderSource;
+import com.mojang.blaze3d.systems.BackendCreationException;
 import com.mojang.blaze3d.systems.GpuDevice;
 import com.mojang.blaze3d.vulkan.VulkanBackend;
 import com.mojang.blaze3d.vulkan.VulkanPhysicalDevice;
 import com.mojang.blaze3d.vulkan.init.VulkanFeature;
 import dev.comfyfluffy.caustica.CausticaMod;
 import dev.comfyfluffy.caustica.rt.RtDeviceBringup;
+import dev.comfyfluffy.caustica.streamline.StreamlineRuntime;
+import org.lwjgl.PointerBuffer;
 import org.lwjgl.system.MemoryStack;
 import org.lwjgl.vulkan.VK12;
 import org.lwjgl.vulkan.VkDevice;
+import org.lwjgl.vulkan.VkAllocationCallbacks;
+import org.lwjgl.vulkan.VkDeviceCreateInfo;
+import org.lwjgl.vulkan.VkInstance;
+import org.lwjgl.vulkan.VkPhysicalDevice;
 import org.lwjgl.vulkan.VkPhysicalDeviceFeatures;
 import org.lwjgl.vulkan.VkPhysicalDeviceFeatures2;
 import org.lwjgl.vulkan.VkPhysicalDeviceVulkan12Features;
@@ -25,6 +34,7 @@ import org.spongepowered.asm.mixin.injection.invoke.arg.Args;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashSet;
+import java.nio.IntBuffer;
 import java.util.List;
 import java.util.Set;
 
@@ -62,6 +72,66 @@ public abstract class VulkanBackendMixin {
 			"VK_KHR_push_descriptor");
 
 	private static final Set<String> loggedMissingSdkFeatures = new HashSet<>();
+
+	/** Initialize Streamline before the first Vulkan call, while keeping the throwaway probe instance native. */
+	@WrapMethod(method = "checkBackendAvailable")
+	private static BackendCreationException caustica$checkBackendAvailableWithoutStreamline(
+			Operation<BackendCreationException> original) {
+		// Minecraft's availability check creates a throwaway instance before the real VulkanInstance
+		// constructor. Streamline must already be initialized when that first Vulkan API is invoked.
+		boolean streamlineReady = StreamlineRuntime.initializeForVulkan();
+		StreamlineRuntime.beginVulkanAvailabilityProbe();
+		BackendCreationException failure;
+		try {
+			failure = original.call();
+		} finally {
+			StreamlineRuntime.endVulkanAvailabilityProbe();
+		}
+		if (failure != null && streamlineReady) {
+			StreamlineRuntime.shutdown();
+		}
+		return failure;
+	}
+
+	/** If Vulkan creation fails and Minecraft falls back to OpenGL, release the partially initialized runtime. */
+	@WrapMethod(method = "createDevice(JLcom/mojang/blaze3d/shaders/ShaderSource;Lcom/mojang/blaze3d/shaders/GpuDebugOptions;Ljava/lang/Runnable;)Lcom/mojang/blaze3d/systems/GpuDevice;")
+	private GpuDevice caustica$createDeviceWithStreamlineCleanup(long window, ShaderSource defaultShaderSource,
+			GpuDebugOptions debugOptions, Runnable criticalShaderLoader, Operation<GpuDevice> original)
+			throws BackendCreationException {
+		try {
+			return original.call(window, defaultShaderSource, debugOptions, criticalShaderLoader);
+		} catch (Throwable throwable) {
+			StreamlineRuntime.shutdown();
+			if (throwable instanceof BackendCreationException backendCreationException) {
+				throw backendCreationException;
+			}
+			if (throwable instanceof RuntimeException runtimeException) {
+				throw runtimeException;
+			}
+			if (throwable instanceof Error error) {
+				throw error;
+			}
+			throw new IllegalStateException("Unexpected checked failure during Vulkan backend creation", throwable);
+		}
+	}
+
+	@org.spongepowered.asm.mixin.injection.Redirect(
+			method = "findPhysicalDevice",
+			at = @At(value = "INVOKE",
+				target = "Lorg/lwjgl/vulkan/VK12;vkEnumeratePhysicalDevices(Lorg/lwjgl/vulkan/VkInstance;Ljava/nio/IntBuffer;Lorg/lwjgl/PointerBuffer;)I"))
+	private static int caustica$enumeratePhysicalDevicesThroughStreamline(VkInstance instance, IntBuffer count,
+			PointerBuffer physicalDevices) {
+		return StreamlineRuntime.vkEnumeratePhysicalDevices(instance, count, physicalDevices);
+	}
+
+	@org.spongepowered.asm.mixin.injection.Redirect(
+			method = "createDevice(Ljava/util/Collection;Lcom/mojang/blaze3d/vulkan/VulkanPhysicalDevice;Ljava/util/Set;)Lorg/lwjgl/vulkan/VkDevice;",
+			at = @At(value = "INVOKE",
+				target = "Lorg/lwjgl/vulkan/VK12;vkCreateDevice(Lorg/lwjgl/vulkan/VkPhysicalDevice;Lorg/lwjgl/vulkan/VkDeviceCreateInfo;Lorg/lwjgl/vulkan/VkAllocationCallbacks;Lorg/lwjgl/PointerBuffer;)I"))
+	private static int caustica$createDeviceThroughStreamline(VkPhysicalDevice physicalDevice,
+			VkDeviceCreateInfo createInfo, VkAllocationCallbacks allocator, PointerBuffer deviceOut) {
+		return StreamlineRuntime.vkCreateDevice(physicalDevice, createInfo, allocator, deviceOut);
+	}
 
 	@ModifyArgs(
 			method = "createDevice(JLcom/mojang/blaze3d/shaders/ShaderSource;Lcom/mojang/blaze3d/shaders/GpuDebugOptions;Ljava/lang/Runnable;)Lcom/mojang/blaze3d/systems/GpuDevice;",

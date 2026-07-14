@@ -11,22 +11,30 @@ import org.lwjgl.vulkan.VkDevice;
 public final class RtImage {
     public final long image;
     public final long allocation;
+    /** VkDeviceMemory backing this image. Distinct from the VMA allocation handle above. */
+    public final long memory;
     public final long view;
     public final int width;
     public final int height;
+    public final int format;
+    public final int usage;
 
     private final long vma;
     private final VkDevice vk;
     private boolean destroyed;
 
-    public RtImage(long vma, VkDevice vk, long image, long allocation, long view, int width, int height) {
+    public RtImage(long vma, VkDevice vk, long image, long allocation, long memory, long view, int width, int height, int format,
+            int usage) {
         this.vma = vma;
         this.vk = vk;
         this.image = image;
         this.allocation = allocation;
+        this.memory = memory;
         this.view = view;
         this.width = width;
         this.height = height;
+        this.format = format;
+        this.usage = usage;
     }
 
     public void destroy() {

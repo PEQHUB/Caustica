@@ -1,0 +1,21 @@
+#version 460
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+// Streamline prefers a single-channel UI alpha tag when one is available. R32F is a core Vulkan storage
+// format and preserves substantially more alpha precision than RGB10A2 on HDR swapchains.
+layout(binding = 0, set = 0, r32f) uniform writeonly image2D outputAlpha;
+layout(binding = 1, set = 0) uniform sampler2D overlayTexture;
+
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(outputAlpha);
+    if (pixel.x >= size.x || pixel.y >= size.y) {
+        return;
+    }
+    ivec2 inputSize = textureSize(overlayTexture, 0);
+    ivec2 source = ivec2(
+        min(pixel.x * inputSize.x / size.x, inputSize.x - 1),
+        inputSize.y - 1 - min(pixel.y * inputSize.y / size.y, inputSize.y - 1));
+    imageStore(outputAlpha, pixel, vec4(texelFetch(overlayTexture, source, 0).a));
+}

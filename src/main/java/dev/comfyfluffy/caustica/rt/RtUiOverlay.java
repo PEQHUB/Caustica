@@ -56,6 +56,7 @@ public final class RtUiOverlay {
 
     private static TextureTarget overlay;
     private static boolean usedThisFrame;
+    private static boolean populatedForFrameGeneration;
     private static boolean compositeFailed;
     // The overlay is cleared once per frame, before the first thing that renders into it (RT world overlays,
     // the hand/screen-effects redirects in HDR mode, or the GUI). Reset at the start of GameRenderer.render
@@ -80,6 +81,11 @@ public final class RtUiOverlay {
     /** Whether the overlay holds this frame's UI (for the HDR present path to composite + consume). */
     public static boolean populatedThisFrame() {
         return usedThisFrame && overlay != null;
+    }
+
+    /** Remains true after SDR composite so Streamline can consume this frame's UI at present time. */
+    public static boolean populatedForFrameGeneration() {
+        return populatedForFrameGeneration && overlay != null;
     }
 
     /** Mark the overlay consumed by the HDR present composite (so it isn't reused next frame). */
@@ -138,6 +144,7 @@ public final class RtUiOverlay {
     /** Reset the per-frame clear latch. Called at the start of {@code GameRenderer.render} (every frame). */
     public static void beginFrame() {
         overlayClearedThisFrame = false;
+        populatedForFrameGeneration = false;
     }
 
     /**
@@ -157,6 +164,7 @@ public final class RtUiOverlay {
             overlayClearedThisFrame = true;
         }
         usedThisFrame = true;
+        populatedForFrameGeneration = true;
         return target;
     }
 
@@ -225,6 +233,7 @@ public final class RtUiOverlay {
         RenderSystem.outputColorTextureOverride = null;
         RenderSystem.outputDepthTextureOverride = null;
         usedThisFrame = false;
+        populatedForFrameGeneration = false;
         overlayClearedThisFrame = false;
         if (overlay != null) {
             overlay.destroyBuffers();

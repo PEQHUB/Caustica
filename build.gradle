@@ -37,7 +37,7 @@ loom {
             vmArg "-Xss16m"
 
             // NixOS fix: Gradle forks drop the dev-shell's LD_LIBRARY_PATH.
-            // We manually add the driver path so NGX can successfully dlopen libnvidia-ngx.so.1.
+            // We manually add the driver path so NVIDIA's Streamline plugins can load their driver runtime.
             if (file("/run/opengl-driver/lib").exists()) {
                 def inherited = System.getenv("LD_LIBRARY_PATH")
                 environmentVariable "LD_LIBRARY_PATH",
@@ -65,11 +65,21 @@ dependencies {
 	include implementation("com.electronwill.night-config:toml:3.8.3")
 }
 
+def streamlineVariant = (findProperty("streamlineVariant") ?: "development")
+		.toString().toLowerCase(java.util.Locale.ROOT)
+if (!(streamlineVariant in ["development", "production"])) {
+	throw new GradleException("Unknown Streamline variant '${streamlineVariant}'. Expected 'development' or 'production'.")
+}
+
 processResources {
 	inputs.property "version", project.version
+	inputs.property "streamlineVariant", streamlineVariant
 
 	filesMatching("fabric.mod.json") {
 		expand "version": inputs.properties.version
+	}
+	filesMatching("caustica/streamline.properties") {
+		expand "streamlineVariant": streamlineVariant
 	}
 }
 
@@ -202,154 +212,137 @@ sourceSets.main.java.srcDir(files(layout.buildDirectory.dir("generated/sources/s
 // same /caustica/rt/ path the loader (RtPipeline/RtBlendPipeline) reads. builtBy wires the dependency.
 sourceSets.main.resources.srcDir(files(shaderGenRoot).builtBy(compileShaders))
 
-def ngxNativeGenRoot = layout.buildDirectory.dir("generated/ngx-natives")
-def requestedTaskNames = gradle.startParameter.taskNames.collect { it.toLowerCase(java.util.Locale.ROOT) }
-def isRunClientInvocation = requestedTaskNames.any { it == "runclient" || it.endsWith(":runclient") }
-def ngxShimConfig = (findProperty("ngxShimConfig") ?: findProperty("ngxNativeConfig") ?: "release")
+// Streamline is the sole DLSS-RR and DLSSG runtime. The SDK zip is intentionally not checked into
+// the repository; STREAMLINE_SDK must point at the verified NVIDIA Streamline 2.12.0 extraction.
+def streamlineNativeGenRoot = layout.buildDirectory.dir("generated/streamline-natives")
+def streamlineSdkEnv = providers.environmentVariable("STREAMLINE_SDK")
+def streamlineSdkRootProvider = streamlineSdkEnv.map { file(it) }
+def streamlineBridgeConfig = (findProperty("streamlineBridgeConfig") ?: "release")
 		.toString().toLowerCase(java.util.Locale.ROOT)
-def normalizeNgxVendorConfig = { String config ->
-	def normalized = config.toLowerCase(java.util.Locale.ROOT)
-	if (normalized == "release") {
-		return "rel"
-	}
-	if (normalized == "debug") {
-		return "dev"
-	}
-	if (normalized != "rel" && normalized != "dev") {
-		throw new GradleException("Unknown NGX vendor config '${config}'. Expected 'rel' or 'dev'.")
-	}
-	return normalized
-}
-def ngxVendorConfig = normalizeNgxVendorConfig(
-		(findProperty("ngxVendorConfig") ?: (isRunClientInvocation ? "dev" : "rel")).toString())
-def ngxNativeRoot = layout.buildDirectory.dir("native/ngx_shim").get().asFile
-def ngxShimOutDir = new File(ngxNativeRoot, ngxShimConfig)
-def currentNgxPlatform = {
+def streamlinePlatform = {
 	def os = org.gradle.internal.os.OperatingSystem.current()
 	def arch = System.getProperty("os.arch", "").toLowerCase(java.util.Locale.ROOT)
-	def x64 = arch == "x86_64" || arch == "amd64"
-	if (os.windows && x64) {
-		return "windows-x64"
-	}
-	if (os.linux && x64) {
-		return "linux-x64"
-	}
-	return null
+	return os.windows && (arch == "x86_64" || arch == "amd64") ? "windows-x64" : null
 }()
-def ngxNativePlatforms = [
-	[
-		name: "windows-x64",
-		shimIncludes: [
-			"ngxshim.dll"
-		],
-		vendorRoot: { dlssSdkRoot, vendorConfig -> new File(dlssSdkRoot, "lib/Windows_x86_64/${vendorConfig}") },
-		vendorIncludes: [
-			"nvngx_dlssd.dll",
-			"nvngx_dlssg.dll"
-		]
-	],
-	[
-		name: "linux-x64",
-		shimIncludes: [
-			"libngxshim.so"
-		],
-		vendorRoot: { dlssSdkRoot, vendorConfig -> new File(dlssSdkRoot, "lib/Linux_x86_64/${vendorConfig}") },
-		vendorIncludes: [
-			"libnvidia-ngx-dlssd.so*",
-			"libnvidia-ngx-dlssg.so*"
-		]
-	]
+def streamlineVendorNames = [
+	"sl.interposer.dll",
+	"sl.common.dll",
+	"sl.dlss_d.dll",
+	"sl.dlss_g.dll",
+	"sl.reflex.dll",
+	"sl.pcl.dll",
+	"nvngx_dlssd.dll",
+	"nvngx_dlssg.dll",
+	"NvLowLatencyVk.dll",
+	"reflex.license.txt",
+	"nvngx_dlss.license.txt"
 ]
-def ngxNativePlatformByName = ngxNativePlatforms.collectEntries { platform -> [(platform.name): platform] }
-def requestedNgxPlatformsRaw = (findProperty("ngxPlatforms") ?: "current").toString()
-		.split(",")
-		.collect { it.trim() }
-		.findAll { !it.isEmpty() }
-def selectedNgxNativePlatforms
-if (requestedNgxPlatformsRaw.size() == 1 && requestedNgxPlatformsRaw[0].equalsIgnoreCase("all")) {
-	selectedNgxNativePlatforms = ngxNativePlatforms
-} else if (requestedNgxPlatformsRaw.size() == 1 && requestedNgxPlatformsRaw[0].equalsIgnoreCase("current")) {
-	if (currentNgxPlatform == null || !ngxNativePlatformByName.containsKey(currentNgxPlatform)) {
-		throw new GradleException("No NGX native platform is configured for this host.")
-	}
-	selectedNgxNativePlatforms = [ngxNativePlatformByName[currentNgxPlatform]]
-} else {
-	def unknownPlatforms = requestedNgxPlatformsRaw.findAll { !ngxNativePlatformByName.containsKey(it) }
-	if (!unknownPlatforms.empty) {
-		throw new GradleException("Unknown NGX platform(s): ${unknownPlatforms.join(', ')}")
-	}
-	selectedNgxNativePlatforms = requestedNgxPlatformsRaw.collect { ngxNativePlatformByName[it] }
+def streamlineSdkVendorRoot = { File sdkRoot ->
+	new File(sdkRoot, streamlineVariant == "development" ? "bin/x64/development" : "bin/x64")
 }
 
-def dlssSdkEnv = providers.environmentVariable("DLSS_SDK")
-def dlssSdkRootProvider = dlssSdkEnv.map { file(it) }
-
-def bundleNgxNatives = tasks.register("bundleNgxNatives") {
-	group = "build"
-	description = "Bundles NGX shim and ${ngxVendorConfig} DLSS native libraries into the mod resources."
-
-	inputs.property "ngxShimConfig", ngxShimConfig
-	inputs.property "ngxVendorConfig", ngxVendorConfig
-
-	selectedNgxNativePlatforms.each { platform ->
-		inputs.files(fileTree(ngxShimOutDir) {
-			include platform.shimIncludes
-		}).withPropertyName("ngxNatives.${platform.name}.shim")
-		inputs.files(fileTree(platform.vendorRoot(dlssSdkRootProvider.getOrElse(file("__missing_dlss_sdk__")), ngxVendorConfig)) {
-			include platform.vendorIncludes
-		}).withPropertyName("ngxNatives.${platform.name}.vendor")
+def verifyStreamlineProductionInputs = tasks.register("verifyStreamlineProductionInputs") {
+	group = "verification"
+	description = "Verifies the production Streamline SDK variant, application ID, and Authenticode signatures."
+	onlyIf { streamlineVariant == "production" && streamlinePlatform != null }
+	doLast {
+		if (streamlinePlatform == null) {
+			throw new GradleException("Streamline production artifacts are Windows x64 only.")
+		}
+		def applicationId = System.getenv("NVIDIA_APPLICATION_ID")?.trim()
+		if (!applicationId) {
+			throw new GradleException("NVIDIA_APPLICATION_ID is required for Streamline production artifacts.")
+		}
+		try {
+			def parsedApplicationId = Long.parseLong(applicationId)
+			if (parsedApplicationId <= 0L || parsedApplicationId > 0xFFFFFFFFL) {
+				throw new NumberFormatException("out of uint32 range")
+			}
+		} catch (NumberFormatException exception) {
+			throw new GradleException("NVIDIA_APPLICATION_ID must be an unsigned non-zero 32-bit integer.", exception)
+		}
+		def sdkRoot = streamlineSdkRootProvider.orNull
+		if (sdkRoot == null) {
+			throw new GradleException("STREAMLINE_SDK environment variable is not set.")
+		}
+		def vendorRoot = streamlineSdkVendorRoot(sdkRoot)
+		if (vendorRoot.path.toLowerCase(java.util.Locale.ROOT).contains("development")) {
+			throw new GradleException("Production Streamline packaging cannot use the development SDK directory.")
+		}
+		def unsigned = streamlineVendorNames.findAll { name ->
+			def candidate = new File(vendorRoot, name)
+			if (!candidate.isFile() || !name.toLowerCase(java.util.Locale.ROOT).endsWith(".dll")) {
+				return false
+			}
+			def process = new ProcessBuilder("powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+					"(Get-AuthenticodeSignature -LiteralPath '${candidate.absolutePath.replace("'", "''")}').Status")
+					.redirectErrorStream(true).start()
+			def status = process.inputStream.getText("UTF-8").trim()
+			process.waitFor()
+			return status != "Valid"
+		}
+		if (!unsigned.empty) {
+			throw new GradleException("Unsigned or unverifiable production Streamline binaries: ${unsigned.join(', ')}")
+		}
 	}
-	outputs.dir(ngxNativeGenRoot)
+}
+
+def bundleStreamlineNatives = tasks.register("bundleStreamlineNatives") {
+	group = "build"
+	description = "Bundles the pinned Streamline bridge and Windows x64 SDK binaries."
+	inputs.property "streamlineVariant", streamlineVariant
+	inputs.property "streamlineBridgeConfig", streamlineBridgeConfig
+	if (streamlinePlatform != null) {
+		def sdkForInputs = streamlineSdkRootProvider.getOrElse(file("__missing_streamline_sdk__"))
+		inputs.files(fileTree(streamlineSdkVendorRoot(sdkForInputs)) {
+			include streamlineVendorNames
+		}).withPropertyName("streamlineSdk.${streamlineVariant}")
+		inputs.file(new File(layout.buildDirectory.get().asFile, "native/streamline_bridge/${streamlineBridgeConfig}/streamlinebridge.dll"))
+			.withPropertyName("streamlineBridge")
+	}
+	outputs.dir(streamlineNativeGenRoot)
 	outputs.upToDateWhen { false }
+	dependsOn(verifyStreamlineProductionInputs)
 
 	doLast {
-		delete(ngxNativeGenRoot)
+		delete(streamlineNativeGenRoot)
+		if (streamlinePlatform == null) {
+			return
+		}
+		def sdkRoot = streamlineSdkRootProvider.orNull
+		if (sdkRoot == null) {
+			throw new GradleException("STREAMLINE_SDK environment variable is not set.")
+		}
+		def vendorRoot = streamlineSdkVendorRoot(sdkRoot)
+		def bridge = new File(layout.buildDirectory.get().asFile,
+				"native/streamline_bridge/${streamlineBridgeConfig}/streamlinebridge.dll")
 		def missing = []
-		def dlssSdkRoot = dlssSdkRootProvider.orNull
-		if (dlssSdkRoot == null) {
-			throw new GradleException("DLSS_SDK environment variable is not set.")
+		if (!bridge.isFile()) {
+			missing << "${bridge} (build native/streamline_bridge first)"
 		}
-		selectedNgxNativePlatforms.each { platform ->
-			def platformShimFiles = fileTree(ngxShimOutDir) {
-				include platform.shimIncludes
-			}.files
-			if (platformShimFiles.empty) {
-				missing += "${platform.name} shim library in ${ngxShimOutDir}"
-			}
-		}
-		selectedNgxNativePlatforms.each { platform ->
-			def platformVendorRoot = platform.vendorRoot(dlssSdkRoot, ngxVendorConfig)
-			def missingVendorIncludes = platform.vendorIncludes.findAll { vendorInclude ->
-				fileTree(platformVendorRoot) {
-					include vendorInclude
-				}.files.empty
-			}
-			if (!missingVendorIncludes.empty) {
-				missing += "${platform.name} vendor libraries ${missingVendorIncludes.join(', ')} in ${platformVendorRoot}"
+		streamlineVendorNames.each { name ->
+			if (!new File(vendorRoot, name).isFile()) {
+				missing << new File(vendorRoot, name)
 			}
 		}
 		if (!missing.empty) {
-			throw new GradleException("Missing NGX native inputs:\n - " + missing.join("\n - "))
+			throw new GradleException("Missing Streamline ${streamlineVariant} Windows x64 inputs:\n - "
+					+ missing.join("\n - "))
 		}
-
 		copy {
-			selectedNgxNativePlatforms.each { platform ->
-				from(fileTree(ngxShimOutDir) {
-					include platform.shimIncludes
-				}) {
-					into "caustica/natives/${platform.name}"
-				}
-				from(fileTree(platform.vendorRoot(dlssSdkRoot, ngxVendorConfig))) {
-					include platform.vendorIncludes
-					into "caustica/natives/${platform.name}"
-				}
+			from(bridge) {
+				into "caustica/natives/windows-x64"
 			}
-			into ngxNativeGenRoot
+			from(vendorRoot) {
+				include streamlineVendorNames
+				into "caustica/natives/windows-x64"
+			}
+			into streamlineNativeGenRoot
 		}
 	}
 }
 
-sourceSets.main.resources.srcDir(files(ngxNativeGenRoot).builtBy(bundleNgxNatives))
+sourceSets.main.resources.srcDir(files(streamlineNativeGenRoot).builtBy(bundleStreamlineNatives))
 
 tasks.withType(JavaCompile).configureEach {
 	it.options.release = 25

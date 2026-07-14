@@ -3,6 +3,7 @@
 /build/
 /buildSrc/build/
 native/ngx_shim/build/
+native/streamline_bridge/build/
 run/
 out/
 *.log

@@ -5,6 +5,7 @@ import dev.comfyfluffy.caustica.CausticaMod;
 import dev.comfyfluffy.caustica.rt.RtComposite;
 import dev.comfyfluffy.caustica.rt.RtContext;
 import dev.comfyfluffy.caustica.rt.terrain.RtTerrain;
+import net.minecraft.client.Minecraft;
 
 public final class VanillaRenderController {
 	public static final VanillaRenderController INSTANCE = new VanillaRenderController();
@@ -14,6 +15,7 @@ public final class VanillaRenderController {
 	private boolean projectionCaptured;
 	private boolean worldSkipped;
 	private boolean failureLatched;
+	private boolean vanillaRebuildPending;
 	private boolean loggedActive;
 	private boolean loggedWaitingForRtPlayerSection;
 	private boolean loggedRtPlayerSectionReady;
@@ -31,7 +33,7 @@ public final class VanillaRenderController {
 		this.worldSkipped = false;
 		this.baseReady = false;
 		this.inactiveReason = null;
-		this.rtActive = RtComposite.enabled();
+		this.rtActive = rtRuntimeWorkRequested();
 
 		if (!Boolean.valueOf(this.rtActive).equals(this.lastLoggedRtActive)) {
 			this.lastLoggedRtActive = this.rtActive;
@@ -105,7 +107,24 @@ public final class VanillaRenderController {
 
 	/** Runtime work switch for per-frame RT work; mirrors {@link RtComposite#enabled()}. */
 	public static boolean rtRuntimeWorkRequested() {
-		return RtComposite.enabled();
+		return RtComposite.enabled() && !INSTANCE.failureLatched && !RtComposite.INSTANCE.hasFailed();
+	}
+
+	/**
+	 * Distinguish the rebuild requested by failover from a later user/world invalidation. The former must
+	 * leave RT disabled; a later F3+A or world reset is allowed to clear the latch and retry from scratch.
+	 */
+	public boolean shouldResetRtFailureLatchForInvalidation() {
+		if (this.vanillaRebuildPending) {
+			this.vanillaRebuildPending = false;
+			return false;
+		}
+		if (this.failureLatched) {
+			this.failureLatched = false;
+			this.lastLoggedInactiveReason = null;
+			CausticaMod.LOGGER.info("RT world-cancellation failure latch cleared by render-state invalidation");
+		}
+		return true;
 	}
 
 	public void markRtCompositeResult(boolean success) {
@@ -146,6 +165,11 @@ public final class VanillaRenderController {
 		this.failureLatched = true;
 		this.baseReady = false;
 		this.inactiveReason = reason;
+		if (!this.vanillaRebuildPending) {
+			this.vanillaRebuildPending = true;
+			Minecraft.getInstance().levelExtractor.allChanged();
+			CausticaMod.LOGGER.info("Requested vanilla compiled-geometry rebuild after RT failover");
+		}
 	}
 
 	private void logInactive(String reason) {

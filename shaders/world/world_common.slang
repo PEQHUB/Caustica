@@ -2,12 +2,10 @@
 // records and serializers from Slang reflection.
 module world_common;
 
-// Read-only device pointer with explicit std430 layout. The layout parameter is LOAD-BEARING: a bare
-// Ptr<T> gets Slang's "natural" layout (no vec4 16-byte alignment → e.g. WorldPush.sunDir lands at 200
-// instead of the Java writer's 208, silently reading garbage) and additionally requires the
-// scalarBlockLayout device feature. Keep std430 unless RtDeviceBringup explicitly enables that feature;
-// this alias is the single layout switch and generated Java serialization stays in lock-step.
-public typealias ConstPtr<T> = Ptr<T, Access.Read, AddressSpace.Device, Std430DataLayout>;
+// Read-only device pointer. Current Vulkan SDK Slang exposes Ptr with three generic arguments; explicit
+// vk::offset annotations below pin the one natural-layout tail that differs from std430 so the generated
+// Java serializer remains in lock-step without requiring scalarBlockLayout.
+public typealias ConstPtr<T> = Ptr<T, Access.Read, AddressSpace.Device>;
 
 // Push constant block. Only the first 8 bytes (worldPushAddr) are meaningful to rgen/rchit/rmiss;
 // the hot inline lanes (tableAddr/entityTableAddr/frameIndex) exist so world.rahit's per-hit
@@ -40,18 +38,18 @@ public struct WorldPush {
     public uint64_t entityTableAddr;  // entity geometry table
     public uint     flags;            // bit0 camera submerged, bit1 PBR BRDF, bit4 water waves
     public uint     maxBounces;
-    public float4   sunDir;           // xyz true sun direction, w dayFactor 0..1
-    public float4   lightDir;         // xyz active NEE light dir, w square half-angle (rad)
-    public float4   lightRadiance;    // xyz HDR light radiance, w star brightness
-    public float4   moonDir;          // xyz moon direction, w moonPhase (0 full .. 4 new)
-    public float4   celestial;        // xyz celestial rotation axis, w star angle (rad)
-    public float4   sunUv;            // vanilla sun sprite atlas rect (u0,v0,u1,v1)
-    public float4   moonUv;           // vanilla current-moon-phase sprite atlas rect
-    public float4   waterParams;      // xyz camera-biome water tint, w wave time (s)
-    public float4   waterAnchor;      // xy world-stable wave-domain anchor
-    public float4x4 curViewProj;      // forward camera-relative view-projection
-    public uint     breakCount;
-    public BreakEntry breaking[8];    // Java capacity and breakCount serialization are generated from this
+    [vk::offset(208)] public float4   sunDir;        // xyz true sun direction, w dayFactor 0..1
+    [vk::offset(224)] public float4   lightDir;      // xyz active NEE light dir, w square half-angle (rad)
+    [vk::offset(240)] public float4   lightRadiance; // xyz HDR light radiance, w star brightness
+    [vk::offset(256)] public float4   moonDir;       // xyz moon direction, w moonPhase (0 full .. 4 new)
+    [vk::offset(272)] public float4   celestial;     // xyz celestial rotation axis, w star angle (rad)
+    [vk::offset(288)] public float4   sunUv;         // vanilla sun sprite atlas rect (u0,v0,u1,v1)
+    [vk::offset(304)] public float4   moonUv;        // vanilla current-moon-phase sprite atlas rect
+    [vk::offset(320)] public float4   waterParams;   // xyz camera-biome water tint, w wave time (s)
+    [vk::offset(336)] public float4   waterAnchor;   // xy world-stable wave-domain anchor
+    [vk::offset(352)] public float4x4 curViewProj;   // forward camera-relative view-projection
+    [vk::offset(416)] public uint     breakCount;
+    [vk::offset(432)] public BreakEntry breaking[8]; // generated Java capacity/serialization
 };
 
 // Radiance-ray payload (location 0). Member order and types are a cross-stage ABI.

@@ -344,8 +344,16 @@ public final class RtTerrain {
         Minecraft mc = Minecraft.getInstance();
         ClientLevel level = mc.level;
         if (level == null || mc.player == null) {
-            clear(ctx, false); // left the world — drop all geometry (drains + frees, incl. any in-flight build)
+            // No world needs no placeholder table. Recreating one here made every menu tick destroy it
+            // again, forcing vkDeviceWaitIdle and flushing Streamline's asynchronous present workers.
+            clear(ctx, true); // drop all geometry once, including any in-flight build
             return;
+        }
+
+        // Re-establish the sky/entities-only placeholder once on world entry. It remains live until real
+        // terrain publishes instead of being churned while no world exists.
+        if (!ready) {
+            ensureEmptyTableReady(ctx);
         }
 
         // Full clear on an explicit invalidation — vanilla's LevelExtractor.allChanged() via the Fabric

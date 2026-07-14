@@ -73,6 +73,7 @@ public abstract class VideoSettingsScreenMixin {
         list.addHeader(CAUSTICA$RT_HEADER);
         list.addSmall(RtVideoOptions.exposureOptions());
         list.addBig(RtVideoOptions.tonemappingButton((Screen) (Object) this, list::applyUnsavedChanges));
+        list.addBig(RtVideoOptions.frameGenerationButton((Screen) (Object) this, list::applyUnsavedChanges));
         list.addSmall(RtVideoOptions.runtimeOptions());
         list.addHeader(CAUSTICA$FIRST_PERSON_HEADER);
         list.addSmall(RtVideoOptions.firstPersonOptions());

@@ -3,6 +3,10 @@ package dev.comfyfluffy.caustica.mixin;
 import com.llamalad7.mixinextras.sugar.Local;
 import com.mojang.blaze3d.vulkan.VulkanInstance;
 import dev.comfyfluffy.caustica.CausticaMod;
+import dev.comfyfluffy.caustica.streamline.StreamlineRuntime;
+import org.lwjgl.PointerBuffer;
+import org.lwjgl.vulkan.VkAllocationCallbacks;
+import org.lwjgl.vulkan.VkInstanceCreateInfo;
 import java.util.Set;
 import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.Mixin;
@@ -30,6 +34,21 @@ public abstract class VulkanInstanceMixin {
 	@Shadow
 	@Final
 	private Set<String> enabledExtensions;
+
+	@Inject(method = "<init>(IZZ)V", at = @At("HEAD"))
+	private static void caustica$initializeStreamline(int debugVerbosity, boolean wantsDebugLabels, boolean validation,
+			CallbackInfo ci) {
+		// Streamline's manual-hooking preference must be established before the first Vulkan API call.
+		StreamlineRuntime.initializeForVulkan();
+	}
+
+	@org.spongepowered.asm.mixin.injection.Redirect(method = "<init>(IZZ)V",
+			at = @At(value = "INVOKE",
+					target = "Lorg/lwjgl/vulkan/VK12;vkCreateInstance(Lorg/lwjgl/vulkan/VkInstanceCreateInfo;Lorg/lwjgl/vulkan/VkAllocationCallbacks;Lorg/lwjgl/PointerBuffer;)I"))
+	private int caustica$createInstanceThroughStreamline(VkInstanceCreateInfo createInfo,
+			VkAllocationCallbacks allocator, PointerBuffer instanceOut) {
+		return StreamlineRuntime.vkCreateInstance(createInfo, allocator, instanceOut);
+	}
 
 	@Inject(method = "<init>", at = @At(value = "INVOKE", target = "Ljava/util/Set;size()I"))
 	private void caustica$addColorSpaceExtension(int debugVerbosity, boolean wantsDebugLabels, boolean validation,

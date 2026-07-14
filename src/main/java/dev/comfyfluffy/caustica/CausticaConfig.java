@@ -57,10 +57,10 @@ public final class CausticaConfig {
         @SuppressWarnings("unused")
         Object[] touch = {
             Rt.ENABLED, Rt.Composite.SPP, Rt.Composite.MAX_BOUNCES, Rt.Terrain.ASYNC_DISPATCH_PER_TICK, Rt.Omm.ENABLED,
-            Rt.Entities.ENABLED, Rt.Entities.GLOW_ENABLED, Rt.FirstPerson.ENABLED, Rt.EntityTextures.MAX_TEXTURES,
-            Rt.DlssRr.ENABLED, Rt.Fg.ENABLED,
+            Rt.Entities.ENABLED, Rt.Entities.GLOW_ENABLED, Rt.EntityTextures.MAX_TEXTURES, Rt.DlssRr.ENABLED,
+            Rt.Fg.ENABLED, Rt.Fg.MODE, Rt.Fg.MULTI_FRAME_COUNT, Rt.Fg.DYNAMIC_TARGET_FPS,
             Rt.Reflex.ENABLED, Rt.Exposure.MODE, Rt.FrameStats.ENABLED,
-            Rt.Sdr.TONEMAP_MODE, Rt.Hdr.ENABLED, Rt.Hdr.TONEMAP_MODE, Ngx.PATH,
+            Rt.Sdr.TONEMAP_MODE, Rt.Hdr.ENABLED, Rt.Hdr.TONEMAP_MODE,
         };
     }
 
@@ -94,12 +94,12 @@ public final class CausticaConfig {
                         + " stream-fallback-budget-ms is the per-tick slice used only when no world frame is\n"
                         + " streaming (loading screens), where a long pass hitches nothing.");
         FILE.setComment("frame-generation",
-                " DLSS Frame Generation. Default off; gated additionally by hardware/driver availability.\n"
-                        + " multi-frame-count: frames generated per rendered frame (1 = 2x, 2 = 3x, ...), clamped\n"
-                        + " at runtime to the driver's reported DLSSG.MultiFrameCountMax.");
+                " Streamline DLSS Frame Generation. mode: off, fixed, dynamic, or auto (legacy).\n"
+                        + " multi-frame-count is generated frames per rendered frame (1 = 2x, 2 = 3x, ...).\n"
+                        + " dynamic-target-fps 0 follows display refresh. Vulkan DLSS-G requires VSync off.");
         FILE.setComment("reflex",
-                " NVIDIA Reflex (VK_NV_low_latency2). Default off; gated additionally by device support.\n"
-                        + " minimum-interval-us: 0 = no framerate cap (Reflex just paces submission).");
+                " Streamline Reflex Low Latency. DLSS-G forces effective On while generation is active.\n"
+                        + " minimum-interval-us: 0 = no frame-rate cap; PCL markers and sleep still run when Off.");
         FILE.setComment("sdr",
                 " SDR display mapping for the vanilla main target. tonemap-mode defaults to agx to preserve\n"
                         + " Caustica's existing SDR look. Other modes are pbr-neutral, reinhard, aces, lottes,\n"
@@ -620,20 +620,6 @@ public final class CausticaConfig {
             }
         }
 
-        public static final class FirstPerson {
-            public static final BooleanSetting ENABLED =
-                    bool("caustica.rt.firstPerson", "first-person.enabled", true);
-            public static final FloatSetting FORWARD_OFFSET =
-                    clampedFloat("caustica.rt.firstPerson.forwardOffset", "first-person.forward-offset", -0.20f, -0.30f, 0.30f);
-            public static final FloatSetting VERTICAL_OFFSET =
-                    clampedFloat("caustica.rt.firstPerson.verticalOffset", "first-person.vertical-offset", 0.0f, -0.30f, 0.30f);
-            public static final FloatSetting LATERAL_OFFSET =
-                    clampedFloat("caustica.rt.firstPerson.lateralOffset", "first-person.lateral-offset", 0.0f, -0.20f, 0.20f);
-
-            private FirstPerson() {
-            }
-        }
-
         public static final class EntityTextures {
             public static final IntSetting MAX_TEXTURES =
                     intAtLeast("caustica.rt.maxEntityTextures", "entities.textures.max-textures", 256, 1);
@@ -662,22 +648,56 @@ public final class CausticaConfig {
 
         /** DLSS Frame Generation. Default off; gated additionally by hardware/driver availability. */
         public static final class Fg {
+            /** Legacy compatibility switch; new code and UI use {@link #MODE}. */
             public static final BooleanSetting ENABLED = bool("caustica.rt.fg", "frame-generation.enabled", false);
+            public static final StringSetting MODE = string(
+                    "caustica.rt.fg.mode", "frame-generation.mode", "off", Fg::sanitizeMode);
             public static final IntSetting MULTI_FRAME_COUNT =
                     intAtLeast("caustica.rt.fg.multiFrameCount", "frame-generation.multi-frame-count", 1, 1);
+            public static final FloatSetting DYNAMIC_TARGET_FPS = clampedFloat(
+                    "caustica.rt.fg.dynamicTargetFps", "frame-generation.dynamic-target-fps", 0.0f, 0.0f, 1000.0f);
+            public static final BooleanSetting UI_RECOMPOSITION = bool(
+                    "caustica.rt.fg.uiRecomposition", "frame-generation.ui-recomposition", true);
+            public static final BooleanSetting FULLSCREEN_MENU_DETECTION = bool(
+                    "caustica.rt.fg.fullscreenMenuDetection", "frame-generation.fullscreen-menu-detection", true);
+            public static final BooleanSetting SHOW_ONLY_INTERPOLATED = bool(
+                    "caustica.rt.fg.showOnlyInterpolated", "frame-generation.show-only-interpolated", false);
+            public static final StringSetting QUEUE_PARALLELISM = string(
+                    "caustica.rt.fg.queueParallelism", "frame-generation.queue-parallelism", "safe",
+                    value -> "no-client-queues".equalsIgnoreCase(value) ? "no-client-queues" : "safe");
 
             private Fg() {
             }
+
+            public static String mode() {
+                String mode = MODE.get();
+                return "off".equals(mode) && ENABLED.value() ? "fixed" : mode;
+            }
+
+            public static boolean requested() {
+                return !"off".equals(mode());
+            }
+
+            public static void setMode(String mode) {
+                String sanitized = sanitizeMode(mode);
+                MODE.set(sanitized);
+                ENABLED.set(!"off".equals(sanitized));
+            }
+
+            private static String sanitizeMode(String value) {
+                if (value == null) {
+                    return "off";
+                }
+                return switch (value.toLowerCase(java.util.Locale.ROOT)) {
+                    case "fixed", "dynamic", "auto" -> value.toLowerCase(java.util.Locale.ROOT);
+                    default -> "off";
+                };
+            }
         }
 
-        /**
-         * NVIDIA Reflex ({@code VK_NV_low_latency2}). Default off; gated additionally by device support.
-         * Phase 0 (extension + capability probe only, see {@code RtDeviceBringup}/{@code RtReflex}) — the
-         * per-frame sleep call + latency markers + the swapchain {@code VkSwapchainLatencyCreateInfoNV} the
-         * spec requires for {@code vkSetLatencySleepModeNV} to take effect land in a later phase.
-         */
+        /** Streamline Reflex modes. Sleep and PCL markers remain active when the visible mode is Off. */
         public static final class Reflex {
-            public static final BooleanSetting ENABLED = bool("caustica.rt.reflex", "reflex.enabled", false);
+            public static final BooleanSetting ENABLED = bool("caustica.rt.reflex", "reflex.enabled", true);
             public static final BooleanSetting LOW_LATENCY_BOOST =
                     bool("caustica.rt.reflex.boost", "reflex.low-latency-boost", false);
             public static final IntSetting MINIMUM_INTERVAL_US =
@@ -1031,13 +1051,6 @@ public final class CausticaConfig {
                 }
                 return "naka-rushton";
             }
-        }
-    }
-
-    public static final class Ngx {
-        public static final OptionalStringSetting PATH = optionalString("caustica.ngx.path", "ngx.path");
-
-        private Ngx() {
         }
     }
 
