@@ -45,6 +45,7 @@ public final class StreamlineRuntime {
             "sl.dlss_g.dll", "sl.reflex.dll", "sl.pcl.dll", "nvngx_dlssg.dll", "nvngx_dlssd.dll", "NvLowLatencyVk.dll",
             "reflex.license.txt", "nvngx_dlss.license.txt");
     private static final ThreadLocal<Integer> VULKAN_AVAILABILITY_PROBE_DEPTH = new ThreadLocal<>();
+    private static final String VULKAN_MAILBOX_VSYNC_CONFIGURATION = "{\n  \"vSyncConfig\": 1\n}\n";
 
     private static final StreamlineRuntime INSTANCE = new StreamlineRuntime();
 
@@ -107,9 +108,14 @@ public final class StreamlineRuntime {
         return "production".equalsIgnoreCase(variant());
     }
 
-    /** Development behavior JSON is deliberately unsupported in normal packages. */
     public static boolean behaviorOverrideActive() {
-        return false;
+        return vulkanMailboxVsyncCompatibilityEnabled();
+    }
+
+    public static boolean vulkanMailboxVsyncCompatibilityEnabled() {
+        Properties properties = packagedProperties();
+        return "development".equals(normalizeVariant(properties.getProperty("variant")))
+                && Boolean.parseBoolean(properties.getProperty("vulkanMailboxVsync", "false"));
     }
 
     public static Path diagnosticsDirectory() {
@@ -351,13 +357,11 @@ public final class StreamlineRuntime {
         String packagedVariant = variant();
         Path directory = packagedNativeDirectory(gameDirectory(), packagedVariant);
         Files.createDirectories(directory);
-        // Older development builds wrote behavior-changing plugin JSON beside the DLLs. A package never
-        // creates those files, and extraction removes stale copies before Streamline sees this directory.
-        removeStaleBehaviorConfiguration(directory);
         boolean complete = true;
         for (String name : WINDOWS_NATIVE_NAMES) {
             complete &= extractBundled(name, directory.resolve(name));
         }
+        configureBehaviorConfiguration(directory, vulkanMailboxVsyncCompatibilityEnabled());
         return complete ? directory : null;
     }
 
@@ -404,6 +408,27 @@ public final class StreamlineRuntime {
 
     static void removeStaleBehaviorConfiguration(Path pluginDirectory) throws IOException {
         Files.deleteIfExists(pluginDirectory.resolve("sl.dlss_g.json"));
+    }
+
+    static void configureBehaviorConfiguration(Path pluginDirectory, boolean vulkanMailboxVsync) throws IOException {
+        Path configuration = pluginDirectory.resolve("sl.dlss_g.json");
+        if (vulkanMailboxVsync) {
+            Files.writeString(configuration, VULKAN_MAILBOX_VSYNC_CONFIGURATION);
+        } else {
+            Files.deleteIfExists(configuration);
+        }
+    }
+
+    private static Properties packagedProperties() {
+        Properties properties = new Properties();
+        try (InputStream stream = StreamlineRuntime.class.getResourceAsStream("/caustica/streamline.properties")) {
+            if (stream != null) {
+                properties.load(stream);
+            }
+        } catch (IOException exception) {
+            CausticaMod.LOGGER.warn("Could not read packaged Streamline properties", exception);
+        }
+        return properties;
     }
 
     private static String normalizeVariant(String value) {

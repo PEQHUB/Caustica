@@ -2,6 +2,7 @@ package dev.comfyfluffy.caustica.streamline;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.nio.file.Files;
@@ -29,6 +30,16 @@ final class StreamlineRuntimePackagingTest {
         Files.writeString(stale, "{\"mode\": 1, \"numFramesToGenerate\": 1}");
         StreamlineRuntime.removeStaleBehaviorConfiguration(temporaryDirectory);
         assertFalse(Files.exists(stale));
-        assertFalse(StreamlineRuntime.behaviorOverrideActive());
+    }
+
+    @Test
+    void vulkanMailboxVsyncWritesOnlyTheInternalVsyncOverride() throws Exception {
+        Files.createDirectories(temporaryDirectory);
+        StreamlineRuntime.configureBehaviorConfiguration(temporaryDirectory, true);
+        assertEquals("{\n  \"vSyncConfig\": 1\n}\n",
+                Files.readString(temporaryDirectory.resolve("sl.dlss_g.json")));
+
+        StreamlineRuntime.configureBehaviorConfiguration(temporaryDirectory, false);
+        assertFalse(Files.exists(temporaryDirectory.resolve("sl.dlss_g.json")));
     }
 }

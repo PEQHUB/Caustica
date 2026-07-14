@@ -90,7 +90,9 @@ public final class StreamlineAcceptanceReport {
                 .append("    \"streamlineVariant\": ").append(quote(StreamlineRuntime.variant())).append(",\n")
                 .append("    \"production\": ").append(StreamlineRuntime.productionVariant()).append(",\n")
                 .append("    \"developmentBehaviorOverrideActive\": ")
-                .append(StreamlineRuntime.behaviorOverrideActive()).append("\n")
+                .append(StreamlineRuntime.behaviorOverrideActive()).append(",\n")
+                .append("    \"vulkanMailboxVsyncCompatibility\": ")
+                .append(StreamlineRuntime.vulkanMailboxVsyncCompatibilityEnabled()).append("\n")
                 .append("  },\n")
                 .append("  \"primaryFeature\": ").append(quote(fgPrimary ? "DLSSG" : "DLSSD")).append(",\n")
                 .append("  \"verdict\": ").append(quote(fgPrimary ? fgVerdict : rrVerdict)).append(",\n");
