@@ -64,10 +64,19 @@ static const uint MATERIAL_OPAQUE = 0u;
 static const uint MATERIAL_WATER = 1u;
 static const uint MATERIAL_PARTICLE = 2u;
 static const uint MATERIAL_GLASS = 3u;
+static const uint OPTICAL_NONE = 0u;
+static const uint OPTICAL_THIN_GLASS = 2u;
+static const uint OPTICAL_SOLID_GLASS = 3u;
+static const uint OPTICAL_SOLID_ICE = 4u;
+static const uint OPTICAL_TRANSLUCENT_SURFACE = 5u;
 static const uint FRAME_FLAG_RR_GUIDES = 1u << 5u;
 static const uint FRAME_FLAG_FG_GUIDES = 1u << 6u;
 
 uint payloadMaterial() { return payload.flags & PAYLOAD_MATERIAL_MASK; }
+uint payloadOpticalClass() {
+    return (payload.flags & PAYLOAD_OPTICAL_CLASS_MASK) >> PAYLOAD_OPTICAL_CLASS_SHIFT;
+}
+bool payloadInterfaceEntering() { return (payload.flags & PAYLOAD_INTERFACE_ENTERING) != 0u; }
 // Set by world.rchit only on a MATERIAL_WATER hit (see PAYLOAD_WATER_ENTERING) — whether the ray was
 // travelling into the water volume (vs. out of it) at this hit's face.
 bool payloadWaterEntering() { return (payload.flags & PAYLOAD_WATER_ENTERING) != 0u; }
@@ -98,6 +107,7 @@ static const float3 SKY_DIFF_ALBEDO = float3(0.5, 0.5, 0.5);
 
 // Stained glass / ice (material 3): a thin colored dielectric. IOR ~1.5 (soda-lime glass).
 static const float GLASS_IOR = 1.52;
+static const float ICE_IOR = 1.31;
 static const float GLASS_GUIDE_ROUGH = 0.04;
 // Transmitted-ray origin offset when crossing a glass face. Must be SMALLER than the terrain-side
 // TRANSLUCENT_INSET (RtTerrain, 2e-4 blocks): glass is recessed into its block by that inset, so a face
@@ -771,22 +781,78 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
         float3 hitPos = ro + rd * payload.hitT;
         rayConeWidth = max(rayConeWidth + rayConeSpread * max(payload.hitT, 0.0), RAY_CONE_MIN_WIDTH);
         uint material = payloadMaterial();
+        uint opticalClass = material == MATERIAL_GLASS ? payloadOpticalClass() : OPTICAL_NONE;
+        bool translucentSurface = material == MATERIAL_GLASS
+                && opticalClass == OPTICAL_TRANSLUCENT_SURFACE;
 
-        // Stained glass / ice (material 3): a thin colored dielectric. Stochastically reflect (Fresnel
-        // glint) or transmit; on transmission the throughput is multiplied by the pane's tint, so light
-        // passing through is colored. payload.albedo is the transmission tint (texel rgb mixed toward
-        // white by 1 − opacity). Treated as a thin pane, so the transmitted ray continues straight (no
-        // refraction bend) — the instance stays double-sided and the normal already faces the incoming ray.
+        // TRANSLUCENT is a render bucket, not a material. Honey, slime, portals and modded overlays remain
+        // alpha surfaces instead of silently receiving glass refraction. This branch adds no work to rays
+        // that do not hit such a surface.
+        if (translucentSurface) {
+            float opacity = clamp(payloadSss(), 0.0, 1.0);
+            if (captureGuides && bounce == 0) {
+                gv_normal = n;
+                gv_rough = payloadRoughness();
+                gv_specAlb = pbr ? payload.f0 : float3(0.0, 0.0, 0.0);
+                gv_albedo = payload.albedo;
+                gv_hitCamRel = hitPos - pc.camOffset;
+                gv_motionHitCamRel = gv_hitCamRel;
+                gv_motionUseRefracted = false;
+                gv_motionObjDisp = payload.motionPrev;
+            }
+            if (primaryOnly) {
+                break;
+            }
+            if (opacity < 1.0 && rndf(seed) >= opacity) {
+                ro = hitPos - n * GLASS_TRANSMIT_BIAS;
+                continue;
+            }
+            material = MATERIAL_OPAQUE;
+        }
+
+        // Panes are collapsed to one effective thin sheet; solid glass and ice refract through their
+        // closed geometry. No medium stack, ordered shadow walk, secondary guide trace, or extra pipeline
+        // is introduced: ordinary pixels retain the upstream path-tracing kernel and cost.
         if (material == MATERIAL_GLASS) {
             if (bounce >= maxBounces && !(captureGuides && bounce == 0)) {
                 break;
             }
             float3 glassTint = payload.albedo;
+            bool entering = payloadInterfaceEntering();
+            bool thinPane = opticalClass == OPTICAL_THIN_GLASS;
+
+            // A pane model has an entry and exit shell. The entry is the effective sheet; a later exit is
+            // crossed without a second tint/Fresnel event. Keep a primary exit for a camera starting inside.
+            if (thinPane && !entering && bounce > 0) {
+                ro = hitPos - n * GLASS_TRANSMIT_BIAS;
+                continue;
+            }
+
+            float materialIor = opticalClass == OPTICAL_SOLID_ICE ? ICE_IOR : GLASS_IOR;
+            float outsideIor = inWater ? WATER_IOR : 1.0;
+            float etaI = thinPane ? outsideIor : (entering ? outsideIor : materialIor);
+            float etaT = thinPane ? materialIor : (entering ? materialIor : outsideIor);
             float cosI = clamp(dot(-rd, n), 0.0, 1.0);
-            float F = fresnelDielectric(cosI, 1.0, GLASS_IOR);
+            float F = fresnelDielectric(cosI, etaI, etaT);
+            if (thinPane) {
+                // Energy-conserving incoherent two-interface sheet: collapse the unseen back face.
+                F = 2.0 * F / (1.0 + F);
+            }
+            float3 transmittedDir = thinPane ? rd : refract(rd, n, etaI / etaT);
+            if (dot(transmittedDir, transmittedDir) <= 0.0) {
+                F = 1.0;
+            } else {
+                transmittedDir = normalize(transmittedDir);
+            }
+
+            // Approximate volume absorption once per completed solid traversal. This is deliberately local
+            // to the glass hit and does not replace or alter upstream water medium attenuation.
+            if (!thinPane && !entering) {
+                throughput *= glassTint;
+            }
             if (captureGuides && bounce == 0) { // primary glass hit: feed RR a smooth dielectric specular surface
                 gv_normal = n;
-                gv_rough = GLASS_GUIDE_ROUGH;
+                gv_rough = opticalClass == OPTICAL_SOLID_ICE ? 0.12 : GLASS_GUIDE_ROUGH;
                 gv_specAlb = float3(F, F, F);
                 gv_albedo = glassTint;            // demodulate by the transmission tint
                 gv_hitCamRel = hitPos - pc.camOffset;
@@ -801,7 +867,10 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
                 rd = reflect(rd, n);
                 ro = hitPos + n * SURF_BIAS;       // reflected ray stays on the incidence side
             } else {
-                throughput *= glassTint;           // colored transmission
+                if (thinPane) {
+                    throughput *= glassTint;
+                }
+                rd = transmittedDir;
                 ro = hitPos - n * GLASS_TRANSMIT_BIAS; // cross to the far side without overshooting a close neighbour
             }
             showCelestial = true;                  // specular interface: the continuation ray may see the disc
@@ -931,7 +1000,7 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
         }
 
         float3 albedo = payload.albedo;
-        float sss = payloadSss(); // LabPBR SSS strength (0 when absent)
+        float sss = translucentSurface ? 0.0 : payloadSss(); // alpha occupied this lane for surfaces
         float3 p = hitPos + n * SURF_BIAS;
         float3 v = -rd; // view direction (toward the camera / incoming ray)
 

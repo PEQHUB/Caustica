@@ -27,6 +27,12 @@ static const uint MATERIAL_WATER = 1u;
 static const uint MATERIAL_PARTICLE = 2u;
 static const uint MATERIAL_GLASS = 3u;
 
+// Compact TRANSLUCENT material metadata stored in the existing Prim.tint.w lane.
+static const uint OPTICAL_THIN_GLASS = 2u;
+static const uint OPTICAL_SOLID_GLASS = 3u;
+static const uint OPTICAL_SOLID_ICE = 4u;
+static const uint OPTICAL_TRANSLUCENT_SURFACE = 5u;
+
 void payloadSetPacked(inout Payload payload, uint material, float roughness, float metalness, float emission, float sss) {
     payload.flags = material;
     payload.roughMetal = packHalf2(float2(roughness, metalness));
@@ -375,26 +381,39 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
 
     // LabPBR normal map (_n), gated by mat.w — shared decode (TBN from position-fetch + UVs).
     float ao = 1.0;
-    if (pr.mat.w > 0.5) {
+    if (pr.tint.w < 1.5 && pr.mat.w > 0.5) {
         n = perturbNormal(n, tp0, tp1, tp2, uv0, uv1, uv2, vdir,
                 blockNormalAtlas.SampleLevel(uv, blockLod), ao);
     }
 
-    // Stained glass / ice (tint.w == 2, flagged at extraction): a thin colored filter resolved in raygen
-    // (material 3). albedo carries the transmission tint = texel rgb mixed toward white by (1 − opacity),
-    // so a more opaque texel tints transmitted light more strongly.
+    // Explicit glass/ice/alpha-surface class. Glass carries a transmission tint; unrelated translucent
+    // blocks retain their ordinary color and opacity instead of inheriting a glass IOR.
     if (pr.tint.w > 1.5) {
+        uint opticalClass = uint(pr.tint.w + 0.5);
         float4 gtex = blockAtlas.SampleLevel(uv, blockLod);
         float3 gtexRgb = srgbToLinear(gtex.rgb);
-        // Translucent blocks (glass, ice, …) are breakable too — apply the same overlay here, reusing
-        // gtex (already sampled above) rather than re-fetching blockAtlas.
-        payload.albedo = applyBreaking(lerp(float3(1.0, 1.0, 1.0), gtexRgb * tint * ao, gtex.a),
-                rayCone, WorldRayOrigin(), WorldRayDirection(), RayTCurrent(), n);
+        bool dielectric = opticalClass == OPTICAL_THIN_GLASS
+                || opticalClass == OPTICAL_SOLID_GLASS || opticalClass == OPTICAL_SOLID_ICE;
+        float3 opticalColor = dielectric
+                ? lerp(float3(1.0, 1.0, 1.0), gtexRgb * tint * ao, gtex.a)
+                : gtexRgb * tint * ao;
+        payload.albedo = applyBreaking(opticalColor, rayCone, WorldRayOrigin(), WorldRayDirection(),
+                RayTCurrent(), n);
         payload.normal = n;
         payload.hitT = RayTCurrent();
         payload.motionPrev = float3(0.0, 0.0, 0.0);
-        payload.f0 = float3(0.04, 0.04, 0.04);
-        payloadSetPacked(payload, MATERIAL_GLASS, 0.05, 0.0, 0.0, 0.0);
+        payload.f0 = dielectric ? float3(0.04, 0.04, 0.04) : float3(0.02, 0.02, 0.02);
+        float roughness = opticalClass == OPTICAL_SOLID_ICE ? 0.12
+                : (dielectric ? 0.05 : 0.65);
+        float ew = pr.normal.w;
+        float emission = ew >= 1.5 ? ew - 2.0 : ew;
+        // The SSS half-lane is unused by this material family; alpha surfaces use it for opacity.
+        payloadSetPacked(payload, MATERIAL_GLASS, roughness, 0.0, emission,
+                dielectric ? 0.0 : clamp(gtex.a, 0.0, 1.0));
+        payload.flags |= opticalClass << PAYLOAD_OPTICAL_CLASS_SHIFT;
+        if (entering) {
+            payload.flags |= PAYLOAD_INTERFACE_ENTERING;
+        }
         return;
     }
 

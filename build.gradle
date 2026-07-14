@@ -102,6 +102,28 @@ def resolveVulkanTool = { String name ->
 	return "${name}${exe}" // fall back to PATH; exec fails with a clear message if absent
 }
 
+// Keep the Vulkan SDK and shader compiler identities independent. Streamline's native bridge needs the
+// real Vulkan SDK, while production shaders are reviewed and accepted specifically with Slang 2026.13.
+def requiredSlangVersion = "2026.13"
+def configuredSlangc = (findProperty("slangc") ?: System.getenv("CAUSTICA_SLANGC"))?.toString()
+if (!configuredSlangc) {
+	throw new GradleException("Pinned Slang ${requiredSlangVersion} is required. Set CAUSTICA_SLANGC "
+			+ "or pass -Pslangc=<path-to-slangc>.")
+}
+def pinnedSlangc = file(configuredSlangc)
+if (!pinnedSlangc.isFile()) {
+	throw new GradleException("Pinned Slang compiler does not exist: ${pinnedSlangc.absolutePath}")
+}
+def slangVersionProbe = providers.exec {
+	commandLine pinnedSlangc.absolutePath, "-version"
+}
+def actualSlangVersion = (slangVersionProbe.standardOutput.asText.get()
+		+ "\n" + slangVersionProbe.standardError.asText.get()).trim()
+if (!actualSlangVersion.readLines().any { it.trim() == requiredSlangVersion }) {
+	throw new GradleException("Expected Slang ${requiredSlangVersion}, got '${actualSlangVersion}' from "
+			+ pinnedSlangc.absolutePath)
+}
+
 abstract class CompileShaders extends DefaultTask {
 	@InputDirectory abstract DirectoryProperty getSrcDir()
 	@OutputDirectory abstract DirectoryProperty getOutDir()
@@ -180,6 +202,16 @@ abstract class CompileShaders extends DefaultTask {
 				compileOne(src, spv, [])
 			}
 		}
+		// Slang 2026.13 compiles the reviewed streamline-core raygen to 114,068 bytes. Glass-only is
+		// allowed a small bounded delta, but never the multi-hundred-KB expansion that halved all-scene
+		// performance in the rejected hybrid integration.
+		["world.rgen.spv", "world_nv.rgen.spv"].each { name ->
+			def raygen = new File(scratchDir, name)
+			if (!raygen.isFile() || raygen.length() > 121_000L) {
+				throw new GradleException("Glass-only world raygen complexity budget exceeded: ${name} is "
+						+ "${raygen.isFile() ? raygen.length() : 'missing'} bytes (limit 121000)")
+			}
+		}
 		outDirFile.mkdirs()
 		outDirFile.listFiles().findAll { it.isFile() && it.name.endsWith(".spv") }.each { it.delete() }
 		scratchDir.listFiles().findAll { it.isFile() }.each { src ->
@@ -196,7 +228,7 @@ def compileShaders = tasks.register("compileShaders", CompileShaders) {
 	outDir = layout.buildDirectory.dir("generated/shaders/caustica/rt")
 	glslang = resolveVulkanTool("glslangValidator")
 	spirvVal = resolveVulkanTool("spirv-val")
-	slangc = resolveVulkanTool("slangc")
+	slangc = pinnedSlangc.absolutePath
 }
 
 def generateShaderRecords = tasks.register("generateShaderRecords", GenerateShaderRecords) {
@@ -204,7 +236,7 @@ def generateShaderRecords = tasks.register("generateShaderRecords", GenerateShad
 	description = "Generates typed Java shader records and serializers from Slang reflection."
 	worldSourceDir = file("shaders/world")
 	probeSource = file("shaders/world/world_layout_probe.slang")
-	slangc = resolveVulkanTool("slangc")
+	slangc = pinnedSlangc.absolutePath
 	spirvVal = resolveVulkanTool("spirv-val")
 	outDir = layout.buildDirectory.dir("generated/sources/shaderRecords")
 }

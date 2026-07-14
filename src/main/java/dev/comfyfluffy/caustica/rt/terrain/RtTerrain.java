@@ -46,7 +46,12 @@ import net.minecraft.client.resources.model.geometry.BakedQuad;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.SectionPos;
 import net.minecraft.tags.FluidTags;
+import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.IceBlock;
 import net.minecraft.world.level.block.RenderShape;
+import net.minecraft.world.level.block.StainedGlassBlock;
+import net.minecraft.world.level.block.StainedGlassPaneBlock;
+import net.minecraft.world.level.block.TintedGlassBlock;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.material.FluidState;
 import net.minecraft.util.ARGB;
@@ -2192,6 +2197,12 @@ public final class RtTerrain {
         // separates from the front). Pooled — reset each block, never reallocated steady-state.
         private static final float OFFSET = 2.0e-4f;         // outward nudge (blocks) to break coplanar depth ties
         private static final float TRANSLUCENT_INSET = 2.0e-4f; // inward recess (blocks) for glass/ice vs coplanar neighbours
+        // Compact material routing only. Water remains in its independent upstream bucket and shader path.
+        // These values are stored in Prim.tint.w and must match world.rchit/world.rgen.
+        private static final int OPTICAL_THIN_GLASS = 2;
+        private static final int OPTICAL_SOLID_GLASS = 3;
+        private static final int OPTICAL_SOLID_ICE = 4;
+        private static final int OPTICAL_TRANSLUCENT_SURFACE = 5;
         private static final float COINCIDENT_EPS = 1.0e-4f; // verts this close are "the same" point
         private static final int RESOLVE_CAP = 128;          // skip the O(n^2) resolve for pathological blocks
         private final List<PendingQuad> pending = new ArrayList<>(8);
@@ -2221,8 +2232,10 @@ public final class RtTerrain {
             // are never the water bucket (fluids only). The non-SOLID flag also marks overlay candidates.
             q.cutout = quad.materialInfo().layer() != ChunkSectionLayer.SOLID;
             // TRANSLUCENT (stained glass, ice, honey, slime, nether portal): a colored-transmission
-            // dielectric resolved in the path tracer (tint.w == 2), excluded from the binary alpha cutout.
+            // material excluded from binary alpha cutout. Its explicit class prevents unrelated alpha
+            // surfaces from silently inheriting glass Fresnel/refraction.
             q.translucent = quad.materialInfo().layer() == ChunkSectionLayer.TRANSLUCENT;
+            q.opticalClass = q.translucent ? opticalClass(state) : 0;
 
             // Biome tint: tintIndex >= 0 means biome-colored (grass/foliage). In 26.2 the color comes from a
             // BlockTintSource; colorInWorld blends the biome color at this pos. Untinted quads stay white.
@@ -2252,6 +2265,23 @@ public final class RtTerrain {
             // world.rahit's shadow path) instead of LabPBR hasS/hasN flags, so keep materialSprite null —
             // resolveMaterials() already skips null entries, which avoids it clobbering that lane.
             q.materialSprite = q.translucent ? null : sprite;
+        }
+
+        private static int opticalClass(BlockState state) {
+            if (state == null) {
+                return OPTICAL_TRANSLUCENT_SURFACE;
+            }
+            var block = state.getBlock();
+            if (block == Blocks.GLASS_PANE || block instanceof StainedGlassPaneBlock) {
+                return OPTICAL_THIN_GLASS;
+            }
+            if (block == Blocks.GLASS || block instanceof StainedGlassBlock || block instanceof TintedGlassBlock) {
+                return OPTICAL_SOLID_GLASS;
+            }
+            if (block instanceof IceBlock) {
+                return OPTICAL_SOLID_ICE;
+            }
+            return OPTICAL_TRANSLUCENT_SURFACE;
         }
 
         /** Acquire a pooled PendingQuad for the current block (grown on demand, count reset by flushBlock). */
@@ -2407,7 +2437,7 @@ public final class RtTerrain {
                 prim.add(q.tr);
                 prim.add(q.tg);
                 prim.add(q.tb);
-                prim.add(q.translucent ? 2f : 0f); // tint.w material flag: 2 = stained glass / ice (0 opaque)
+                prim.add(q.translucent ? q.opticalClass : 0f); // tint.w compact optical/surface class
                 if (avgColor != null) {
                     prim.add(avgColor[0] * q.tr);
                     prim.add(avgColor[1] * q.tg);
@@ -2431,7 +2461,8 @@ public final class RtTerrain {
         final long[] uv = new long[4];
         float nx, ny, nz;
         boolean cutout; // non-SOLID render layer (alpha-tested) — also an overlay candidate
-        boolean translucent; // TRANSLUCENT layer (stained glass / ice): colored-transmission dielectric
+        boolean translucent; // TRANSLUCENT geometry bucket; opticalClass owns the material model
+        int opticalClass;
         boolean tinted; // tintIndex >= 0 — the tinted member of a base+overlay pair
         float tr, tg, tb, emission, rough, metal;
         TextureAtlasSprite sprite, materialSprite;

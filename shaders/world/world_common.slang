@@ -59,7 +59,7 @@ public struct Payload {
     public float  hitT;        // >= 0 on hit, < 0 on miss.
     public float3 motionPrev;  // per-vertex world displacement since last frame.
     public float3 f0;          // specular F0.
-    public uint   flags;       // bits 0..1 material, bit 2 show celestial disc on miss, bit 3 water-entering (hit only).
+    public uint   flags;       // bits 0..1 material, bit 2 sky disc, bit 3 interface-entering, bits 4..7 optical class.
     public uint   roughMetal;  // packHalf2x16(roughness, metalness)
     public uint   emissionSss; // packHalf2x16(emission, sss)
     public uint   rayCone;     // packHalf2x16(width, spread)
@@ -70,7 +70,10 @@ public static const uint PAYLOAD_SHOW_CELESTIAL = 4u;
 // outward face normal (entering the water volume), false when it exits (water -> air). Bit 2
 // (PAYLOAD_SHOW_CELESTIAL) is only meaningful on a miss and this bit only on a hit, so they never need
 // to be read together, but they get distinct bits anyway to keep the two concerns unambiguous.
-public static const uint PAYLOAD_WATER_ENTERING = 8u;
+public static const uint PAYLOAD_INTERFACE_ENTERING = 8u;
+public static const uint PAYLOAD_WATER_ENTERING = PAYLOAD_INTERFACE_ENTERING;
+public static const uint PAYLOAD_OPTICAL_CLASS_SHIFT = 4u;
+public static const uint PAYLOAD_OPTICAL_CLASS_MASK = 0xfu << PAYLOAD_OPTICAL_CLASS_SHIFT;
 
 // Terrain per-triangle record (48 B, stride must match RtTerrain's upload).
 // mat = {roughness, metalness, hasS, hasN} for solid/cutout; TRANSLUCENT-bucket prims repurpose it as
