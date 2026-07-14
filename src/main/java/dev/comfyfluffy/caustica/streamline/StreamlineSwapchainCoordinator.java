@@ -69,11 +69,14 @@ public final class StreamlineSwapchainCoordinator {
     }
 
     /** Called only after Minecraft has successfully created and enumerated the replacement swapchain. */
-    public void configured(GpuSurface.Configuration configuration, int nativeFormat, int buffers) {
+    public void configured(GpuSurface.Configuration configuration, int actualWidth, int actualHeight,
+            int nativeFormat, int buffers) {
         configuring = false;
         configured = true;
-        width = configuration.width();
-        height = configuration.height();
+        // The successfully created physical swapchain is authoritative. Streamline receives the visible
+        // render target separately through its extent-only backbuffer tag.
+        width = actualWidth;
+        height = actualHeight;
         format = nativeFormat;
         imageCount = buffers;
         generation++;

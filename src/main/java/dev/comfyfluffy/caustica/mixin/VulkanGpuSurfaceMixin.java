@@ -235,7 +235,8 @@ public abstract class VulkanGpuSurfaceMixin {
 	/** Publish the successfully created swapchain generation to the Streamline controller. */
 	@Inject(method = "configure", at = @At("TAIL"))
 	private void caustica$streamlineSwapchainConfigured(GpuSurface.Configuration config, CallbackInfo ci) {
-		StreamlineSwapchainCoordinator.INSTANCE.configured(config, this.swapchainImageFormat,
+		StreamlineSwapchainCoordinator.INSTANCE.configured(config, this.swapchainWidth, this.swapchainHeight,
+				this.swapchainImageFormat,
 				this.swapchainImages.size());
 	}
 
