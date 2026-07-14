@@ -4,6 +4,7 @@ import dev.comfyfluffy.caustica.CausticaConfig;
 import dev.comfyfluffy.caustica.CausticaMod;
 import dev.comfyfluffy.caustica.streamline.StreamlineAbi;
 import dev.comfyfluffy.caustica.streamline.StreamlineRuntime;
+import dev.comfyfluffy.caustica.streamline.StreamlineSwapchainCoordinator;
 import java.io.IOException;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
@@ -113,6 +114,14 @@ public final class StreamlineAcceptanceReport {
                 .append("    \"generatedFramesConfirmed\": ").append(fg.hasGeneratedFrames()).append(",\n")
                 .append("    \"autoCapConfigured\": ").append(CausticaConfig.Rt.Fg.AUTO_CAP.configuredValue()).append(",\n")
                 .append("    \"autoCapEffective\": ").append(CausticaConfig.Rt.Fg.AUTO_CAP.value()).append(",\n")
+                .append("    \"vsyncRequested\": ")
+                .append(StreamlineSwapchainCoordinator.INSTANCE.vsyncRequested()).append(",\n")
+                .append("    \"mailboxSupported\": ")
+                .append(StreamlineSwapchainCoordinator.INSTANCE.mailboxSupported()).append(",\n")
+                .append("    \"mailboxVsyncCompatibility\": ")
+                .append(StreamlineSwapchainCoordinator.INSTANCE.mailboxVsyncCompatibility()).append(",\n")
+                .append("    \"presentMode\": ")
+                .append(quote(StreamlineSwapchainCoordinator.INSTANCE.presentMode())).append(",\n")
                 .append("    \"detectedRefreshRateHz\": ").append(fg.reflexRefreshRateHz()).append(",\n")
                 .append("    \"reflexOutputCapFps\": ").append(fg.reflexOutputCapFps()).append(",\n")
                 .append("    \"reflexRenderedCapFps\": ").append(fg.reflexRenderedCapFps()).append(",\n")

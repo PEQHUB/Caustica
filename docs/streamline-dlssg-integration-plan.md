@@ -131,9 +131,10 @@ that the current configuration is invalid.
 - A configure-success notification records the new extent, format, image count, and present mode, re-queries
   state, and resumes only after a new valid input snapshot exists.
 - A zero-sized/minimized surface stays suspended.
-- Vulkan DLSS-G VSync is unsupported in Streamline 2.12. The menu must not silently modify Minecraft's VSync
-  setting: it should block activation with a clear explanation and offer an explicit "Disable VSync and
-  Apply" action.
+- Streamline 2.12 does not support FIFO VSync with Vulkan DLSS-G. Preserve Minecraft's VSync setting but,
+  when DLSS-G and Reflex are requested, normalize FIFO/FIFO_RELAXED to MAILBOX if the surface supports it.
+  This is RADSER's tear-free vblank-replacement compatibility path; if MAILBOX is unavailable, keep FIFO
+  and fail DLSS-G closed instead of silently disabling VSync.
 
 ### Shutdown
 
@@ -243,7 +244,8 @@ crowding the base page. The submenu separates user intent from effective runtime
 - Unsupported controls are disabled/hidden based on `slIsFeatureSupported` and `slDLSSGGetState`.
 - Dynamic mode requires `bIsDynamicMFGSupported`.
 - Multipliers use `numFramesToGenerateMax`.
-- VSync remains unavailable for Vulkan DLSS-G and explains why.
+- The VSync control remains available. Its Vulkan DLSS-G compatibility mode reports MAILBOX + Reflex
+  explicitly, while a surface without MAILBOX reports the unsupported FIFO boundary.
 - Show driver/hardware support reason, Streamline/NGX feature versions, active mode, generated-frame count,
   status bits, minimum dimension, UI recomposition state, and optional VRAM estimate.
 - Applying an Off/On boundary change explicitly reports that the swapchain will be recreated; it does not
@@ -258,7 +260,7 @@ crowding the base page. The submenu separates user intent from effective runtime
 - API-error callback: latch the error without logging/blocking on the present thread; drain it later.
 - Non-OK DLSS-G runtime status: set Off immediately, decode every status bit, null tags, and require a clean
   reset before retry.
-- Unsupported HDR format, low resolution, VSync conflict, invalid inputs, or absent world frame: Off, not a
+- Unsupported HDR format, low resolution, unavailable MAILBOX VSync compatibility, invalid inputs, or absent world frame: Off, not a
   partially active approximation.
 
 ## Implementation phases and proof gates
@@ -341,7 +343,8 @@ only the intended signed Streamline runtime and the RR-specific NGX pieces.
 - Vulkan validation with zero new errors.
 - Long-run memory test covering repeated resize and mode transitions; verify `presentCommon` once per real
   frame and stable memory.
-- Runtime matrix: supported/unsupported GPU, SDR/HDR, world/menu/loading/paused, VSync conflict, fixed modes,
+- Runtime matrix: supported/unsupported GPU, SDR/HDR, world/menu/loading/paused, VSync off, MAILBOX VSync
+  compatibility, FIFO-only VSync rejection, fixed modes,
   Dynamic, Auto, UI on/off, fullscreen/windowed, minimize/restore, dimension/world change, resource reload,
   and clean shutdown.
 - Capture Streamline logs, state counters, external presentation trace, and artifact hashes as proof.

@@ -33,6 +33,21 @@ final class FullscreenExtentContractTest {
         assertTrue(frameGeneration.contains("hudless.height > colorHeight"));
     }
 
+    @Test
+    void dlssgVsyncUsesRadserMailboxCompatibilityWithoutFifoProxying() throws IOException {
+        String surface = source("src/main/java/dev/comfyfluffy/caustica/mixin/VulkanGpuSurfaceMixin.java");
+        String coordinator = source(
+                "src/main/java/dev/comfyfluffy/caustica/streamline/StreamlineSwapchainCoordinator.java");
+
+        assertTrue(surface.contains("caustica$normalizeStreamlinePresentMode"));
+        assertTrue(surface.contains("normalizeConfiguration(config, this.supportedPresentModes)"));
+        assertTrue(coordinator.contains("GpuSurface.PresentMode.MAILBOX"));
+        assertTrue(coordinator.contains(
+                "new GpuSurface.Configuration(configuration.width(), configuration.height(), presentMode)"));
+        assertTrue(coordinator.contains("boolean desiredPlugin = CausticaConfig.Rt.Fg.requested() && !vsync"));
+        assertTrue(coordinator.contains("A surface without MAILBOX stays on the requested FIFO mode and DLSS-G fails closed"));
+    }
+
     private static String source(String relative) throws IOException {
         Path cursor = Path.of("").toAbsolutePath();
         while (cursor != null) {

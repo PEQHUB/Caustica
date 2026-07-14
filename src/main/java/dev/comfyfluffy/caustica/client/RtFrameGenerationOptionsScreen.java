@@ -21,6 +21,7 @@ public final class RtFrameGenerationOptionsScreen extends OptionsSubScreen {
     private Button runtimeWidget;
     private Button detailsWidget;
     private Button autoCapWidget;
+    private Button vsyncWidget;
 
     public RtFrameGenerationOptionsScreen(Screen lastScreen, Options options) {
         super(lastScreen, options, Component.translatable("caustica.options.rt.frameGeneration.title"));
@@ -36,14 +37,14 @@ public final class RtFrameGenerationOptionsScreen extends OptionsSubScreen {
         list.addBig(runtimeWidget);
         list.addBig(detailsWidget);
 
-        if (options.enableVsync().get()) {
-            list.addBig(Button.builder(Component.translatable("caustica.options.rt.fg.disableVsync"), button -> {
-                options.enableVsync().set(false);
-                surfaceSettingChanged = true;
-                button.active = false;
-                refreshDiagnostics();
-            }).width(Button.BIG_WIDTH).build());
-        }
+        vsyncWidget = Button.builder(Component.empty(), button -> {
+            options.enableVsync().set(!options.enableVsync().get());
+            surfaceSettingChanged = true;
+            refreshDiagnostics();
+        }).width(Button.BIG_WIDTH)
+                .tooltip(Tooltip.create(Component.translatable("caustica.options.rt.fg.vsync.tooltip")))
+                .build();
+        list.addBig(vsyncWidget);
 
         autoCapWidget = Button.builder(Component.empty(), button -> {
             CausticaConfig.Rt.Fg.AUTO_CAP.set(!CausticaConfig.Rt.Fg.AUTO_CAP.configuredValue());
@@ -91,15 +92,30 @@ public final class RtFrameGenerationOptionsScreen extends OptionsSubScreen {
         int refreshRateHz = DlssgPacing.currentRefreshRateHz();
         int automaticCapFps = DlssgPacing.automaticOutputCapFps(refreshRateHz);
         boolean automaticCapEnabled = CausticaConfig.Rt.Fg.AUTO_CAP.value();
+        int multiplier = fg.effectiveMultiFrameCount() + 1;
+        int automaticIntervalUs = DlssgPacing.reflexIntervalUs(automaticCapFps,
+                fg.effectiveMultiFrameCount(), 0);
+        float automaticRenderedFps = DlssgPacing.renderedFrameLimitFps(automaticIntervalUs);
+        if (vsyncWidget != null) {
+            boolean enabled = options.enableVsync().get();
+            String state = !enabled ? "Off — immediate presentation"
+                    : StreamlineSwapchainCoordinator.INSTANCE.mailboxSupported()
+                            ? "On — MAILBOX + Reflex"
+                            : "On — FIFO unsupported (MAILBOX unavailable)";
+            vsyncWidget.setMessage(Component.literal("DLSS-G VSync: " + state));
+        }
         if (autoCapWidget != null) {
             String suffix = CausticaConfig.Rt.Fg.AUTO_CAP.isOverridden() ? " (launch override)" : "";
             if (automaticCapEnabled) {
                 autoCapWidget.setMessage(Component.literal(automaticCapFps > 0
-                        ? "Auto Output Cap: On — " + automaticCapFps + " FPS from " + refreshRateHz + " Hz" + suffix
+                        ? "Auto Display Cap: On — " + automaticCapFps + " displayed / "
+                                + String.format(java.util.Locale.ROOT, "%.2f", automaticRenderedFps)
+                                + " rendered (" + multiplier + "x)" + suffix
                         : "Auto Output Cap: On — refresh rate unavailable" + suffix));
             } else {
                 autoCapWidget.setMessage(Component.literal(automaticCapFps > 0
-                        ? "Auto Output Cap: Off — would target " + automaticCapFps + " FPS at " + refreshRateHz + " Hz" + suffix
+                        ? "Auto Display Cap: Off — would target " + automaticCapFps + " displayed at "
+                                + refreshRateHz + " Hz" + suffix
                         : "Auto Output Cap: Off — refresh rate unavailable" + suffix));
             }
             autoCapWidget.active = !CausticaConfig.Rt.Fg.AUTO_CAP.isOverridden();
@@ -134,6 +150,9 @@ public final class RtFrameGenerationOptionsScreen extends OptionsSubScreen {
                 : overrides.size() + " (first: " + overrides.getFirst().key() + ")";
         detailsWidget.setMessage(Component.literal(
                 "Reflex " + reflex
+                        + " | Present " + StreamlineSwapchainCoordinator.INSTANCE.presentMode()
+                        + (StreamlineSwapchainCoordinator.INSTANCE.mailboxVsyncCompatibility()
+                                ? " (VSync compatibility)" : "")
                         + " | Pace output/rendered/interval " + fg.reflexOutputCapFps() + "/"
                         + (fg.reflexIntervalUs() > 0
                                 ? String.format(java.util.Locale.ROOT, "%.2f", fg.reflexRenderedCapFps()) : "unlimited")

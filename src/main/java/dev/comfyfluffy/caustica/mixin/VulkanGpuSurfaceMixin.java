@@ -26,6 +26,7 @@ import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.ModifyArg;
+import org.spongepowered.asm.mixin.injection.ModifyVariable;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.Redirect;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
@@ -33,6 +34,7 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 import java.nio.LongBuffer;
 import java.nio.IntBuffer;
+import java.util.Set;
 
 /**
  * HDR Phase 0 capability logging + PQ swapchain selection.
@@ -82,6 +84,10 @@ public abstract class VulkanGpuSurfaceMixin {
 	@Shadow
 	@Final
 	private long[] acquireSemaphores;
+
+	@Shadow
+	@Final
+	private Set<GpuSurface.PresentMode> supportedPresentModes;
 
 	@Shadow
 	private int currentAcquireSemaphore;
@@ -220,9 +226,11 @@ public abstract class VulkanGpuSurfaceMixin {
 		return result;
 	}
 
-	@Inject(method = "configure", at = @At("HEAD"))
-	private void caustica$streamlineConfigureStarting(GpuSurface.Configuration config, CallbackInfo ci) {
+	@ModifyVariable(method = "configure(Lcom/mojang/blaze3d/systems/GpuSurface$Configuration;)V",
+			at = @At("HEAD"), argsOnly = true)
+	private GpuSurface.Configuration caustica$normalizeStreamlinePresentMode(GpuSurface.Configuration config) {
 		StreamlineSwapchainCoordinator.INSTANCE.configureStarting();
+		return StreamlineSwapchainCoordinator.INSTANCE.normalizeConfiguration(config, this.supportedPresentModes);
 	}
 
 	@Inject(method = "configure", at = @At(value = "INVOKE",

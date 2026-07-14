@@ -6,6 +6,8 @@ import dev.comfyfluffy.caustica.CausticaMod;
 import dev.comfyfluffy.caustica.rt.pipeline.RtDlssFg;
 import net.minecraft.client.Minecraft;
 
+import java.util.Collection;
+
 /** Coordinates DLSS-G plugin ownership with Minecraft's existing surface reconfiguration transaction. */
 public final class StreamlineSwapchainCoordinator {
     public static final StreamlineSwapchainCoordinator INSTANCE = new StreamlineSwapchainCoordinator();
@@ -14,6 +16,10 @@ public final class StreamlineSwapchainCoordinator {
     private boolean configured;
     private boolean pluginForSwapchain;
     private boolean vsync;
+    private boolean vsyncRequested;
+    private boolean mailboxSupported;
+    private boolean mailboxVsyncCompatibility;
+    private GpuSurface.PresentMode presentMode;
     private int width;
     private int height;
     private int format;
@@ -39,7 +45,8 @@ public final class StreamlineSwapchainCoordinator {
         if (!configured || configuring || reconfigureRequested) {
             return;
         }
-        boolean desiredPlugin = CausticaConfig.Rt.Fg.requested() && !isVsyncRequested();
+        boolean desiredPlugin = CausticaConfig.Rt.Fg.requested()
+                && (!isVsyncRequested() || mailboxSupported);
         if (desiredPlugin != pluginForSwapchain) {
             requestReconfigure();
         }
@@ -53,9 +60,36 @@ public final class StreamlineSwapchainCoordinator {
         RtDlssFg.INSTANCE.suspendForSwapchainChange();
     }
 
+    /**
+     * Preserve Minecraft's VSync option while keeping Vulkan DLSS-G on a supported presentation path.
+     *
+     * <p>Streamline 2.12 cannot run Vulkan DLSS-G on a FIFO swapchain. RADSER's proven low-latency
+     * compatibility contract is to use MAILBOX when VSync and Reflex are requested: MAILBOX remains
+     * tear-free because display replacement occurs at vblank, while Reflex owns the below-refresh cap.
+     * A surface without MAILBOX stays on the requested FIFO mode and DLSS-G fails closed.</p>
+     */
+    public GpuSurface.Configuration normalizeConfiguration(GpuSurface.Configuration configuration,
+            Collection<GpuSurface.PresentMode> supportedPresentModes) {
+        vsyncRequested = isVsyncConfiguration(configuration);
+        mailboxSupported = supportedPresentModes.contains(GpuSurface.PresentMode.MAILBOX);
+        mailboxVsyncCompatibility = false;
+        if (!CausticaConfig.Rt.Fg.requested() || !vsyncRequested
+                || !mailboxSupported) {
+            presentMode = configuration.presentMode();
+            return configuration;
+        }
+        mailboxVsyncCompatibility = true;
+        presentMode = GpuSurface.PresentMode.MAILBOX;
+        CausticaMod.LOGGER.info(
+                "DLSS-G VSync compatibility: requested {} -> MAILBOX (tear-free vblank replacement + Reflex pacing)",
+                configuration.presentMode());
+        return new GpuSurface.Configuration(configuration.width(), configuration.height(), presentMode);
+    }
+
     /** Called after the old swapchain is destroyed and immediately before replacement creation. */
     public boolean prepareReplacement(GpuSurface.Configuration configuration) {
         vsync = isVsyncConfiguration(configuration);
+        presentMode = configuration.presentMode();
         boolean desiredPlugin = CausticaConfig.Rt.Fg.requested() && !vsync;
         // On the initial Off swapchain, capture adapter support while DLSS-G is still loaded from slInit;
         // the feature is deliberately unloaded immediately below to remove disabled-present overhead.
@@ -82,8 +116,10 @@ public final class StreamlineSwapchainCoordinator {
         generation++;
         RtDlssFg.INSTANCE.onSwapchainConfigured(width, height, format, imageCount, vsync, pluginForSwapchain,
                 generation);
-        CausticaMod.LOGGER.info("Streamline swapchain generation {}: {}x{}, format={}, images={}, plugin={}, vsync={}",
-                generation, width, height, format, imageCount, pluginForSwapchain, vsync);
+        CausticaMod.LOGGER.info(
+                "Streamline swapchain generation {}: {}x{}, format={}, images={}, plugin={}, presentMode={}, vsyncRequested={}, mailboxVsyncCompatibility={}",
+                generation, width, height, format, imageCount, pluginForSwapchain, presentMode, vsyncRequested,
+                mailboxVsyncCompatibility);
     }
 
     public void configureFailed() {
@@ -108,6 +144,22 @@ public final class StreamlineSwapchainCoordinator {
 
     public long generation() {
         return generation;
+    }
+
+    public boolean vsyncRequested() {
+        return vsyncRequested;
+    }
+
+    public boolean mailboxVsyncCompatibility() {
+        return mailboxVsyncCompatibility;
+    }
+
+    public boolean mailboxSupported() {
+        return mailboxSupported;
+    }
+
+    public String presentMode() {
+        return presentMode == null ? "unknown" : presentMode.name();
     }
 
     private static boolean isVsyncRequested() {

@@ -111,7 +111,8 @@ public final class CausticaConfig {
                         + " floor(3600 * refresh / (refresh + 3600)), then divides that budget across the\n"
                         + " rendered frame and all generated frames through Reflex.\n"
                         + " Dynamic MFG is D3D12-only and is migrated to fixed because Caustica uses Vulkan.\n"
-                        + " Vulkan DLSS-G requires VSync off.");
+                        + " With VSync requested, Vulkan DLSS-G uses RADSER's MAILBOX + Reflex compatibility\n"
+                        + " path because Streamline 2.12 does not support FIFO VSync on Vulkan.");
         FILE.setComment("reflex",
                 " Streamline Reflex Low Latency. DLSS-G forces effective On while generation is active.\n"
                         + " minimum-interval-us is the manual rendered-frame fallback used when FG Auto Cap is off;\n"

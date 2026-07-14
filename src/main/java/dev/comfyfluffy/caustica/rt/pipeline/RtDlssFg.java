@@ -131,7 +131,7 @@ public final class RtDlssFg {
 
     public String unavailableReason() {
         if (swapchainVsync && requested()) {
-            return "VSync is unsupported with Vulkan DLSS Frame Generation";
+            return "DLSS-G VSync compatibility requires MAILBOX on this Vulkan surface";
         }
         if (dlssgSupported && !pluginForSwapchain) {
             return requested()
