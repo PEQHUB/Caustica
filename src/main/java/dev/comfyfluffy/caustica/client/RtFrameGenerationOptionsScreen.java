@@ -1,12 +1,14 @@
 package dev.comfyfluffy.caustica.client;
 
 import dev.comfyfluffy.caustica.CausticaConfig;
+import dev.comfyfluffy.caustica.rt.pipeline.DlssgPacing;
 import dev.comfyfluffy.caustica.rt.pipeline.RtDlssFg;
 import dev.comfyfluffy.caustica.streamline.StreamlineSwapchainCoordinator;
 import net.minecraft.client.OptionInstance;
 import net.minecraft.client.Options;
 import net.minecraft.client.gui.GuiGraphicsExtractor;
 import net.minecraft.client.gui.components.Button;
+import net.minecraft.client.gui.components.Tooltip;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.client.gui.screens.options.OptionsSubScreen;
 import net.minecraft.network.chat.Component;
@@ -18,6 +20,7 @@ public final class RtFrameGenerationOptionsScreen extends OptionsSubScreen {
     private Button statusWidget;
     private Button runtimeWidget;
     private Button detailsWidget;
+    private Button autoCapWidget;
 
     public RtFrameGenerationOptionsScreen(Screen lastScreen, Options options) {
         super(lastScreen, options, Component.translatable("caustica.options.rt.frameGeneration.title"));
@@ -41,6 +44,14 @@ public final class RtFrameGenerationOptionsScreen extends OptionsSubScreen {
                 refreshDiagnostics();
             }).width(Button.BIG_WIDTH).build());
         }
+
+        autoCapWidget = Button.builder(Component.empty(), button -> {
+            CausticaConfig.Rt.Fg.AUTO_CAP.set(!CausticaConfig.Rt.Fg.AUTO_CAP.configuredValue());
+            refreshDiagnostics();
+        }).width(Button.BIG_WIDTH)
+                .tooltip(Tooltip.create(Component.translatable("caustica.options.rt.fg.autoCap.tooltip")))
+                .build();
+        list.addBig(autoCapWidget);
 
         OptionInstance<?>[] controls = RtVideoOptions.frameGenerationOptions();
         for (int i = 0; i < controls.length; i += 2) {
@@ -77,6 +88,22 @@ public final class RtFrameGenerationOptionsScreen extends OptionsSubScreen {
             return;
         }
         RtDlssFg fg = RtDlssFg.INSTANCE;
+        int refreshRateHz = DlssgPacing.currentRefreshRateHz();
+        int automaticCapFps = DlssgPacing.automaticOutputCapFps(refreshRateHz);
+        boolean automaticCapEnabled = CausticaConfig.Rt.Fg.AUTO_CAP.value();
+        if (autoCapWidget != null) {
+            String suffix = CausticaConfig.Rt.Fg.AUTO_CAP.isOverridden() ? " (launch override)" : "";
+            if (automaticCapEnabled) {
+                autoCapWidget.setMessage(Component.literal(automaticCapFps > 0
+                        ? "Auto Output Cap: On — " + automaticCapFps + " FPS from " + refreshRateHz + " Hz" + suffix
+                        : "Auto Output Cap: On — refresh rate unavailable" + suffix));
+            } else {
+                autoCapWidget.setMessage(Component.literal(automaticCapFps > 0
+                        ? "Auto Output Cap: Off — would target " + automaticCapFps + " FPS at " + refreshRateHz + " Hz" + suffix
+                        : "Auto Output Cap: Off — refresh rate unavailable" + suffix));
+            }
+            autoCapWidget.active = !CausticaConfig.Rt.Fg.AUTO_CAP.isOverridden();
+        }
         String availability = fg.isActive() ? "Active"
                 : fg.isAvailable() && fg.hasGeneratedFrames() ? "Verified (suspended in menu)"
                 : fg.isAvailable() && RtDlssFg.requested() ? fg.submissionStatus()
@@ -106,7 +133,12 @@ public final class RtFrameGenerationOptionsScreen extends OptionsSubScreen {
         String overrideStatus = overrides.isEmpty() ? "none"
                 : overrides.size() + " (first: " + overrides.getFirst().key() + ")";
         detailsWidget.setMessage(Component.literal(
-                "Reflex " + reflex + " | DLSSD configured/effective "
+                "Reflex " + reflex
+                        + " | Pace output/rendered/interval " + fg.reflexOutputCapFps() + "/"
+                        + (fg.reflexIntervalUs() > 0
+                                ? String.format(java.util.Locale.ROOT, "%.2f", fg.reflexRenderedCapFps()) : "unlimited")
+                        + "/" + fg.reflexIntervalUs() + "us"
+                        + " | DLSSD configured/effective "
                         + CausticaConfig.Rt.DlssRr.ENABLED.configuredValue() + "/"
                         + CausticaConfig.Rt.DlssRr.ENABLED.value()
                         + " | Launch overrides " + overrideStatus + " | " + fg.featureVersion()));
