@@ -128,6 +128,8 @@ public final class StreamlineAcceptanceReport {
                 .append("    \"reflexOutputCapFps\": ").append(fg.reflexOutputCapFps()).append(",\n")
                 .append("    \"reflexRenderedCapFps\": ").append(fg.reflexRenderedCapFps()).append(",\n")
                 .append("    \"reflexIntervalUs\": ").append(fg.reflexIntervalUs()).append(",\n")
+                .append("    \"reflexDriverIntervalUs\": ").append(fg.reflexDriverIntervalUs()).append(",\n")
+                .append("    \"deadlinePacingIntervalUs\": ").append(fg.deadlinePacingIntervalUs()).append(",\n")
                 .append("    \"successfulOptionSubmissions\": ").append(fg.successfulOptionsSubmissions()).append(",\n")
                 .append("    \"nativeSetOptionsCalls\": ").append(trace == null ? 0L : trace.setOptionsCalls).append(",\n")
                 .append("    \"nativeLastOptionsMode\": ").append(trace == null ? -1 : trace.lastOptionsMode).append(",\n")

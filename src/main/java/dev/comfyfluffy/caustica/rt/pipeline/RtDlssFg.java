@@ -99,9 +99,11 @@ public final class RtDlssFg {
     private String featureVersion = "Unknown";
     private int lastReflexMode = Integer.MIN_VALUE;
     private int lastReflexLimit = Integer.MIN_VALUE;
+    private final FrameDeadlinePacer frameDeadlinePacer = new FrameDeadlinePacer();
     private int reflexRefreshRateHz;
     private int reflexOutputCapFps;
     private float reflexRenderedCapFps;
+    private int pacingIntervalUs;
     private boolean reflexAutomaticPacing;
     private boolean reflexVsyncPacing;
     private String unavailableReason = "Not probed";
@@ -240,7 +242,15 @@ public final class RtDlssFg {
     }
 
     public int reflexIntervalUs() {
+        return Math.max(0, pacingIntervalUs);
+    }
+
+    public int reflexDriverIntervalUs() {
         return Math.max(0, lastReflexLimit);
+    }
+
+    public int deadlinePacingIntervalUs() {
+        return reflexAutomaticPacing ? Math.max(0, pacingIntervalUs) : 0;
     }
 
     public float reflexRenderedCapFps() {
@@ -280,6 +290,7 @@ public final class RtDlssFg {
             if (reflexSupported) {
                 warnResult(library.reflexSleep(frameToken), "slReflexSleep");
             }
+            frameDeadlinePacer.pace(deadlinePacingIntervalUs());
             if (triggerFlashPending) {
                 marker(PCL_TRIGGER_FLASH);
                 triggerFlashPending = false;
@@ -582,33 +593,37 @@ public final class RtDlssFg {
         boolean automatic = DlssgPacing.automaticPacingEnabled(requested(), pluginForSwapchain,
                 CausticaConfig.Rt.Fg.AUTO_CAP.value(), vsyncPacing);
         int outputCapFps = automatic ? DlssgPacing.automaticOutputCapFps(refreshRateHz) : 0;
-        int limit = DlssgPacing.reflexIntervalUs(outputCapFps,
+        int targetInterval = DlssgPacing.reflexIntervalUs(outputCapFps,
                 automatic ? effectiveMultiFrameCount() : 0,
                 CausticaConfig.Rt.Reflex.MINIMUM_INTERVAL_US.value());
+        // NvLL_VK_SetSleepMode accepts the value but does not reliably enforce it above the target.
+        // Automatic output pacing therefore has one deterministic owner; Reflex retains latency mode only.
+        int reflexDriverLimit = automatic ? 0 : targetInterval;
         reflexRefreshRateHz = refreshRateHz;
         reflexOutputCapFps = outputCapFps;
-        reflexRenderedCapFps = DlssgPacing.renderedFrameLimitFps(limit);
+        reflexRenderedCapFps = DlssgPacing.renderedFrameLimitFps(targetInterval);
+        pacingIntervalUs = targetInterval;
         reflexAutomaticPacing = automatic;
         reflexVsyncPacing = automatic && vsyncPacing;
-        if (mode == lastReflexMode && limit == lastReflexLimit) {
+        if (mode == lastReflexMode && reflexDriverLimit == lastReflexLimit) {
             return;
         }
         MemorySegment options = StreamlineAbi.allocate(arena, StreamlineAbi.REFLEX_OPTIONS_SIZE);
         ByteBuffer bytes = StreamlineAbi.bytes(options);
         bytes.putInt(0, mode);
-        bytes.putInt(4, limit);
+        bytes.putInt(4, reflexDriverLimit);
         if (reflexSupported) {
             warnResult(library.setReflexOptions(options), "slReflexSetOptions");
         }
         CausticaMod.LOGGER.info(
-                "Reflex pacing applied: mode={}, automatic={}, source={}, refresh={}Hz, outputTarget={} FPS, multiplier={}x, renderedLimit={} FPS, interval={}us",
+                "Output pacing applied: mode={}, automatic={}, source={}, refresh={}Hz, outputTarget={} FPS, multiplier={}x, renderedLimit={} FPS, deadlineInterval={}us, reflexDriverInterval={}us",
                 mode, automatic, reflexVsyncPacing ? "VSync" : automatic ? "Auto Cap" : "manual", refreshRateHz,
                 outputCapFps,
                 automatic ? effectiveMultiFrameCount() + 1 : 1,
-                limit > 0 ? String.format(java.util.Locale.ROOT, "%.2f", reflexRenderedCapFps) : "unlimited",
-                limit);
+                targetInterval > 0 ? String.format(java.util.Locale.ROOT, "%.2f", reflexRenderedCapFps) : "unlimited",
+                targetInterval, reflexDriverLimit);
         lastReflexMode = mode;
-        lastReflexLimit = limit;
+        lastReflexLimit = reflexDriverLimit;
     }
 
     private void clearFrameTags() {
