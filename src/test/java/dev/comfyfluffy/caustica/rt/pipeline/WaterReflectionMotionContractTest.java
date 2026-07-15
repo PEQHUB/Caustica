@@ -20,6 +20,13 @@ final class WaterReflectionMotionContractTest {
         assertTrue(raygen.contains("gv_specPreviousNormal = previousWaterNormal"));
         assertTrue(raygen.contains("specSurfacePreviousNormal"));
         assertTrue(raygen.contains("previousReflectionNdc(surfacePos, prevN"));
+        assertTrue(raygen.contains("gv_albedo = float3(0.0, 0.0, 0.0); // pure specular fallback for TIR"));
+        assertTrue(raygen.contains("gv_motionHitCamRel = gv_hitCamRel"));
+        assertTrue(raygen.contains("gv_motionUseRefracted = false"));
+        assertTrue(raygen.contains("gv_specAlb = float3(F, F, F)"));
+        assertTrue(raygen.contains("captureRefractedGuides && dot(transmittedDir, transmittedDir) > 0.0"));
+        assertTrue(raygen.indexOf("gv_specAlb = float3(F, F, F)")
+                < raygen.indexOf("if (primaryOnly || bounce >= maxBounces)"));
         assertTrue(composite.contains("previousWaterWaveTimeValid ? previousWaterWaveTime : waterWaveTime"));
         assertTrue(composite.contains("terrain.blockZ & WATER_ANCHOR_MASK, previousWaveTime, 0f"));
         assertFalse(composite.contains("System.nanoTime() / 1.0e9 % 3600.0"));

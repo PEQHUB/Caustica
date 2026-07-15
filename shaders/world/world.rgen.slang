@@ -1028,15 +1028,23 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
                             * normalize(float3(-previousGrad.x, 1.0, -previousGrad.y));
                 }
             }
+            float cosI = clamp(dot(-rd, n), 0.0, 1.0);
+            float etaI = inWater ? WATER_IOR : 1.0;
+            float etaT = inWater ? 1.0 : WATER_IOR;
+            float F = fresnelDielectric(cosI, etaI, etaT);
+            float3 transmittedDir = refract(rd, n, etaI / etaT);
             if (captureGuides && bounce == 0) { // primary water hit: feed RR a smooth dielectric specular surface
                 gv_normal = n;
                 gv_rough = WATER_GUIDE_ROUGH;
+                gv_albedo = float3(0.0, 0.0, 0.0); // pure specular fallback for TIR
+                gv_specAlb = float3(F, F, F);
                 gv_hitCamRel = hitPos - pc.camOffset; // depth + reflection start at the water surface
+                gv_motionHitCamRel = gv_hitCamRel;
+                gv_motionUseRefracted = false;
+                gv_motionObjDisp = float3(0.0, 0.0, 0.0);
                 gv_specPreviousNormal = previousWaterNormal;
-                if (captureRefractedGuides) {
-                    float etaI = inWater ? WATER_IOR : 1.0;
-                    float etaT = inWater ? 1.0 : WATER_IOR;
-                    gv_opticalGuideDir = refract(rd, n, etaI / etaT);
+                if (captureRefractedGuides && dot(transmittedDir, transmittedDir) > 0.0) {
+                    gv_opticalGuideDir = transmittedDir;
                     gv_opticalGuideMode = 1u;
                 }
             }
@@ -1044,16 +1052,11 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
                 break;
             }
             waterExt = waterExtinction(surfaceWaterTint);
-            float cosI = clamp(dot(-rd, n), 0.0, 1.0);
-            float etaI = inWater ? WATER_IOR : 1.0;
-            float etaT = inWater ? 1.0 : WATER_IOR;
-            float F = fresnelDielectric(cosI, etaI, etaT);
-            if (captureGuides && bounce == 0) gv_specAlb = float3(F, F, F);
             if (rndf(seed) < F) {
                 rd = reflect(rd, n);
                 ro = hitPos + n * SURF_BIAS; // reflected ray stays on the incidence side
             } else {
-                rd = refract(rd, n, etaI / etaT); // F < 1 here, so this is never total internal reflection
+                rd = transmittedDir; // F < 1 here, so this is never total internal reflection
                 ro = hitPos - n * SURF_BIAS;       // transmitted ray crosses to the far side
                 // Derived from this hit's face orientation, not toggled — self-corrects instead of a
                 // stray/missing face corrupting the medium for the rest of the path (see PAYLOAD_WATER_ENTERING).
