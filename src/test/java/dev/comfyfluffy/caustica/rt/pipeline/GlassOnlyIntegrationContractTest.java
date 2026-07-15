@@ -1,5 +1,6 @@
 package dev.comfyfluffy.caustica.rt.pipeline;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -36,7 +37,14 @@ final class GlassOnlyIntegrationContractTest {
 
         assertFalse(raygen.contains("MAX_MEDIUM_DEPTH"));
         assertFalse(raygen.contains("pathMedia"));
-        assertFalse(raygen.contains("transmittedGuideHit"));
+        assertTrue(raygen.contains("void opticalGuideHit"));
+        assertTrue(raygen.contains("RAY_FLAG_CULL_BACK_FACING_TRIANGLES"));
+        assertTrue(raygen.contains("gv_hitCamRel = destinationHitCamRel"));
+        assertTrue(raygen.contains("gv_albedo = destinationDiffuseAlbedo"));
+        assertTrue(raygen.contains("gv_specAlb = destinationSpecAlbedo"));
+        assertTrue(raygen.contains("gv_opticalGuideMode == 3u"));
+        assertEquals(2, occurrences(raygen, "opticalGuideHit(")); // definition plus one shared call site
+        assertFalse(raygen.contains("world_dlssd_guides"));
         assertFalse(closestHit.contains("PAYLOAD_SHADOW_QUERY"));
     }
 
@@ -65,5 +73,13 @@ final class GlassOnlyIntegrationContractTest {
             cursor = cursor.getParent();
         }
         throw new IOException("Could not locate " + relative);
+    }
+
+    private static int occurrences(String text, String needle) {
+        int count = 0;
+        for (int at = 0; (at = text.indexOf(needle, at)) >= 0; at += needle.length()) {
+            count++;
+        }
+        return count;
     }
 }

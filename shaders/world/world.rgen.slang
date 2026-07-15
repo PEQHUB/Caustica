@@ -38,7 +38,7 @@ import world_common;
 // `pc` global). Layout constants generated from this module's SPIR-V — see world_common.WorldPush.
 static WorldPush pc;
 
-// Ray payloads. Module-level statics so the helper functions (visibility / refractedGuideHit /
+// Ray payloads. Module-level statics so the helper functions (visibility / opticalGuideHit /
 // specularReflectionMotion / tracePath) can share them, mirroring the GLSL rayPayloadEXT globals.
 static Payload payload;
 static float4 shadowVis; // rgb = transmittance; a = nearest water-crossing t (-1 = none)
@@ -57,6 +57,8 @@ static bool gv_motionUseRefracted; // true when the MV tracks the refracted hit 
 // World-space displacement of the motion-guide surface since the previous frame (0 for static
 // terrain/sky, an entity's per-vertex/object motion for a dynamic hit).
 static float3 gv_motionObjDisp;
+static float3 gv_opticalGuideDir;
+static uint gv_opticalGuideMode; // 0 none, 1 water, 2 glass exit, 3 glass entry (skip back face)
 
 static const uint PAYLOAD_MATERIAL_MASK = 3u;
 
@@ -587,8 +589,8 @@ void traceRadianceReordered(uint cullMask, float3 ro, float tmin, float3 rd, flo
 
 // Guide probes need closest-hit material/motion data but consume no sky radiance. A dedicated miss record
 // avoids running the nested atmosphere march when a reflection/refraction guide escapes the scene.
-void traceGuideReordered(float3 ro, float tmin, float3 rd, float tmax) {
-    HitObject hObj = HitObject::TraceRay(topLevelAS, RAY_FLAG_NONE, CULL_SECONDARY,
+void traceGuideReordered(uint rayFlags, float3 ro, float tmin, float3 rd, float tmax) {
+    HitObject hObj = HitObject::TraceRay(topLevelAS, rayFlags, CULL_SECONDARY,
             SBT_RADIANCE, SBT_STRIDE_BUCKET, MISS_GUIDE, makeRay(ro, tmin, rd, tmax), payload);
     ReorderThread(hObj);
     HitObject::Invoke(topLevelAS, hObj, payload);
@@ -648,7 +650,7 @@ float2 specularReflectionMotion(float3 surfacePos, float3 primaryDir, float2 cur
     payloadSetTraceState(false,
             max(length(surfacePos - pc.camOffset) * primaryConeSpread, RAY_CONE_MIN_WIDTH),
             max(primaryConeSpread, RAY_CONE_MIN_SPREAD));
-    traceGuideReordered(surfacePos + n * SURF_BIAS, RAY_TMIN, specDir, 10000.0);
+    traceGuideReordered(RAY_FLAG_NONE, surfacePos + n * SURF_BIAS, RAY_TMIN, specDir, 10000.0);
 
     float3 reflectedHit;
     float3 reflectedMotionPrev;
@@ -665,44 +667,35 @@ float2 specularReflectionMotion(float3 surfacePos, float3 primaryDir, float2 cur
     return (prevNdc - currentNdc) * 0.5 * size;
 }
 
-// One-interface refraction for the water guide buffers: trace the refracted ray from the surface into
-// (or out of) the water and report the content it lands on. Diffuse AND specular albedo, plus MV, then
-// track that hit as its own feature (the water surface itself has no true diffuse/specular response of
-// its own worth demodulating by — it's a clear interface), while depth stays on the water surface.
-// `refracted` is false on total internal reflection (no refracted hit exists); a sky miss returns a far
-// point along the refracted direction, which the self-delta MV handles uniformly.
-void refractedGuideHit(float3 surfacePos, float3 incidentDir, float3 surfaceNormal, bool inWaterAtSurface,
-                       float rayConeWidth, float rayConeSpread,
-                       out float3 hitCamRel, out float3 motionPrev, out bool refracted, out float3 diffuseAlbedo,
-                       out float3 specAlbedo) {
+// Deterministic transmitted destination for clear-interface guides. Glass entry rays cull the back-facing
+// exit shell, resolving the scene behind it in one trace. Ordinary pixels pay no additional work.
+void opticalGuideHit(float3 surfacePos, float3 transmittedDir, float3 surfaceNormal,
+                     bool skipExitShell, float rayBias, float rayConeWidth, float rayConeSpread,
+                     out float3 hitCamRel, out float3 motionPrev, out bool transmitted,
+                     out float3 diffuseAlbedo, out float3 specAlbedo) {
     hitCamRel = surfacePos - pc.camOffset;
     motionPrev = float3(0.0, 0.0, 0.0);
-    refracted = false;
+    transmitted = dot(transmittedDir, transmittedDir) > 0.0;
     diffuseAlbedo = float3(0.0, 0.0, 0.0);
     specAlbedo = float3(0.0, 0.0, 0.0);
+    if (!transmitted) return;
 
-    float etaI = inWaterAtSurface ? WATER_IOR : 1.0;
-    float etaT = inWaterAtSurface ? 1.0 : WATER_IOR;
-    float3 refractedDir = refract(incidentDir, surfaceNormal, etaI / etaT);
-    if (dot(refractedDir, refractedDir) <= 0.0) {
-        return; // total internal reflection: no refracted guide hit exists
-    }
-    refractedDir = normalize(refractedDir);
-    refracted = true;
-
-    float3 ro = surfacePos - surfaceNormal * SURF_BIAS;
+    float3 direction = normalize(transmittedDir);
+    float3 ro = surfacePos - surfaceNormal * rayBias;
     payload.hitT = -1.0;
     payloadSetTraceState(false, rayConeWidth, rayConeSpread);
-    traceGuideReordered(ro, RAY_TMIN, refractedDir, 10000.0);
+    uint rayFlags = skipExitShell ? RAY_FLAG_CULL_BACK_FACING_TRIANGLES : RAY_FLAG_NONE;
+    traceGuideReordered(rayFlags, ro, RAY_TMIN, direction, 10000.0);
+
     if (payload.hitT < 0.0) {
-        hitCamRel = (ro + refractedDir * 1.0e6) - pc.camOffset; // sky through the surface, at infinity
+        hitCamRel = (ro + direction * 1.0e6) - pc.camOffset;
         motionPrev = float3(0.0, 0.0, 0.0);
-        diffuseAlbedo = SKY_DIFF_ALBEDO; // sky guide: keep radiance out of the demodulation albedo
+        diffuseAlbedo = SKY_DIFF_ALBEDO;
         specAlbedo = SKY_SPEC_ALBEDO;
         return;
     }
 
-    float3 hitPos = ro + refractedDir * payload.hitT;
+    float3 hitPos = ro + direction * payload.hitT;
     hitCamRel = hitPos - pc.camOffset;
     uint material = payloadMaterial();
     motionPrev = material != MATERIAL_WATER ? payload.motionPrev : float3(0.0, 0.0, 0.0);
@@ -712,7 +705,7 @@ void refractedGuideHit(float3 surfacePos, float3 incidentDir, float3 surfaceNorm
         if (pbr) {
             float3 f0 = payload.f0;
             float rough = clamp(payloadRoughness(), MIN_ROUGH, 1.0);
-            float NoV = clamp(dot(payload.normal, -refractedDir), 0.0, 1.0);
+            float NoV = clamp(dot(payload.normal, -direction), 0.0, 1.0);
             specAlbedo = rrSpecularAlbedo(f0, rough * rough, NoV);
         }
     }
@@ -811,8 +804,8 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
         }
 
         // Panes are collapsed to one effective thin sheet; solid glass and ice refract through their
-        // closed geometry. No medium stack, ordered shadow walk, secondary guide trace, or extra pipeline
-        // is introduced: ordinary pixels retain the upstream path-tracing kernel and cost.
+        // closed geometry. No medium stack, ordered shadow walk, or extra pipeline is introduced:
+        // ordinary pixels retain the upstream path-tracing kernel and cost.
         if (material == MATERIAL_GLASS) {
             if (bounce >= maxBounces && !(captureGuides && bounce == 0)) {
                 break;
@@ -859,6 +852,12 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
                 gv_motionHitCamRel = gv_hitCamRel;
                 gv_motionUseRefracted = false;
                 gv_motionObjDisp = payload.motionPrev; // 0 for static terrain
+                if (captureRefractedGuides) {
+                    // Treat an entered solid as a compact slab for the one-ray guide: the real radiance
+                    // path handles both refractions, while the guide skips the back face and remains stable.
+                    gv_opticalGuideDir = entering ? rd : transmittedDir;
+                    gv_opticalGuideMode = entering ? 3u : 2u;
+                }
             }
             if (primaryOnly || bounce >= maxBounces) {
                 break;
@@ -958,14 +957,10 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
                 gv_rough = WATER_GUIDE_ROUGH;
                 gv_hitCamRel = hitPos - pc.camOffset; // depth + reflection start at the water surface
                 if (captureRefractedGuides) {
-                    // Diffuse/specular albedo and MV track content seen through the clear interface.
-                    float3 refractedAlbedo;
-                    float3 refractedSpecAlbedo;
-                    refractedGuideHit(hitPos, rd, n, inWater, rayConeWidth, rayConeSpread,
-                            gv_motionHitCamRel, gv_motionObjDisp,
-                            gv_motionUseRefracted, refractedAlbedo, refractedSpecAlbedo);
-                    gv_albedo = refractedAlbedo;
-                    gv_specAlb = refractedSpecAlbedo;
+                    float etaI = inWater ? WATER_IOR : 1.0;
+                    float etaT = inWater ? 1.0 : WATER_IOR;
+                    gv_opticalGuideDir = refract(rd, n, etaI / etaT);
+                    gv_opticalGuideMode = 1u;
                 }
             }
             if (primaryOnly || bounce >= maxBounces) {
@@ -1179,6 +1174,7 @@ void main() {
             || pc.debugView == 2u || pc.debugView == 5u || pc.debugView == 6u || pc.debugView == 7u;
     uint pathCount = primaryOnly ? 1u : spp;
     float3 frameRadiance = float3(0.0, 0.0, 0.0);
+    gv_opticalGuideMode = 0u;
     for (uint s = 0u; s < pathCount; s++) {
         seed = pcg(seed); // decorrelate per-sample paths (shared camera ray, no AA jitter yet)
         // The primary ray is shared by all SPP samples. Preserve guides from sample zero; the radiance path
@@ -1188,10 +1184,37 @@ void main() {
     }
     frameRadiance /= float(pathCount);
 
+    // One shared call site keeps Slang from cloning the guide trace into both water and glass paths.
+    if (gv_opticalGuideMode != 0u) {
+        float3 destinationHitCamRel;
+        float3 destinationMotionPrev;
+        bool destinationValid;
+        float3 destinationDiffuseAlbedo;
+        float3 destinationSpecAlbedo;
+        bool glassGuide = gv_opticalGuideMode >= 2u;
+        float guideBias = glassGuide ? GLASS_TRANSMIT_BIAS : SURF_BIAS;
+        float guideConeWidth = max(length(gv_hitCamRel) * rayConeSpread, RAY_CONE_MIN_WIDTH);
+        opticalGuideHit(gv_hitCamRel + pc.camOffset, gv_opticalGuideDir, gv_normal,
+                gv_opticalGuideMode == 3u, guideBias, guideConeWidth, rayConeSpread,
+                destinationHitCamRel, destinationMotionPrev, destinationValid,
+                destinationDiffuseAlbedo, destinationSpecAlbedo);
+        if (destinationValid) {
+            gv_motionHitCamRel = destinationHitCamRel;
+            gv_motionObjDisp = destinationMotionPrev;
+            gv_motionUseRefracted = true;
+            gv_albedo = destinationDiffuseAlbedo;
+            gv_specAlb = destinationSpecAlbedo;
+            if (glassGuide) {
+                // Glass depth and motion now describe the same transmitted destination.
+                gv_hitCamRel = destinationHitCamRel;
+            }
+        }
+    }
+
     // Hardware (non-linear, reversed-Z) depth for DLSS-RR + Frame Generation: project the camera-relative
     // primary hit through the forward view-projection and take ndc z/w — exactly the value a rasterizer
     // would write. Reversed-Z (near=1, far=0), so DLSS gets the DepthInverted flag; sky's far hit -> ~0.
-    // Depth follows the primary surface (water included); only the MV tracks the refracted hit.
+    // Water depth follows its surface; clear glass follows the transmitted destination to avoid blur.
     bool debugDepth = pc.debugView == 3u;
     bool debugMotion = pc.debugView == 5u;
     bool debugSpecMotion = pc.debugView == 7u;
