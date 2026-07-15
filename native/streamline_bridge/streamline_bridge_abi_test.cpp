@@ -65,7 +65,9 @@ int main() {
     static_assert(sl::kBufferTypeAlbedo == SLBRIDGE_BUFFER_ALBEDO);
     static_assert(sl::kBufferTypeSpecularAlbedo == SLBRIDGE_BUFFER_SPECULAR_ALBEDO);
     static_assert(sl::kBufferTypeSpecularMotionVectors == SLBRIDGE_BUFFER_SPECULAR_MOTION_VECTORS);
+    static_assert(sl::kBufferTypeDisocclusionMask == SLBRIDGE_BUFFER_DISOCCLUSION_MASK);
     static_assert(sl::kBufferTypeNormalRoughness == SLBRIDGE_BUFFER_NORMAL_ROUGHNESS);
+    static_assert(sl::kBufferTypeBiasCurrentColorHint == SLBRIDGE_BUFFER_BIAS_CURRENT_COLOR_HINT);
     static_assert(sl::kBufferTypeUIColorAndAlpha == SLBRIDGE_BUFFER_UI_COLOR_AND_ALPHA);
     static_assert(sl::kBufferTypeBackbuffer == SLBRIDGE_BUFFER_BACKBUFFER);
     static_assert(sl::kBufferTypeUIAlpha == SLBRIDGE_BUFFER_UI_ALPHA);

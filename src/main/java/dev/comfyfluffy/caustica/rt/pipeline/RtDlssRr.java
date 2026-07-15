@@ -25,7 +25,7 @@ public final class RtDlssRr {
     // render-space inputs while DLSSG viewport 0 consumes final-present-space inputs, so RR owns viewport 1.
     private static final int VIEWPORT = 1;
     private static final int RESULT_OK = 0;
-    private static final int RESOURCE_COUNT = 8;
+    private static final int RESOURCE_COUNT = 10;
     private static final int LIFECYCLE_VALID_UNTIL_EVALUATE = 2;
 
     private static final int BUFFER_DEPTH = 0;
@@ -35,7 +35,9 @@ public final class RtDlssRr {
     private static final int BUFFER_ALBEDO = 7;
     private static final int BUFFER_SPECULAR_ALBEDO = 8;
     private static final int BUFFER_SPECULAR_MOTION_VECTORS = 10;
+    private static final int BUFFER_DISOCCLUSION_MASK = 11;
     private static final int BUFFER_NORMAL_ROUGHNESS = 14;
+    private static final int BUFFER_BIAS_CURRENT_COLOR_HINT = 29;
 
     private StreamlineLibrary library;
     private boolean initialized;
@@ -148,7 +150,7 @@ public final class RtDlssRr {
      */
     public boolean evaluate(long commandBuffer, RtImage color, RtImage depth, RtImage motion,
             RtImage diffuseAlbedo, RtImage specularAlbedo, RtImage normalRoughness,
-            RtImage specularMotion, RtImage output,
+            RtImage specularMotion, RtImage disocclusion, RtImage biasCurrentColor, RtImage output,
             int renderWidth, int renderHeight, int displayWidth, int displayHeight,
             float jitterX, float jitterY, Matrix4fc projection,
             Matrix4fc currentViewProjection, Matrix4fc previousViewProjection, Matrix4fc viewRotation,
@@ -190,7 +192,11 @@ public final class RtDlssRr {
                     renderWidth, renderHeight, BUFFER_NORMAL_ROUGHNESS);
             writeResource(resources, 6, specularMotion, VK10.VK_FORMAT_R16G16_SFLOAT,
                     renderWidth, renderHeight, BUFFER_SPECULAR_MOTION_VECTORS);
-            writeResource(resources, 7, output, VK10.VK_FORMAT_R16G16B16A16_SFLOAT,
+            writeResource(resources, 7, disocclusion, VK10.VK_FORMAT_R16_SFLOAT,
+                    renderWidth, renderHeight, BUFFER_DISOCCLUSION_MASK);
+            writeResource(resources, 8, biasCurrentColor, VK10.VK_FORMAT_R16_SFLOAT,
+                    renderWidth, renderHeight, BUFFER_BIAS_CURRENT_COLOR_HINT);
+            writeResource(resources, 9, output, VK10.VK_FORMAT_R16G16B16A16_SFLOAT,
                     displayWidth, displayHeight, BUFFER_SCALING_OUTPUT_COLOR);
 
             resourcesCreated = true;

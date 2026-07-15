@@ -419,8 +419,15 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
 
     // Water (tint.w == 1) carries the pure biome water tint (no grey water-texture multiply): raygen
     // shades the surface as a clear dielectric and only needs the tint to derive the per-channel
-    // Beer–Lambert absorption. Opaque terrain uses textured albedo.
-    payload.albedo = (pr.tint.w > 0.5) ? tint : srgbToLinear(blockAtlas.SampleLevel(uv, blockLod).rgb) * tint * ao;
+    // Beer–Lambert absorption. Opaque terrain uses linear-light atlas color and biome tint. AO is
+    // visibility, not base color, so it must not contaminate payload.albedo or the DLSSD albedo guide.
+    if (pr.tint.w > 0.5) {
+        payload.albedo = tint;
+    } else {
+        float3 texAlbedo = srgbToLinear(blockAtlas.SampleLevel(uv, blockLod).rgb);
+        float3 tintLinear = srgbToLinear(tint);
+        payload.albedo = texAlbedo * tintLinear;
+    }
     payload.normal = n;
     payload.hitT = RayTCurrent();
     payload.motionPrev = float3(0.0, 0.0, 0.0); // static terrain: camera-only motion vector

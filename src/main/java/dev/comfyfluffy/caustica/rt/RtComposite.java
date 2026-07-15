@@ -54,6 +54,7 @@ import dev.comfyfluffy.caustica.rt.material.RtBlockMaterials;
 import dev.comfyfluffy.caustica.rt.material.RtEntityMaterials;
 import dev.comfyfluffy.caustica.rt.pipeline.RtDisplayPipeline;
 import dev.comfyfluffy.caustica.rt.pipeline.RtDlssFg;
+import dev.comfyfluffy.caustica.rt.pipeline.RtDlssdDisocclusionPipeline;
 import dev.comfyfluffy.caustica.rt.pipeline.RtFgUiAlphaPipeline;
 import dev.comfyfluffy.caustica.rt.pipeline.RtDlssRr;
 import dev.comfyfluffy.caustica.rt.overlay.RtWorldOverlay;
@@ -219,6 +220,11 @@ public final class RtComposite {
     private RtImage gMotion;
     private RtImage gSpecAlbedo;
     private RtImage gSpecMotion;
+    private RtImage gDepthHistoryA;
+    private RtImage gDepthHistoryB;
+    private RtImage gDisocclusion;
+    private RtImage gBiasCurrentColor;
+    private RtDlssdDisocclusionPipeline dlssdDisocclusionPipeline;
     // Display-res RT image the display mapper reads: DLSS-RR writes it (render -> display denoise+upscale), or a
     // linear blit of `output` fills it when RR is off/unavailable (the no-RR reference / fallback).
     private RtImage rrOutput;
@@ -637,6 +643,10 @@ public final class RtComposite {
     }
 
     private void destroyGuideImages() {
+        if (dlssdDisocclusionPipeline != null) {
+            dlssdDisocclusionPipeline.destroy();
+            dlssdDisocclusionPipeline = null;
+        }
         if (gNormal != null) {
             gNormal.destroy();
             gNormal = null;
@@ -660,6 +670,22 @@ public final class RtComposite {
         if (gSpecMotion != null) {
             gSpecMotion.destroy();
             gSpecMotion = null;
+        }
+        if (gDepthHistoryA != null) {
+            gDepthHistoryA.destroy();
+            gDepthHistoryA = null;
+        }
+        if (gDepthHistoryB != null) {
+            gDepthHistoryB.destroy();
+            gDepthHistoryB = null;
+        }
+        if (gDisocclusion != null) {
+            gDisocclusion.destroy();
+            gDisocclusion = null;
+        }
+        if (gBiasCurrentColor != null) {
+            gBiasCurrentColor.destroy();
+            gBiasCurrentColor = null;
         }
         if (rrOutput != null) {
             rrOutput.destroy();
@@ -737,6 +763,19 @@ public final class RtComposite {
         gMotion = ctx.createStorageImage(motionGuideW, motionGuideH, VK10.VK_FORMAT_R16G16_SFLOAT, "guide motion");
         gSpecAlbedo = ctx.createStorageImage(rrGuideW, rrGuideH, VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "guide specular albedo");
         gSpecMotion = ctx.createStorageImage(rrGuideW, rrGuideH, VK10.VK_FORMAT_R16G16_SFLOAT, "guide specular motion");
+        gDepthHistoryA = ctx.createStorageImage(rrGuideW, rrGuideH, VK10.VK_FORMAT_R32_SFLOAT,
+                "DLSSD depth history A");
+        gDepthHistoryB = ctx.createStorageImage(rrGuideW, rrGuideH, VK10.VK_FORMAT_R32_SFLOAT,
+                "DLSSD depth history B");
+        gDisocclusion = ctx.createStorageImage(rrGuideW, rrGuideH, VK10.VK_FORMAT_R16_SFLOAT,
+                "DLSSD disocclusion mask");
+        gBiasCurrentColor = ctx.createStorageImage(rrGuideW, rrGuideH, VK10.VK_FORMAT_R16_SFLOAT,
+                "DLSSD current color bias");
+        if (rrOperational) {
+            dlssdDisocclusionPipeline = RtDlssdDisocclusionPipeline.create(ctx);
+            dlssdDisocclusionPipeline.setImages(gDepth.view, gMotion.view,
+                    gDepthHistoryA.view, gDepthHistoryB.view, gDisocclusion.view, gBiasCurrentColor.view);
+        }
         // At native resolution the display mapper can consume the trace image directly; reserve a second
         // full-resolution FP16 image only when RR may write or need a same-frame fallback upscale.
         rrOutput = rrOperational
@@ -962,15 +1001,19 @@ public final class RtComposite {
             // DLSS-RR denoise + upscale. The RT pass wrote noisy color (render res) + guides;
             // RR reads them and writes the display-res denoised result straight into rrOutput.
             if (rrPath) {
+                boolean resetTemporal = !fgPreviousViewProjectionValid;
+                dlssdDisocclusionPipeline.dispatch(cmd, renderW, renderH, resetTemporal, frameCounter);
+                VulkanCommandEncoder.memoryBarrier(cmd, stack);
                 try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "DLSS-RR evaluate");
                      RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.dlssRr")) {
                     rrDone = RtDlssRr.INSTANCE.evaluate(cmd.address(), output, gDepth, gMotion, gAlbedo,
-                            gSpecAlbedo, gNormal, gSpecMotion, rrOutput, renderW, renderH, displayW, displayH,
+                            gSpecAlbedo, gNormal, gSpecMotion, gDisocclusion, gBiasCurrentColor, rrOutput,
+                            renderW, renderH, displayW, displayH,
                             jitterX, jitterY, frameProjection, mvCurProjView,
                             fgPreviousViewProjectionValid ? fgPreviousViewProjection : mvCurProjView,
                             frameViewRotation, camX, camY, camZ,
                             mvCamDeltaX, mvCamDeltaY, mvCamDeltaZ,
-                            !fgPreviousViewProjectionValid);
+                            resetTemporal);
                 }
             }
             RtDlssRr.INSTANCE.recordFallback(rrPath, rrDone);

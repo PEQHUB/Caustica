@@ -10,8 +10,8 @@ import org.junit.jupiter.api.Test;
 
 final class RtDlssRrResourceContractTest {
     @Test
-    void coreContractRequiresExactlyEightResources() {
-        assertEquals(8, RtDlssRr.requiredResourceCount());
+    void coreContractIncludesDisocclusionAndCurrentColorBias() {
+        assertEquals(10, RtDlssRr.requiredResourceCount());
     }
 
     @Test

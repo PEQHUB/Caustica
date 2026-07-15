@@ -58,7 +58,8 @@ static bool gv_motionUseRefracted; // true when the MV tracks the refracted hit 
 // terrain/sky, an entity's per-vertex/object motion for a dynamic hit).
 static float3 gv_motionObjDisp;
 static float3 gv_opticalGuideDir;
-static uint gv_opticalGuideMode; // 0 none, 1 water, 2 glass exit, 3 glass entry (skip back face)
+static uint gv_opticalGuideMode; // 0 none, 1 water, 2 glass exit, 3 glass entry (trace exact exit)
+static float gv_opticalExitEta;
 
 static const uint PAYLOAD_MATERIAL_MASK = 3u;
 
@@ -432,7 +433,7 @@ float ggxAverageAlbedo(float alpha) {
 
 float3 ggxMultiscatterFresnel(float Eavg, float3 f0) {
     float3 Favg = f0 + (1.0 - f0) * 0.0476190476;
-    return Favg * Eavg / max(float3(1.0e-5), 1.0 - Favg * (1.0 - Eavg));
+    return Favg * Favg * Eavg / max(float3(1.0e-5), 1.0 - Favg * (1.0 - Eavg));
 }
 
 float3 evaluateGgxMultiscatter(float3 n, float3 v, float3 l, float rough, float3 f0) {
@@ -632,12 +633,16 @@ float2 previousReflectionNdc(float3 surfacePos, float3 surfaceNormal, float3 ref
 // sharp specular lobe (specular albedo > 0, roughness <= 0.5). A sky miss is treated as a reflected
 // hit at infinity along the reflected direction, so the same mirror-image reprojection handles surface
 // and sky reflections uniformly (continuous as the reflected distance -> infinity).
-float2 specularReflectionMotion(float3 surfacePos, float3 primaryDir, float2 currentNdc, float2 size, float primaryConeSpread) {
-    if (length(gv_normal) < 0.5 || max(gv_specAlb.r, max(gv_specAlb.g, gv_specAlb.b)) <= 0.001 || gv_rough > 0.5) {
+float2 specularReflectionMotion(float3 surfacePos, float3 surfaceNormal, float surfaceRoughness,
+                                float3 surfaceSpecularAlbedo, float3 primaryDir,
+                                float2 currentNdc, float2 size, float primaryConeSpread) {
+    if (length(surfaceNormal) < 0.5
+            || max(surfaceSpecularAlbedo.r, max(surfaceSpecularAlbedo.g, surfaceSpecularAlbedo.b)) <= 0.001
+            || surfaceRoughness > 0.5) {
         return float2(0.0, 0.0);
     }
 
-    float3 n = normalize(gv_normal);
+    float3 n = normalize(surfaceNormal);
     float3 specDir = reflect(primaryDir, n);
     // The bias is ONLY for the trace origin (so the reflection ray doesn't self-intersect the surface it
     // leaves). The hit is then reconstructed from the TRUE surface point `surfacePos`, NOT the biased
@@ -667,31 +672,48 @@ float2 specularReflectionMotion(float3 surfacePos, float3 primaryDir, float2 cur
     return (prevNdc - currentNdc) * 0.5 * size;
 }
 
-// Deterministic transmitted destination for clear-interface guides. Glass entry rays cull the back-facing
-// exit shell, resolving the scene behind it in one trace. Ordinary pixels pay no additional work.
+// Deterministic transmitted destination for clear-interface guides. An entered solid uses one bounded
+// trace to find its real exit, refracts there, then uses one trace for the visible destination. Thin panes
+// cross their collapsed exit without bending. Ordinary pixels pay no additional work.
 void opticalGuideHit(float3 surfacePos, float3 transmittedDir, float3 surfaceNormal,
-                     bool skipExitShell, float rayBias, float rayConeWidth, float rayConeSpread,
+                     bool continueThroughExit, float exitEta,
+                     float rayBias, float rayConeWidth, float rayConeSpread,
                      out float3 hitCamRel, out float3 motionPrev, out bool transmitted,
-                     out float3 diffuseAlbedo, out float3 specAlbedo) {
+                     out float3 normal, out float roughness,
+                     out float3 diffuseAlbedo) {
     hitCamRel = surfacePos - pc.camOffset;
     motionPrev = float3(0.0, 0.0, 0.0);
     transmitted = dot(transmittedDir, transmittedDir) > 0.0;
+    normal = surfaceNormal;
+    roughness = 1.0;
     diffuseAlbedo = float3(0.0, 0.0, 0.0);
-    specAlbedo = float3(0.0, 0.0, 0.0);
     if (!transmitted) return;
 
     float3 direction = normalize(transmittedDir);
     float3 ro = surfacePos - surfaceNormal * rayBias;
-    payload.hitT = -1.0;
-    payloadSetTraceState(false, rayConeWidth, rayConeSpread);
-    uint rayFlags = skipExitShell ? RAY_FLAG_CULL_BACK_FACING_TRIANGLES : RAY_FLAG_NONE;
-    traceGuideReordered(rayFlags, ro, RAY_TMIN, direction, 10000.0);
+    for (uint crossing = 0u; crossing < 2u; crossing++) {
+        payload.hitT = -1.0;
+        payloadSetTraceState(false, rayConeWidth, rayConeSpread);
+        traceGuideReordered(RAY_FLAG_NONE, ro, RAY_TMIN, direction, 10000.0);
+        if (payload.hitT <= 0.0 || !continueThroughExit || crossing != 0u) break;
+
+        if (payloadMaterial() != MATERIAL_GLASS) break;
+
+        float3 interfacePos = ro + direction * payload.hitT;
+        float3 interfaceNormal = payload.normal;
+        // Thin panes provide exitEta=1; solid glass/ice provides its exact medium-to-outside ratio.
+        // A primary ray entering a closed Minecraft cell exits its opposite face, so this bounded path
+        // cannot reach the total-internal-reflection case.
+        direction = refract(direction, interfaceNormal, exitEta);
+        ro = interfacePos - interfaceNormal * rayBias;
+    }
 
     if (payload.hitT < 0.0) {
         hitCamRel = (ro + direction * 1.0e6) - pc.camOffset;
         motionPrev = float3(0.0, 0.0, 0.0);
+        normal = float3(0.0, 0.0, 0.0);
+        roughness = 1.0;
         diffuseAlbedo = SKY_DIFF_ALBEDO;
-        specAlbedo = SKY_SPEC_ALBEDO;
         return;
     }
 
@@ -699,15 +721,11 @@ void opticalGuideHit(float3 surfacePos, float3 transmittedDir, float3 surfaceNor
     hitCamRel = hitPos - pc.camOffset;
     uint material = payloadMaterial();
     motionPrev = material != MATERIAL_WATER ? payload.motionPrev : float3(0.0, 0.0, 0.0);
+    normal = payload.normal;
+    roughness = material == MATERIAL_WATER ? WATER_GUIDE_ROUGH : clamp(payloadRoughness(), 0.0, 1.0);
     if (material == MATERIAL_OPAQUE) {
         bool pbr = (pc.flags & 2u) != 0u;
         diffuseAlbedo = pbr ? payload.albedo * (1.0 - clamp(payloadMetalness(), 0.0, 1.0)) : payload.albedo;
-        if (pbr) {
-            float3 f0 = payload.f0;
-            float rough = clamp(payloadRoughness(), MIN_ROUGH, 1.0);
-            float NoV = clamp(dot(payload.normal, -direction), 0.0, 1.0);
-            specAlbedo = rrSpecularAlbedo(f0, rough * rough, NoV);
-        }
     }
 }
 
@@ -853,10 +871,11 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
                 gv_motionUseRefracted = false;
                 gv_motionObjDisp = payload.motionPrev; // 0 for static terrain
                 if (captureRefractedGuides) {
-                    // Treat an entered solid as a compact slab for the one-ray guide: the real radiance
-                    // path handles both refractions, while the guide skips the back face and remains stable.
-                    gv_opticalGuideDir = entering ? rd : transmittedDir;
+                    // Match the real transmission path: entered solids start with entry refraction, then
+                    // the bounded guide continuation finds and refracts through their actual exit face.
+                    gv_opticalGuideDir = transmittedDir;
                     gv_opticalGuideMode = entering ? 3u : 2u;
+                    gv_opticalExitEta = thinPane ? 1.0 : materialIor / outsideIor;
                 }
             }
             if (primaryOnly || bounce >= maxBounces) {
@@ -971,6 +990,7 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
             float etaI = inWater ? WATER_IOR : 1.0;
             float etaT = inWater ? 1.0 : WATER_IOR;
             float F = fresnelDielectric(cosI, etaI, etaT);
+            if (captureGuides && bounce == 0) gv_specAlb = float3(F, F, F);
             if (rndf(seed) < F) {
                 rd = reflect(rd, n);
                 ro = hitPos + n * SURF_BIAS; // reflected ray stays on the incidence side
@@ -1175,6 +1195,7 @@ void main() {
     uint pathCount = primaryOnly ? 1u : spp;
     float3 frameRadiance = float3(0.0, 0.0, 0.0);
     gv_opticalGuideMode = 0u;
+    gv_opticalExitEta = 1.0;
     for (uint s = 0u; s < pathCount; s++) {
         seed = pcg(seed); // decorrelate per-sample paths (shared camera ray, no AA jitter yet)
         // The primary ray is shared by all SPP samples. Preserve guides from sample zero; the radiance path
@@ -1184,29 +1205,41 @@ void main() {
     }
     frameRadiance /= float(pathCount);
 
+    // Optical transmission changes the visible layer, but reflection motion still belongs to the primary
+    // glass/water interface. Preserve that interface before replacing ordinary guides with the destination.
+    float3 specSurfaceCamRel = gv_hitCamRel;
+    float3 specSurfaceNormal = gv_normal;
+    float specSurfaceRoughness = gv_rough;
+    float3 specSurfaceAlbedo = gv_specAlb;
+
     // One shared call site keeps Slang from cloning the guide trace into both water and glass paths.
     if (gv_opticalGuideMode != 0u) {
         float3 destinationHitCamRel;
         float3 destinationMotionPrev;
         bool destinationValid;
+        float3 destinationNormal;
+        float destinationRoughness;
         float3 destinationDiffuseAlbedo;
-        float3 destinationSpecAlbedo;
         bool glassGuide = gv_opticalGuideMode >= 2u;
         float guideBias = glassGuide ? GLASS_TRANSMIT_BIAS : SURF_BIAS;
         float guideConeWidth = max(length(gv_hitCamRel) * rayConeSpread, RAY_CONE_MIN_WIDTH);
         opticalGuideHit(gv_hitCamRel + pc.camOffset, gv_opticalGuideDir, gv_normal,
-                gv_opticalGuideMode == 3u, guideBias, guideConeWidth, rayConeSpread,
+                gv_opticalGuideMode == 3u, gv_opticalExitEta,
+                guideBias, guideConeWidth, rayConeSpread,
                 destinationHitCamRel, destinationMotionPrev, destinationValid,
-                destinationDiffuseAlbedo, destinationSpecAlbedo);
+                destinationNormal, destinationRoughness,
+                destinationDiffuseAlbedo);
         if (destinationValid) {
             gv_motionHitCamRel = destinationHitCamRel;
             gv_motionObjDisp = destinationMotionPrev;
             gv_motionUseRefracted = true;
             gv_albedo = destinationDiffuseAlbedo;
-            gv_specAlb = destinationSpecAlbedo;
             if (glassGuide) {
-                // Glass depth and motion now describe the same transmitted destination.
+                // The ordinary visible layer is the transmitted destination. Specular albedo/motion remain
+                // attached to the separately preserved primary glass interface, matching DLSSD semantics.
                 gv_hitCamRel = destinationHitCamRel;
+                gv_normal = destinationNormal;
+                gv_rough = destinationRoughness;
             }
         }
     }
@@ -1239,7 +1272,8 @@ void main() {
     float2 specMotion = float2(0.0, 0.0);
     if (writeRrGuides || debugSpecMotion) {
         specMotion = specularReflectionMotion(
-                gv_hitCamRel + pc.camOffset, dir, jndc, size, rayConeSpread);
+                specSurfaceCamRel + pc.camOffset, specSurfaceNormal, specSurfaceRoughness,
+                specSurfaceAlbedo, dir, jndc, size, rayConeSpread);
     }
 
     if (writeRrGuides) {

@@ -1112,8 +1112,8 @@ SLBRIDGE_EXPORT int32_t slbridge_evaluate_dlssd(uint64_t frame_token, uint32_t v
         const slbridge_resource_desc* resources, uint32_t resource_count,
         const slbridge_constants* constants, uint64_t command_buffer) {
     if (!g_slSetConstants || !g_slEvaluateFeature || !resources || !constants || !command_buffer
-            || resource_count != 8) {
-        setError("Streamline DLSS-RR evaluation requires eight resources, constants, and a command buffer");
+            || resource_count != 10) {
+        setError("Streamline DLSS-RR evaluation requires ten resources, constants, and a command buffer");
         return -1;
     }
     auto* token = tokenFromHandle(frame_token);
@@ -1136,6 +1136,8 @@ SLBRIDGE_EXPORT int32_t slbridge_evaluate_dlssd(uint64_t frame_token, uint32_t v
     bool hasSpecularAlbedo = false;
     bool hasNormalRoughness = false;
     bool hasSpecularMotion = false;
+    bool hasDisocclusion = false;
+    bool hasBiasCurrentColor = false;
     for (uint32_t i = 0; i < resource_count; i++) {
         const auto& descriptor = resources[i];
         if (!slbridge::detail::isCompleteDlssdVulkanTexture(descriptor)) {
@@ -1168,11 +1170,14 @@ SLBRIDGE_EXPORT int32_t slbridge_evaluate_dlssd(uint64_t frame_token, uint32_t v
         case SLBRIDGE_BUFFER_SPECULAR_ALBEDO: hasSpecularAlbedo = true; break;
         case SLBRIDGE_BUFFER_NORMAL_ROUGHNESS: hasNormalRoughness = true; break;
         case SLBRIDGE_BUFFER_SPECULAR_MOTION_VECTORS: hasSpecularMotion = true; break;
+        case SLBRIDGE_BUFFER_DISOCCLUSION_MASK: hasDisocclusion = true; break;
+        case SLBRIDGE_BUFFER_BIAS_CURRENT_COLOR_HINT: hasBiasCurrentColor = true; break;
         default: break;
         }
     }
     if (!hasInputColor || !hasOutputColor || !hasDepth || !hasMotion || !hasAlbedo
-            || !hasSpecularAlbedo || !hasNormalRoughness || !hasSpecularMotion) {
+            || !hasSpecularAlbedo || !hasNormalRoughness || !hasSpecularMotion
+            || !hasDisocclusion || !hasBiasCurrentColor) {
         setError("Streamline DLSS-RR is missing one or more required local resource tags");
         return -1;
     }

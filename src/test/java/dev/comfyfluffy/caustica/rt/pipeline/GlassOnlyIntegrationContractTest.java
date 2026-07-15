@@ -38,11 +38,22 @@ final class GlassOnlyIntegrationContractTest {
         assertFalse(raygen.contains("MAX_MEDIUM_DEPTH"));
         assertFalse(raygen.contains("pathMedia"));
         assertTrue(raygen.contains("void opticalGuideHit"));
-        assertTrue(raygen.contains("RAY_FLAG_CULL_BACK_FACING_TRIANGLES"));
+        assertTrue(raygen.contains("for (uint crossing = 0u; crossing < 2u; crossing++)"));
+        assertTrue(raygen.contains("gv_opticalGuideDir = transmittedDir"));
+        assertTrue(raygen.contains("gv_opticalExitEta = thinPane ? 1.0 : materialIor / outsideIor"));
+        assertTrue(raygen.contains("refract(direction, interfaceNormal, exitEta)"));
         assertTrue(raygen.contains("gv_hitCamRel = destinationHitCamRel"));
+        assertTrue(raygen.contains("gv_normal = destinationNormal"));
+        assertTrue(raygen.contains("gv_rough = destinationRoughness"));
         assertTrue(raygen.contains("gv_albedo = destinationDiffuseAlbedo"));
-        assertTrue(raygen.contains("gv_specAlb = destinationSpecAlbedo"));
+        assertTrue(raygen.contains("float3 specSurfaceCamRel = gv_hitCamRel"));
+        assertTrue(raygen.contains("specSurfaceAlbedo, dir, jndc, size"));
         assertTrue(raygen.contains("gv_opticalGuideMode == 3u"));
+        assertTrue(raygen.contains("Favg * Favg * Eavg"));
+        assertTrue(closestHit.contains("float3 texAlbedo = srgbToLinear(blockAtlas.SampleLevel(uv, blockLod).rgb)"));
+        assertTrue(closestHit.contains("float3 tintLinear = srgbToLinear(tint)"));
+        assertTrue(closestHit.contains("payload.albedo = texAlbedo * tintLinear"));
+        assertFalse(closestHit.contains("payload.albedo = (pr.tint.w > 0.5) ? tint"));
         assertEquals(2, occurrences(raygen, "opticalGuideHit(")); // definition plus one shared call site
         assertFalse(raygen.contains("world_dlssd_guides"));
         assertFalse(closestHit.contains("PAYLOAD_SHADOW_QUERY"));
