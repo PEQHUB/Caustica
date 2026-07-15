@@ -53,6 +53,8 @@
 
 	"caustica.options.rt.waterWaves": "Animated Water",
 	"caustica.options.rt.waterWaves.tooltip": "Animate water-surface normals for moving wave highlights.",
+	"caustica.options.rt.torchIntensity": "Torch Intensity",
+	"caustica.options.rt.torchIntensity.tooltip": "Scale light emitted by active torches. Updates immediately without reloading shaders or the world.",
 
 	"caustica.options.rt.hdr": "HDR Output",
 	"caustica.options.rt.hdr.tooltip": "Present in HDR (ST.2084/PQ) instead of SDR, when the display supports it. Takes effect after restarting the game.",

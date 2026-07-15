@@ -618,6 +618,8 @@ public final class CausticaConfig {
                     clampedInt("caustica.rt.maxBounces", "composite.max-bounces", 4, 2, 8);
             public static final BooleanSetting WATER_WAVES =
                     bool("caustica.rt.waterWaves", "composite.water-waves", true);
+            public static final FloatSetting TORCH_EMISSION_MULTIPLIER = clampedFloat(
+                    "caustica.rt.torchEmissionMultiplier", "composite.torch-emission-multiplier", 50.0f, 0.0f, 100.0f);
             public static final FloatSetting SUN_ANGULAR_RADIUS =
                     radians("caustica.rt.sunAngularRadius", "composite.sun-angular-radius-deg", 0.6f);
             public static final FloatSetting MOON_ANGULAR_RADIUS =

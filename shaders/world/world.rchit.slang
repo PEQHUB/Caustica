@@ -444,16 +444,25 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
     float rough = pr.mat.x;
     float metal = pr.mat.y;
     float3 f0 = lerp(float3(0.04, 0.04, 0.04), payload.albedo, metal);
-    // normal.w packs the 0..1 block-light level plus a +2 offset flag for non-SOLID (cutout /
-    // translucent) render layers, set at extraction so the hit can opt SOLID terrain out of SSS below.
+    // normal.w packs block-light emission plus a +2 non-SOLID flag and +16 boosted-torch flag. Decode
+    // non-SOLID first because torch models are cutout, then strip the independent torch flag.
     float ew = pr.normal.w;
     bool nonSolid = ew >= 1.5;
-    float emission = nonSolid ? ew - 2.0 : ew; // heuristic emission source (block light level)
+    float encodedEmission = nonSolid ? ew - 2.0 : ew;
+    bool boostedTorch = encodedEmission >= 15.5;
+    float sourceEmission = boostedTorch ? encodedEmission - 16.0 : encodedEmission;
+    float emissionScale = boostedTorch
+            ? max(ConstPtr<WorldPush>(pcAddr.worldPushAddr)[0].torchEmissionScale, 0.0)
+            : 1.0;
+    float emission = sourceEmission * emissionScale;
     // LabPBR _s, gated by mat.z — shared decode. When an _s map is authored we trust ITS emission and
-    // REPLACE the block-light heuristic, so emissive texels come from the pack, not the light level.
+    // REPLACE the block-light heuristic, so emissive texels come from the pack, not the light level. The
+    // torch-only scale is applied after decode, preserving the exact authored mask while increasing radiance.
     float sss = 0.0;
     if (pr.mat.z > 0.5) {
-        decodeSpec(blockSpecAtlas.SampleLevel(uv, blockLod), payload.albedo, rough, metal, f0, emission, sss);
+        float mappedEmission;
+        decodeSpec(blockSpecAtlas.SampleLevel(uv, blockLod), payload.albedo, rough, metal, f0, mappedEmission, sss);
+        emission = mappedEmission * emissionScale;
         if (!nonSolid) sss = 0.0; // SSS only on non-SOLID terrain (leaves/foliage); SOLID blocks opt out
     }
     payload.f0 = f0;

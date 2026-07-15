@@ -137,6 +137,7 @@ public final class RtVideoOptions {
             entities(),
             particles(),
             waterWaves(),
+            torchIntensity(),
             dlssRrEnabled(),
             dlssQuality(),
             debugView(),
@@ -375,6 +376,18 @@ public final class RtVideoOptions {
 
     private static OptionInstance<Boolean> waterWaves() {
         return bool("caustica.options.rt.waterWaves", CausticaConfig.Rt.Composite.WATER_WAVES);
+    }
+
+    private static OptionInstance<Integer> torchIntensity() {
+        FloatSetting setting = CausticaConfig.Rt.Composite.TORCH_EMISSION_MULTIPLIER;
+        return new OptionInstance<>(
+            "caustica.options.rt.torchIntensity",
+            OptionInstance.cachedConstantTooltip(Component.translatable("caustica.options.rt.torchIntensity.tooltip")),
+            (caption, multiplier) -> Options.genericValueLabel(caption,
+                    Component.literal(multiplier + "x")),
+            new OptionInstance.IntRange(0, 100),
+            Math.clamp(Math.round(setting.configuredValue()), 0, 100),
+            multiplier -> setting.set(multiplier.floatValue()));
     }
 
     private static OptionInstance<Integer> dlssQuality() {

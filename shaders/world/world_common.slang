@@ -49,6 +49,7 @@ public struct WorldPush {
     [vk::offset(336)] public float4   waterAnchor;   // xy world-stable wave anchor, z previous wave time
     [vk::offset(352)] public float4x4 curViewProj;   // forward camera-relative view-projection
     [vk::offset(416)] public uint     breakCount;
+    [vk::offset(420)] public float    torchEmissionScale; // hot-reloadable multiplier for torch-class emitters
     [vk::offset(432)] public BreakEntry breaking[8]; // generated Java capacity/serialization
 };
 

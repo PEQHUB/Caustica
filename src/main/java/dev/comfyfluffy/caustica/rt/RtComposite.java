@@ -968,6 +968,7 @@ public final class RtComposite {
                     waterAnchor,
                     mvCurProjView,
                     breaking.length,
+                    CausticaConfig.Rt.Composite.TORCH_EMISSION_MULTIPLIER.value(),
                     breaking
             ).write(push);
             // Upload any entity textures registered this frame into the bindless set before the trace.
