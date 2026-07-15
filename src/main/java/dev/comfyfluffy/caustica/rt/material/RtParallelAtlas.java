@@ -37,10 +37,18 @@ public final class RtParallelAtlas {
     public static final int HAS_S = 1;
     public static final int HAS_N = 2;
 
+    // NativeImage.getPixelBytes() exposes one Java ByteBuffer for the complete RGBA image, so its byte
+    // count must fit a signed int. A 32768x16384 atlas is exactly 2 GiB and therefore cannot be mirrored
+    // by this implementation even when the GPU itself supports those dimensions.
+    private static final long MAX_NATIVE_IMAGE_BYTES = Integer.MAX_VALUE;
+    private static final int NEUTRAL_SPEC_ABGR = 0xFF000A00;   // rough=1, dielectric F0~=0.04, no emission
+    private static final int NEUTRAL_NORMAL_ABGR = 0xFFFF8080; // tangent (0,0,1), AO=1
+
     private final Identifier sourceAtlas;
     private final Atlas specAtlas;
     private final Atlas normalAtlas;
     private int atlasW, atlasH;
+    private boolean materialMapsReady;
     // Per-sprite result cache: bitmask of HAS_S | HAS_N (which maps were found + blitted). Concurrent
     // because prepareAll() populates it from parallel worker threads (one entry per sprite, disjoint).
     private final Map<TextureAtlasSprite, Integer> seen = new ConcurrentHashMap<>();
@@ -74,12 +82,24 @@ public final class RtParallelAtlas {
             dirty = false;
         }
 
+        void createNeutral(int pixelAbgr) {
+            close();
+            image = new NativeImage(1, 1, true);
+            image.setPixelABGR(0, 0, pixelAbgr);
+            tex = new DynamicTexture(() -> label + "_neutral", image);
+            dirty = false;
+        }
+
         void close() {
             if (tex != null) {
                 tex.close();
                 tex = null;
-                image = null;
+            } else if (image != null) {
+                // DynamicTexture normally owns the image. If its constructor failed after NativeImage
+                // allocation, close the otherwise-unowned native allocation here.
+                image.close();
             }
+            image = null;
             dirty = false;
         }
 
@@ -120,6 +140,7 @@ public final class RtParallelAtlas {
      */
     public void reset() {
         seen.clear();
+        materialMapsReady = false;
         specAtlas.close();
         normalAtlas.close();
         try {
@@ -130,18 +151,42 @@ public final class RtParallelAtlas {
             if (atlasW <= 0 || atlasH <= 0) {
                 return;
             }
+            if (!supportsFullAtlas(atlasW, atlasH)) {
+                throw new IllegalArgumentException("RGBA atlas byte count exceeds NativeImage limit: "
+                        + atlasW + "x" + atlasH + "x4");
+            }
             specAtlas.create();
             normalAtlas.create();
+            materialMapsReady = true;
         } catch (Throwable t) {
-            warnOnce("RT material atlas creation failed for " + sourceAtlas, t);
+            warnOnce("RT material atlas unavailable for " + sourceAtlas
+                    + "; using neutral maps and disabling per-sprite LabPBR flags", t);
             specAtlas.close();
             normalAtlas.close();
+            try {
+                // Descriptors remain valid even while old asynchronously rebuilt primitives still carry
+                // material-map flags. Neutral texels make that transition visually safe; ensure() below
+                // returns zero so every replacement primitive permanently drops those stale flags.
+                specAtlas.createNeutral(NEUTRAL_SPEC_ABGR);
+                normalAtlas.createNeutral(NEUTRAL_NORMAL_ABGR);
+            } catch (Throwable fallbackFailure) {
+                t.addSuppressed(fallbackFailure);
+                specAtlas.close();
+                normalAtlas.close();
+            }
         }
     }
 
-    /** Whether the parallel atlases were created (the source atlas was ready at {@link #reset}). */
+    /** Whether valid descriptor textures exist (full material maps or the neutral fail-closed pair). */
     public boolean isReady() {
         return specAtlas.image != null;
+    }
+
+    static boolean supportsFullAtlas(int width, int height) {
+        if (width <= 0 || height <= 0) {
+            return false;
+        }
+        return (long) width * (long) height * 4L <= MAX_NATIVE_IMAGE_BYTES;
     }
 
     /**
@@ -172,7 +217,7 @@ public final class RtParallelAtlas {
      * concurrent); the GPU upload is a single {@link #flush} afterward. No-op if the atlases didn't init.
      */
     public void prepareAll() {
-        if (specAtlas.image == null) {
+        if (!materialMapsReady) {
             return;
         }
         List<TextureAtlasSprite> sprites;
@@ -202,7 +247,7 @@ public final class RtParallelAtlas {
      * are not pre-enumerated — they are sized + sampled rarely, so per-sprite lazy load is fine.
      */
     public int ensure(TextureAtlasSprite sprite) {
-        if (sprite == null || specAtlas.image == null) {
+        if (sprite == null || !materialMapsReady) {
             return 0;
         }
         Integer cached = seen.get(sprite);
@@ -238,6 +283,7 @@ public final class RtParallelAtlas {
     /** Free both parallel atlases (GPU textures + CPU images). */
     public void close() {
         seen.clear();
+        materialMapsReady = false;
         specAtlas.close();
         normalAtlas.close();
     }
