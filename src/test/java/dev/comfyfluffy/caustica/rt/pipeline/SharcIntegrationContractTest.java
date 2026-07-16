@@ -62,10 +62,28 @@ final class SharcIntegrationContractTest {
         assertTrue(bridge.contains("state.setProperty(\"renderWidth\""));
         assertTrue(bridge.contains("sequence < PROCESS_START_MILLIS"));
         assertTrue(bridge.contains("client.getWindow().toggleFullScreen()"));
+        assertTrue(bridge.contains("command.getProperty(\"causticaCategory\")"));
         assertTrue(bridge.contains("new RtSharcOptionsScreen(client.gui.screen(), client.options)"));
         assertTrue(bridge.contains("Screenshot.grab(client, false)"));
+        assertTrue(script.contains("[bool]$OpenCausticaSettings"));
+        assertTrue(script.contains("[string]$CausticaCategory"));
         assertTrue(script.contains("[bool]$OpenSharcSettings"));
         assertTrue(script.contains("[bool]$Screenshot"));
+    }
+
+    @Test
+    void rootSettingsUseResponsiveCategoryWorkstation() throws Exception {
+        String entry = read("src/main/java/dev/comfyfluffy/caustica/client/CausticaOptionsScreen.java");
+        String screen = read("src/main/java/dev/comfyfluffy/caustica/client/CausticaSettingsScreen.java");
+        String categoryLayout = read("src/main/java/dev/comfyfluffy/caustica/client/ui/CategoryLayout.java");
+        String gridLayout = read("src/main/java/dev/comfyfluffy/caustica/client/ui/WidgetGridLayout.java");
+        assertTrue(entry.contains("extends CausticaSettingsScreen"));
+        assertTrue(screen.contains("SHARC(\"SHaRC\")"));
+        assertTrue(screen.contains("new ScrollableLayout"));
+        assertTrue(screen.contains("Math.clamp((contentWidth + GRID_GAP)"));
+        assertTrue(screen.contains("restoreSharcParityDefaults"));
+        assertTrue(categoryLayout.contains("Deterministic vertical layout"));
+        assertTrue(gridLayout.contains("compact responsive grid"));
     }
 
     @Test

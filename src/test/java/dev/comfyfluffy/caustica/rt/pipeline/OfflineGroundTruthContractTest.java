@@ -63,6 +63,8 @@ final class OfflineGroundTruthContractTest {
     void f7RunsDirectlyBehindATransparentHudWithoutAutomaticExport() throws Exception {
         String menu = Files.readString(Path.of(
                 "src/main/java/dev/comfyfluffy/caustica/client/CausticaOptionsScreen.java"));
+        String workstation = Files.readString(Path.of(
+                "src/main/java/dev/comfyfluffy/caustica/client/CausticaSettingsScreen.java"));
         String options = Files.readString(Path.of(
                 "src/main/java/dev/comfyfluffy/caustica/client/RtVideoOptions.java"));
         String videoMixin = Files.readString(Path.of(
@@ -76,10 +78,11 @@ final class OfflineGroundTruthContractTest {
 
         assertTrue(!options.contains("offlineOptions()"));
         assertTrue(!menu.contains("offlineRendererButton"));
-        assertTrue(menu.contains("tonemappingButton"));
-        assertTrue(menu.contains("frameGenerationButton"));
-        assertTrue(menu.contains("runtimeOptions"));
-        assertTrue(menu.contains("firstPersonOptions"));
+        assertTrue(menu.contains("extends CausticaSettingsScreen"));
+        assertTrue(workstation.contains("addImage()"));
+        assertTrue(workstation.contains("addOutput()"));
+        assertTrue(workstation.contains("addRendering()"));
+        assertTrue(workstation.contains("addView()"));
         assertTrue(videoMixin.contains("RtVideoOptions.causticaButton"));
         assertTrue(client.contains("OfflineGroundTruth.INSTANCE.handleHotkey(client)"));
         assertTrue(client.contains("HudElementRegistry.addLast"));

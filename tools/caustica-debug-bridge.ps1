@@ -18,6 +18,9 @@ param(
     [bool]$LiveSecondaryDirect,
     [bool]$SharcDetailedStats,
     [bool]$Fullscreen,
+    [bool]$OpenCausticaSettings,
+    [ValidateSet('Output','Rendering','SHaRC','Image','View','Diagnostics')]
+    [string]$CausticaCategory,
     [bool]$OpenSharcSettings,
     [bool]$Screenshot,
     [int]$Seconds = 20
@@ -71,6 +74,8 @@ if ($PSBoundParameters.ContainsKey('GlossyQuery')) { $lines += "glossyQuery=$($G
 if ($PSBoundParameters.ContainsKey('LiveSecondaryDirect')) { $lines += "liveSecondaryDirect=$($LiveSecondaryDirect.ToString().ToLowerInvariant())" }
 if ($PSBoundParameters.ContainsKey('SharcDetailedStats')) { $lines += "sharcDetailedStats=$($SharcDetailedStats.ToString().ToLowerInvariant())" }
 if ($PSBoundParameters.ContainsKey('Fullscreen')) { $lines += "fullscreen=$($Fullscreen.ToString().ToLowerInvariant())" }
+if ($PSBoundParameters.ContainsKey('OpenCausticaSettings')) { $lines += "openCausticaSettings=$($OpenCausticaSettings.ToString().ToLowerInvariant())" }
+if ($PSBoundParameters.ContainsKey('CausticaCategory')) { $lines += "causticaCategory=$CausticaCategory" }
 if ($PSBoundParameters.ContainsKey('OpenSharcSettings')) { $lines += "openSharcSettings=$($OpenSharcSettings.ToString().ToLowerInvariant())" }
 if ($PSBoundParameters.ContainsKey('Screenshot')) { $lines += "screenshot=$($Screenshot.ToString().ToLowerInvariant())" }
 if ($Action -eq 'reset') { $lines += 'resetCache=true' }

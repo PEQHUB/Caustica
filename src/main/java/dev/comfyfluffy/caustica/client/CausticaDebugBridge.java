@@ -67,6 +67,10 @@ final class CausticaDebugBridge {
             setBoolean(command, "glossyQuery", CausticaConfig.Rt.Sharc.GLOSSY_QUERY);
             setBoolean(command, "liveSecondaryDirect", CausticaConfig.Rt.Sharc.LIVE_SECONDARY_DIRECT);
             setBoolean(command, "sharcDetailedStats", CausticaConfig.Rt.Sharc.DETAILED_STATS);
+            if (Boolean.parseBoolean(command.getProperty("openCausticaSettings", "false"))) {
+                client.setScreenAndShow(new CausticaOptionsScreen(client.gui.screen(), client.options,
+                        command.getProperty("causticaCategory")));
+            }
             if (Boolean.parseBoolean(command.getProperty("openSharcSettings", "false"))) {
                 client.setScreenAndShow(new RtSharcOptionsScreen(client.gui.screen(), client.options));
             }
