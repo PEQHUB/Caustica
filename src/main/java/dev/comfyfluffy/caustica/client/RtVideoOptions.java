@@ -8,6 +8,8 @@ import dev.comfyfluffy.caustica.CausticaConfig.IntSetting;
 import dev.comfyfluffy.caustica.CausticaConfig.StringSetting;
 import dev.comfyfluffy.caustica.rt.pipeline.RtDlssFg;
 import dev.comfyfluffy.caustica.rt.pipeline.RtDlssRr;
+import dev.comfyfluffy.caustica.rt.RtSharcSupport;
+import dev.comfyfluffy.caustica.rt.RtComposite;
 import dev.comfyfluffy.caustica.streamline.StreamlineRuntime;
 import java.util.List;
 import java.util.Locale;
@@ -24,9 +26,9 @@ import net.minecraft.network.chat.Component;
  */
 public final class RtVideoOptions {
     private static final List<Integer> DLSS_QUALITY_ORDER = List.of(3, 0, 1, 2, 5);
-     private static final List<Integer> DEBUG_VIEW_ORDER = List.of(
-             0, 1, 2, 3, 4, 5, 6, 7,
-             CausticaConfig.Rt.Composite.DEBUG_VIEW_TONEMAP_COMPARISON);
+    private static final List<Integer> DEBUG_VIEW_ORDER = List.of(
+            0, 1, 2, 3, 4, 5, 6, 7,
+            CausticaConfig.Rt.Composite.DEBUG_VIEW_TONEMAP_COMPARISON, 9, 10, 11, 12, 13, 14, 15, 16);
 
     /** A tone-mapping widget plus the value it should restore when Shift+Left-clicked. */
     public record TonemapControl(OptionInstance<?> option, Runnable reset) {
@@ -77,6 +79,19 @@ public final class RtVideoOptions {
                 })
             .width(Button.BIG_WIDTH)
             .tooltip(Tooltip.create(Component.translatable("caustica.options.rt.frameGeneration.tooltip")))
+            .build();
+    }
+
+    public static Button sharcButton(Screen parent, Runnable beforeOpen) {
+        return Button.builder(
+                Component.translatable("caustica.options.rt.sharcSettings"),
+                button -> {
+                    beforeOpen.run();
+                    Minecraft.getInstance().setScreenAndShow(
+                            new RtSharcOptionsScreen(parent, Minecraft.getInstance().options));
+                })
+            .width(Button.BIG_WIDTH)
+            .tooltip(Tooltip.create(Component.translatable("caustica.options.rt.sharcSettings.tooltip")))
             .build();
     }
 
@@ -409,6 +424,119 @@ public final class RtVideoOptions {
             step -> setting.set(step / 10.0f));
     }
 
+    public static OptionInstance<?>[] sharcOptions() {
+        return new OptionInstance<?>[] {
+            sharcEnabled(), sharcMemory(), sharcSceneScale(), sharcRadianceScale(),
+            sharcAccumulationFrames(), sharcStaleFrames(),
+            sharcUpdateTileSize(), sharcUpdateMaxBounces(), sharcMinSegmentRatio(),
+            bool("caustica.options.rt.sharcGlossyQuery", CausticaConfig.Rt.Sharc.GLOSSY_QUERY),
+            bool("caustica.options.rt.sharcLiveSecondaryDirect", CausticaConfig.Rt.Sharc.LIVE_SECONDARY_DIRECT),
+            bool("caustica.options.rt.sharcAntiFirefly", CausticaConfig.Rt.Sharc.ANTI_FIREFLY),
+            debugView(), bool("caustica.options.frameStats", CausticaConfig.Rt.FrameStats.ENABLED),
+        };
+    }
+
+    private static OptionInstance<Boolean> sharcEnabled() {
+        return OptionInstance.createBoolean(
+                "caustica.options.rt.sharc",
+                OptionInstance.cachedConstantTooltip(Component.translatable("caustica.options.rt.sharc.tooltip")),
+                (caption, enabled) -> RtSharcSupport.available()
+                        ? Options.genericValueLabel(caption, Component.translatable(
+                                enabled ? (RtComposite.INSTANCE.sharcActive()
+                                        ? "caustica.options.rt.sharc.active"
+                                        : "caustica.options.rt.sharc.ready")
+                                        : "caustica.options.rt.sharc.off"))
+                        : Options.genericValueLabel(caption, Component.literal(RtSharcSupport.status())),
+                CausticaConfig.Rt.Sharc.ENABLED.configuredValue() && RtSharcSupport.available(),
+                enabled -> CausticaConfig.Rt.Sharc.ENABLED.set(enabled && RtSharcSupport.available()));
+    }
+
+    private static OptionInstance<Integer> sharcMemory() {
+        IntSetting setting = CausticaConfig.Rt.Sharc.CACHE_EXPONENT;
+        return new OptionInstance<>(
+                "caustica.options.rt.sharcMemory",
+                OptionInstance.cachedConstantTooltip(Component.translatable("caustica.options.rt.sharcMemory.tooltip")),
+                (caption, exponent) -> Options.genericValueLabel(caption,
+                        Component.translatable("caustica.options.rt.sharcMemory." + exponent)),
+                new OptionInstance.IntRange(16, 22),
+                Math.clamp(setting.configuredValue(), 16, 22),
+                setting::set);
+    }
+
+    private static OptionInstance<Integer> sharcSceneScale() {
+        FloatSetting setting = CausticaConfig.Rt.Sharc.SCENE_SCALE;
+        return new OptionInstance<>(
+                "caustica.options.rt.sharcSceneScale",
+                OptionInstance.cachedConstantTooltip(Component.translatable("caustica.options.rt.sharcSceneScale.tooltip")),
+                (caption, quarterSteps) -> Options.genericValueLabel(caption,
+                        Component.literal(String.format(Locale.ROOT, "%.2f", quarterSteps / 4.0f))),
+                new OptionInstance.IntRange(4, 400),
+                Math.clamp(Math.round(setting.configuredValue() * 4.0f), 4, 400),
+                quarterSteps -> setting.set(quarterSteps / 4.0f));
+    }
+
+    private static OptionInstance<Integer> sharcRadianceScale() {
+        FloatSetting setting = CausticaConfig.Rt.Sharc.RADIANCE_SCALE;
+        return new OptionInstance<>(
+                "caustica.options.rt.sharcRadianceScale",
+                OptionInstance.cachedConstantTooltip(Component.translatable("caustica.options.rt.sharcRadianceScale.tooltip")),
+                (caption, step) -> Options.genericValueLabel(caption, step * 50),
+                new OptionInstance.IntRange(1, 200),
+                Math.clamp(Math.round(setting.configuredValue() / 50.0f), 1, 200),
+                step -> setting.set(step * 50.0f));
+    }
+
+    private static OptionInstance<Integer> sharcAccumulationFrames() {
+        IntSetting setting = CausticaConfig.Rt.Sharc.ACCUMULATION_FRAMES;
+        return new OptionInstance<>(
+                "caustica.options.rt.sharcAccumulationFrames",
+                OptionInstance.cachedConstantTooltip(Component.translatable("caustica.options.rt.sharcAccumulationFrames.tooltip")),
+                (caption, frames) -> Options.genericValueLabel(caption, frames),
+                new OptionInstance.IntRange(1, 1024),
+                Math.clamp(setting.configuredValue(), 1, 1024), setting::set);
+    }
+
+    private static OptionInstance<Integer> sharcStaleFrames() {
+        IntSetting setting = CausticaConfig.Rt.Sharc.STALE_FRAMES;
+        return new OptionInstance<>(
+                "caustica.options.rt.sharcStaleFrames",
+                OptionInstance.cachedConstantTooltip(Component.translatable("caustica.options.rt.sharcStaleFrames.tooltip")),
+                (caption, frames) -> Options.genericValueLabel(caption, frames),
+                new OptionInstance.IntRange(8, 1024),
+                Math.clamp(setting.configuredValue(), 8, 1024), setting::set);
+    }
+
+    private static OptionInstance<Integer> sharcUpdateTileSize() {
+        IntSetting setting = CausticaConfig.Rt.Sharc.UPDATE_TILE_SIZE;
+        return new OptionInstance<>("caustica.options.rt.sharcUpdateTileSize",
+                OptionInstance.cachedConstantTooltip(Component.translatable(
+                        "caustica.options.rt.sharcUpdateTileSize.tooltip")),
+                (caption, tile) -> Options.genericValueLabel(caption, Component.literal(String.format(
+                        Locale.ROOT, "%dx%d (%.3f%%)", tile, tile, 100.0 / (tile * tile)))),
+                new OptionInstance.IntRange(2, 64), Math.clamp(setting.configuredValue(), 2, 64), setting::set);
+    }
+
+    private static OptionInstance<Integer> sharcUpdateMaxBounces() {
+        IntSetting setting = CausticaConfig.Rt.Sharc.UPDATE_MAX_BOUNCES;
+        return new OptionInstance<>("caustica.options.rt.sharcUpdateMaxBounces",
+                OptionInstance.cachedConstantTooltip(Component.translatable(
+                        "caustica.options.rt.sharcUpdateMaxBounces.tooltip")),
+                Options::genericValueLabel, new OptionInstance.IntRange(1, 8),
+                Math.clamp(setting.configuredValue(), 1, 8), setting::set);
+    }
+
+    private static OptionInstance<Integer> sharcMinSegmentRatio() {
+        FloatSetting setting = CausticaConfig.Rt.Sharc.MIN_SEGMENT_RATIO;
+        return new OptionInstance<>("caustica.options.rt.sharcMinSegmentRatio",
+                OptionInstance.cachedConstantTooltip(Component.translatable(
+                        "caustica.options.rt.sharcMinSegmentRatio.tooltip")),
+                (caption, quarter) -> Options.genericValueLabel(caption,
+                        Component.literal(String.format(Locale.ROOT, "%.2fx voxel", quarter / 4.0))),
+                new OptionInstance.IntRange(1, 16),
+                Math.clamp(Math.round(setting.configuredValue() * 4.0f), 1, 16),
+                quarter -> setting.set(quarter / 4.0f));
+    }
+
     private static OptionInstance<Integer> psrMirrorDepth() {
         IntSetting setting = CausticaConfig.Rt.Composite.PSR_MAX_MIRRORS;
         return new OptionInstance<>(
@@ -509,10 +637,8 @@ public final class RtVideoOptions {
             "caustica.options.rt.debugView",
             OptionInstance.cachedConstantTooltip(Component.translatable("caustica.options.rt.debugView.tooltip")),
             (caption, value) -> Component.translatable("caustica.options.rt.debugView." + value),
-            new OptionInstance.Enum<>(List.of(0, 1, 2, 3, 4, 5, 6, 7,
-                    CausticaConfig.Rt.Composite.DEBUG_VIEW_TONEMAP_COMPARISON), Codec.INT),
-            Math.clamp(setting.configuredValue(), 0,
-                    CausticaConfig.Rt.Composite.DEBUG_VIEW_TONEMAP_COMPARISON),
+            new OptionInstance.Enum<>(DEBUG_VIEW_ORDER, Codec.INT),
+            DEBUG_VIEW_ORDER.contains(setting.configuredValue()) ? setting.configuredValue() : 0,
             setting::set);
     }
 

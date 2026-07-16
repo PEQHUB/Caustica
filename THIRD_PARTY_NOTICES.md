@@ -41,6 +41,26 @@ Bundled Streamline runtime libraries may include:
 Caustica's `streamline_bridge` native library is project-owned glue code and
 follows Caustica's project license unless otherwise noted.
 
+## NVIDIA SHaRC SDK
+
+SHaRC-enabled Caustica runtime artifacts are built against NVIDIA SHaRC SDK `1.6.5.0`, pinned to
+Git commit `0b9f58bbc8c41736042d4da964830a247e424a00` and verified by the build against the exact
+SDK-header hashes. The NVIDIA shader source is an external build input and is not distributed as
+Caustica LGPL source. The runtime JAR incorporates only compiled SPIR-V object code.
+
+NVIDIA SHaRC and the incorporated object code remain subject to the NVIDIA RTX SDKs License:
+
+<https://github.com/NVIDIA-RTX/SHARC/blob/v1.6.5.0/License.md>
+
+The complete applicable license is reproduced in a SHaRC-enabled runtime JAR at:
+
+- `META-INF/licenses/nvidia/NVIDIA-SHARC-SDK.txt`
+
+Caustica-owned adapter and runtime integration files remain under Caustica's project license. Any
+source file that is a modification or derivative of NVIDIA-provided source must retain NVIDIA's
+proprietary notice and the required statement: "This software contains source code provided by
+NVIDIA Corporation."
+
 ## EON Diffuse
 
 The rough-diffuse BRDF implementation is derived from `portsmouth/EON-diffuse`:

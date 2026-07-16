@@ -27,7 +27,8 @@ final class DisplayShaderContractTest {
     void psychoV23ComparisonRemainsSelectableInVideoOptions() throws IOException {
         String source = Files.readString(Path.of(
                 "src/main/java/dev/comfyfluffy/caustica/client/RtVideoOptions.java"));
-        assertTrue(source.contains("CausticaConfig.Rt.Composite.DEBUG_VIEW_TONEMAP_COMPARISON), Codec.INT"));
+        assertTrue(source.contains("CausticaConfig.Rt.Composite.DEBUG_VIEW_TONEMAP_COMPARISON, 9, 10, 11, 12"));
+        assertTrue(source.contains("new OptionInstance.Enum<>(DEBUG_VIEW_ORDER, Codec.INT)"));
     }
 
     private static String shader() throws IOException {

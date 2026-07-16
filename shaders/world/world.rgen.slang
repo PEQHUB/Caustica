@@ -18,9 +18,32 @@
 //
 // Each frame emits a single SPP-averaged (still noisy) estimate; temporal convergence is the denoiser's
 // job. With RR disabled the output is the raw noisy path trace — a reference view, not a converged image.
+#ifndef CAUSTICA_SHARC
+#define CAUSTICA_SHARC 0
+#endif
+#ifndef CAUSTICA_SHARC_UPDATE
+#define CAUSTICA_SHARC_UPDATE 0
+#endif
+#ifndef CAUSTICA_SHARC_QUERY
+#define CAUSTICA_SHARC_QUERY 0
+#endif
+#ifndef CAUSTICA_SHARC_DIAGNOSTICS
+#define CAUSTICA_SHARC_DIAGNOSTICS 1
+#endif
+
 import world_common;
 
+#if CAUSTICA_SHARC_UPDATE || CAUSTICA_SHARC_QUERY
+#define SHARC_UPDATE CAUSTICA_SHARC_UPDATE
+#define SHARC_QUERY CAUSTICA_SHARC_QUERY
+#include "../sharc/sharc_bridge.slang"
+[[vk::push_constant]] SharcPushAddr pcAddr;
+static SharcFrame sharcFrame;
+static SharcParameters sharcParameters;
+static SharcRWPtr<uint> sharcStats;
+#else
 [[vk::push_constant]] PushAddr pcAddr;
+#endif
 
 [[vk::binding(0, 0)]] RaytracingAccelerationStructure topLevelAS;
 // HDR trace target: linear radiance, may exceed 1. Tonemap happens later at the display.comp seam.
@@ -42,10 +65,148 @@ import world_common;
 // `pc` global). Layout constants generated from this module's SPIR-V — see world_common.WorldPush.
 static WorldPush pc;
 
+#if CAUSTICA_SHARC_UPDATE || CAUSTICA_SHARC_QUERY
+static const uint SHARC_STAT_QUERY_ATTEMPTS = 0u;
+static const uint SHARC_STAT_QUERY_HITS = 1u;
+static const uint SHARC_STAT_QUERY_MISSES = 2u;
+static const uint SHARC_STAT_UPDATE_HITS = 3u;
+static const uint SHARC_STAT_UPDATE_MISSES = 4u;
+static const uint SHARC_STAT_INSERT_FAILURES = 5u;
+static const uint SHARC_STAT_TERMINATED_BOUNCE_SUM = 6u;
+static const uint SHARC_STAT_TERMINATED_PATHS = 7u;
+static const uint SHARC_STAT_INSERTIONS = 9u;
+static const uint SHARC_STAT_COLLISIONS = 10u;
+static const uint SHARC_STAT_NUMERIC_RISKS = 12u;
+static const uint SHARC_STAT_RESOLVED_SATURATIONS = 13u;
+static const uint SHARC_STAT_MAX_CACHED_LUMA_BITS = 14u;
+static const uint SHARC_STAT_SHORT_SEGMENT_REJECTS = 15u;
+static const uint SHARC_STAT_GLOSSY_REJECTS = 16u;
+static const uint SHARC_STAT_DYNAMIC_REJECTS = 17u;
+#if CAUSTICA_SHARC_QUERY && CAUSTICA_SHARC_DIAGNOSTICS
+static float3 gv_sharcDebug;
+static float3 gv_sharcHashDebug;
+static float gv_sharcTerminationDepth;
+static float3 gv_sharcCachedRadianceDebug;
+static float3 gv_sharcVoxelSizeDebug;
+static float3 gv_sharcEligibilityDebug;
+static float3 gv_sharcNumericDebug;
+#endif
+
+void sharcStatAdd(uint index, uint value) {
+#if CAUSTICA_SHARC_DIAGNOSTICS
+    if ((sharcFrame.flags & 2u) != 0u) {
+        InterlockedAdd(sharcStats[index], value);
+    }
+#endif
+}
+
+void sharcStatMax(uint index, uint value) {
+#if CAUSTICA_SHARC_DIAGNOSTICS
+    if ((sharcFrame.flags & 2u) != 0u) {
+        InterlockedMax(sharcStats[index], value);
+    }
+#endif
+}
+
+SharcHitData causticaSharcHit(float3 position, float3 albedo, float3 emissive) {
+    SharcHitData hit;
+    hit.positionWorld = position;
+    hit.normalWorld = payload.geometricNormal;
+    hit.materialDemodulation = max(albedo, float3(1.0e-3));
+    hit.emissive = emissive;
+    return hit;
+}
+
+float causticaSharcVoxelSize(float3 position) {
+    uint level = HashGridGetLevel(position, sharcParameters.gridParameters);
+    return HashGridGetVoxelSize(level, sharcParameters.gridParameters);
+}
+#endif
+
 // Ray payloads. Module-level statics so the helper functions (visibility / opticalGuideHit /
 // specularReflectionMotion / tracePath) can share them, mirroring the GLSL rayPayloadEXT globals.
 static Payload payload;
 static float4 shadowVis; // rgb = transmittance; a = nearest water-crossing t (-1 = none)
+
+#if CAUSTICA_SHARC_QUERY
+bool causticaTrySharcQuery(int bounce, float3 hitPos, float3 albedo, float3 materialEmissive,
+        bool pathEligible, bool previousLobeDiffuse, float previousGlossyAlpha,
+        out float3 cachedRadiance) {
+    cachedRadiance = float3(0.0);
+    bool dynamicSurface = (payload.flags & PAYLOAD_SHARC_DYNAMIC) != 0u;
+    float queryVoxelSize = causticaSharcVoxelSize(hitPos);
+    float minSegment = queryVoxelSize * max(sharcFrame.minSegmentRatio, 0.0);
+    float glossyDenominator = max(1.0 - previousGlossyAlpha * previousGlossyAlpha, 1.0e-6);
+    float glossyCone = 2.0 * payload.hitT * sqrt(0.5 * previousGlossyAlpha
+            * previousGlossyAlpha / glossyDenominator);
+    bool glossyEligible = (sharcFrame.queryFlags & 1u) != 0u && glossyCone >= minSegment;
+    bool segmentEligible = payload.hitT >= minSegment;
+    bool lobeEligible = previousLobeDiffuse || glossyEligible;
+    bool queryEligible = bounce > 0 && pathEligible && !dynamicSurface && segmentEligible && lobeEligible;
+#if CAUSTICA_SHARC_DIAGNOSTICS
+    bool statsEnabled = (sharcFrame.flags & 2u) != 0u;
+    if (pc.debugView == 14u) {
+        gv_sharcVoxelSizeDebug = float3(saturate(log2(1.0 + queryVoxelSize) / 8.0),
+                saturate(log2(1.0 + minSegment) / 8.0), 0.1);
+    }
+    if (pc.debugView == 15u) {
+        if (bounce == 0) gv_sharcEligibilityDebug = float3(0.08);
+        else if (dynamicSurface) gv_sharcEligibilityDebug = float3(1.0, 0.0, 1.0);
+        else if (!segmentEligible) gv_sharcEligibilityDebug = float3(1.0, 0.55, 0.0);
+        else if (!lobeEligible) gv_sharcEligibilityDebug = float3(0.15, 0.35, 1.0);
+        else gv_sharcEligibilityDebug = float3(0.05, 1.0, 0.15);
+    }
+    if (statsEnabled) {
+        if (dynamicSurface) {
+            sharcStatAdd(SHARC_STAT_DYNAMIC_REJECTS, 1u);
+        } else if (!segmentEligible) {
+            sharcStatAdd(SHARC_STAT_SHORT_SEGMENT_REJECTS, 1u);
+        } else if (!lobeEligible) {
+            sharcStatAdd(SHARC_STAT_GLOSSY_REJECTS, 1u);
+        }
+    }
+#endif
+    if (!queryEligible) return false;
+
+#if CAUSTICA_SHARC_DIAGNOSTICS
+    if (statsEnabled) sharcStatAdd(SHARC_STAT_QUERY_ATTEMPTS, 1u);
+    if (pc.debugView == 9u) gv_sharcDebug = float3(1.0, 0.1, 0.05);
+    if (pc.debugView == 12u) {
+        gv_sharcHashDebug = HashGridDebugColoredHash(
+                hitPos, payload.geometricNormal, sharcParameters.gridParameters);
+    }
+#endif
+    SharcHitData queryHit = causticaSharcHit(hitPos, albedo, materialEmissive);
+    if (!SharcGetCachedRadiance(sharcParameters, queryHit, cachedRadiance, false)) {
+#if CAUSTICA_SHARC_DIAGNOSTICS
+        if (statsEnabled) sharcStatAdd(SHARC_STAT_QUERY_MISSES, 1u);
+#endif
+        return false;
+    }
+#if CAUSTICA_SHARC_DIAGNOSTICS
+    if (statsEnabled || pc.debugView == 13u || pc.debugView == 16u) {
+        float cachedLuma = max(luminance(cachedRadiance), 0.0);
+        sharcStatMax(SHARC_STAT_MAX_CACHED_LUMA_BITS, asuint(cachedLuma));
+        if (pc.debugView == 13u) {
+            float cachedHeat = saturate(log2(1.0 + cachedLuma) / 16.0);
+            gv_sharcCachedRadianceDebug = float3(cachedHeat, cachedHeat * cachedHeat, 1.0 - cachedHeat);
+        }
+        if (any(cachedRadiance >= float3(65000.0))) {
+            sharcStatAdd(SHARC_STAT_RESOLVED_SATURATIONS, 1u);
+            if (pc.debugView == 16u) gv_sharcNumericDebug = float3(1.0, 0.0, 0.0);
+        }
+    }
+    if (statsEnabled) {
+        sharcStatAdd(SHARC_STAT_QUERY_HITS, 1u);
+        sharcStatAdd(SHARC_STAT_TERMINATED_BOUNCE_SUM, uint(bounce));
+        sharcStatAdd(SHARC_STAT_TERMINATED_PATHS, 1u);
+    }
+    if (pc.debugView == 9u) gv_sharcDebug = float3(0.05, 1.0, 0.15);
+    if (pc.debugView == 10u) gv_sharcTerminationDepth = float(bounce);
+#endif
+    return true;
+}
+#endif
 
 // First-hit (primary-visibility) guide attributes, captured at bounce 0 of tracePath. The primary ray
 // is deterministic (no AA jitter yet), so every SPP sample's bounce 0 yields identical values.
@@ -955,6 +1116,15 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
                  inout PathSampler sampler) {
     float3 L = float3(0.0, 0.0, 0.0);
     float3 throughput = float3(1.0, 1.0, 1.0);
+#if CAUSTICA_SHARC_UPDATE
+    SharcState sharcState;
+    SharcInit(sharcState);
+#endif
+#if CAUSTICA_SHARC_QUERY
+    bool sharcPathEligible = true;
+    bool sharcPreviousLobeDiffuse = false;
+    float sharcPreviousGlossyAlpha = 0.0;
+#endif
     float rayConeWidth = 0.0;
     float rayConeSpread = max(primaryConeSpread, RAY_CONE_MIN_SPREAD);
     int maxBounces = int(pc.maxBounces);
@@ -983,7 +1153,13 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
         // Primary (bounce 0) is the camera ray (CULL_PRIMARY): sees particles and the first-person body,
         // but not the separately captured head. Bounce rays are secondary (CULL_SECONDARY): exclude
         // particles and include both first-person body and head for shadows, GI, and reflections.
+#if CAUSTICA_SHARC_UPDATE
+        // Sparse cache updates are transport samples, not camera visibility: exclude particles and the
+        // first-person-only primary mask from their first segment as well.
+        traceRadianceReordered(CULL_SECONDARY, ro, 0.0, rd, 10000.0);
+#else
         traceRadianceReordered(bounce == 0 ? CULL_PRIMARY : CULL_SECONDARY, ro, 0.0, rd, 10000.0);
+#endif
 
         if (payload.hitT < 0.0) {
             // world.rmiss writes sky radiance (gradient + sun/moon disc + stars) into payload.albedo. The
@@ -1002,6 +1178,10 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
                 gv_motionUseRefracted = false;
                 gv_motionObjDisp = float3(0.0, 0.0, 0.0); // sky is static
             }
+#if CAUSTICA_SHARC_UPDATE
+            SharcUpdateMiss(sharcParameters, sharcState, sky);
+            sharcStatAdd(SHARC_STAT_UPDATE_MISSES, 1u);
+#endif
             L += throughput * sky; // escaped to sky
             break;
         }
@@ -1025,6 +1205,14 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
         // alpha surfaces instead of silently receiving glass refraction. This branch adds no work to rays
         // that do not hit such a surface.
         if (translucentSurface) {
+#if CAUSTICA_SHARC_UPDATE
+            SharcUpdateMiss(sharcParameters, sharcState, float3(0.0));
+            sharcStatAdd(SHARC_STAT_UPDATE_MISSES, 1u);
+            break;
+#endif
+#if CAUSTICA_SHARC_QUERY
+            sharcPathEligible = false;
+#endif
             float opacity = clamp(payloadSss(), 0.0, 1.0);
             if (captureGuides && bounce == 0) {
                 gv_normal = n;
@@ -1050,6 +1238,14 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
         // closed geometry. No medium stack, ordered shadow walk, or extra pipeline is introduced:
         // ordinary pixels retain the upstream path-tracing kernel and cost.
         if (material == MATERIAL_GLASS) {
+#if CAUSTICA_SHARC_UPDATE
+            SharcUpdateMiss(sharcParameters, sharcState, float3(0.0));
+            sharcStatAdd(SHARC_STAT_UPDATE_MISSES, 1u);
+            break;
+#endif
+#if CAUSTICA_SHARC_QUERY
+            sharcPathEligible = false;
+#endif
             if (bounce >= maxBounces && !(captureGuides && bounce == 0)) {
                 break;
             }
@@ -1131,6 +1327,14 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
         // off secondary rays, so this only fires at bounce 0; they receive direct light and one diffuse
         // path continuation into the scene, but never appear in shadows/reflections/GI or emit radiance.
         if (material == MATERIAL_PARTICLE) {
+#if CAUSTICA_SHARC_UPDATE
+            SharcUpdateMiss(sharcParameters, sharcState, float3(0.0));
+            sharcStatAdd(SHARC_STAT_UPDATE_MISSES, 1u);
+            break;
+#endif
+#if CAUSTICA_SHARC_QUERY
+            sharcPathEligible = false;
+#endif
             float3 albedo = payload.albedo;
             if (captureGuides) {
                 gv_normal = n;
@@ -1181,6 +1385,14 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
         // transmission, the new medium is read from this hit's face orientation (payloadWaterEntering),
         // not toggled — see PAYLOAD_WATER_ENTERING. The bounce cap bounds stacked refractions.
         if (material == MATERIAL_WATER) {
+#if CAUSTICA_SHARC_UPDATE
+            SharcUpdateMiss(sharcParameters, sharcState, float3(0.0));
+            sharcStatAdd(SHARC_STAT_UPDATE_MISSES, 1u);
+            break;
+#endif
+#if CAUSTICA_SHARC_QUERY
+            sharcPathEligible = false;
+#endif
             if (bounce >= maxBounces && !(captureGuides && bounce == 0)) {
                 break;
             }
@@ -1291,6 +1503,14 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
         // roughness floor and stochastic 90/10 specular/diffuse branch only for authored roughness zero.
         // The reflected sun/moon arrives through the continuation miss, so delta mirrors skip NEE.
         if (exactMirror) {
+#if CAUSTICA_SHARC_UPDATE
+            SharcUpdateMiss(sharcParameters, sharcState, float3(0.0));
+            sharcStatAdd(SHARC_STAT_UPDATE_MISSES, 1u);
+            break;
+#endif
+#if CAUSTICA_SHARC_QUERY
+            sharcPathEligible = false;
+#endif
             if (exactMirrorDepth >= maxMirrorDepth) break;
             throughput *= fresnelSchlick(clamp(dot(n, v), 0.0, 1.0), F0);
             ro = p;
@@ -1309,11 +1529,33 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
         // intensity belongs here, where emitted radiance enters every camera path exactly once. This
         // covers terrain and entity/held-item materials without a light list, extra ray, or analytic light.
         float emission = payloadEmission();
+#if CAUSTICA_SHARC_UPDATE || CAUSTICA_SHARC_QUERY
+        float emissiveRadiance = EMISSIVE_BASE_RADIANCE * EMISSIVE_MAX_MULTIPLIER
+                * clamp(pc.emissiveIntensity, 0.0, 1.0);
+        // Preserve the authored LabPBR emissive mask. SHaRC's separate-emissive mode stores reflected
+        // lighting demodulated from albedo, while this live material signal is evaluated on every query.
+        float3 materialEmissive = albedo * emission * emissiveRadiance;
+
+#if CAUSTICA_SHARC_QUERY
+        if ((sharcFrame.queryFlags & 2u) == 0u) {
+            float3 cachedRadiance;
+            if (causticaTrySharcQuery(bounce, hitPos, albedo, materialEmissive,
+                    sharcPathEligible, sharcPreviousLobeDiffuse, sharcPreviousGlossyAlpha,
+                    cachedRadiance)) {
+                L += throughput * cachedRadiance;
+                break;
+            }
+        }
+#endif
+        float3 cacheableDirectLighting = float3(0.0);
+        float3 liveDirectLighting = float3(0.0);
+#else
         if (emission > 0.0) {
             float emissiveRadiance = EMISSIVE_BASE_RADIANCE * EMISSIVE_MAX_MULTIPLIER
                     * clamp(pc.emissiveIntensity, 0.0, 1.0);
             L += throughput * albedo * emission * emissiveRadiance;
         }
+#endif
 
         // NEE: direct light from the dominant celestial body (sun by day, moon by night) — Lambert
         // diffuse + GGX specular, one shadow ray. Jitter the light direction within its square angular
@@ -1335,14 +1577,21 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
                 vis *= waterCaustic(p + lightDir * shadowVis.a, lightDir, shadowVis.a);
             }
             if (max(vis.r, max(vis.g, vis.b)) > 0.0) {
-                float3 brdf = diffAlb * INV_PI; // Lambertian diffuse (f = albedo/PI)
+                float3 diffuseBrdf = diffAlb * INV_PI;
+                float3 liveBrdf = float3(0.0);
                 if (pbr) {
-                    brdf = evaluateEonDiffuse(lightDir, v, n, perceptualRough, diffAlb)
+                    diffuseBrdf = evaluateEonDiffuse(lightDir, v, n, perceptualRough, diffAlb)
                             * ggxDiffuseTransmission(n, v, lightDir, rough, F0);
-                    brdf += evaluateGgx(n, v, lightDir, rough, F0);
-                    brdf += evaluateGgxMultiscatter(n, v, lightDir, rough, F0);
+                    liveBrdf = evaluateGgx(n, v, lightDir, rough, F0)
+                            + evaluateGgxMultiscatter(n, v, lightDir, rough, F0);
                 }
-                L += throughput * brdf * pc.lightRadiance.xyz * ndl * vis;
+#if CAUSTICA_SHARC_UPDATE || CAUSTICA_SHARC_QUERY
+                float3 directScale = pc.lightRadiance.xyz * ndl * vis;
+                cacheableDirectLighting += diffuseBrdf * directScale;
+                liveDirectLighting += liveBrdf * directScale;
+#else
+                L += throughput * (diffuseBrdf + liveBrdf) * pc.lightRadiance.xyz * ndl * vis;
+#endif
             }
         }
 
@@ -1362,10 +1611,69 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
                 }
                 if (max(visB.r, max(visB.g, visB.b)) > 0.0) {
                     float cosT = dot(lightDir, rd);
+#if CAUSTICA_SHARC_UPDATE || CAUSTICA_SHARC_QUERY
+                    liveDirectLighting += diffAlb * sss * SSS_STRENGTH * hg(cosT, SSS_G)
+                            * backNdl * pc.lightRadiance.xyz * visB;
+#else
                     L += throughput * diffAlb * sss * SSS_STRENGTH * hg(cosT, SSS_G) * backNdl * pc.lightRadiance.xyz * visB;
+#endif
                 }
             }
         }
+
+#if CAUSTICA_SHARC_QUERY
+        if ((sharcFrame.queryFlags & 2u) != 0u) {
+            float3 cachedRadiance;
+            if (causticaTrySharcQuery(bounce, hitPos, albedo, materialEmissive,
+                    sharcPathEligible, sharcPreviousLobeDiffuse, sharcPreviousGlossyAlpha,
+                    cachedRadiance)) {
+                L += throughput * (cachedRadiance + liveDirectLighting);
+                break;
+            }
+        }
+#endif
+
+#if CAUSTICA_SHARC_UPDATE
+        bool dynamicSurface = (payload.flags & PAYLOAD_SHARC_DYNAMIC) != 0u;
+        if (dynamicSurface) {
+            // Dynamic geometry contributes to previously stored vertices without becoming a persistent
+            // cache location of its own.
+            SharcUpdateMiss(sharcParameters, sharcState,
+                    cacheableDirectLighting + liveDirectLighting + materialEmissive);
+            sharcStatAdd(SHARC_STAT_UPDATE_MISSES, 1u);
+            break;
+        }
+        SharcHitData updateHit = causticaSharcHit(hitPos, albedo, materialEmissive);
+        bool continueUpdate = causticaSharcUpdateHit(sharcParameters, sharcState, updateHit,
+                cacheableDirectLighting, cacheableDirectLighting + liveDirectLighting);
+#if CAUSTICA_SHARC_DIAGNOSTICS
+        float3 scaledCacheInput = abs(cacheableDirectLighting / updateHit.materialDemodulation)
+                * sharcFrame.radianceScale;
+        if (any(isnan(scaledCacheInput)) || any(isinf(scaledCacheInput))
+                || any(scaledCacheInput >= float3(4290000000.0))) {
+            sharcStatAdd(SHARC_STAT_NUMERIC_RISKS, 1u);
+        }
+        sharcStatAdd(SHARC_STAT_UPDATE_HITS, 1u);
+        HashGridIndex insertedIndex = HashMapFindEntry(sharcParameters.hashMapData,
+                updateHit.positionWorld, updateHit.normalWorld, sharcParameters.gridParameters);
+        if (insertedIndex == HASH_GRID_INVALID_CACHE_INDEX) {
+            sharcStatAdd(SHARC_STAT_INSERT_FAILURES, 1u);
+        } else {
+            sharcStatAdd(SHARC_STAT_INSERTIONS, 1u);
+            HashGridKey insertedKey = HashGridComputeSpatialHash(
+                    updateHit.positionWorld, updateHit.normalWorld, sharcParameters.gridParameters);
+            uint baseSlot = HashGridGetBaseSlot(insertedKey, sharcParameters.hashMapData.capacity);
+            uint probeDistance = (insertedIndex + sharcParameters.hashMapData.capacity - baseSlot)
+                    % sharcParameters.hashMapData.capacity;
+            sharcStatAdd(SHARC_STAT_COLLISIONS, probeDistance);
+        }
+#endif
+        if (!continueUpdate) {
+            break;
+        }
+#elif CAUSTICA_SHARC_QUERY
+        L += throughput * (cacheableDirectLighting + liveDirectLighting + materialEmissive);
+#endif
 
         // This vertex's emission and direct lighting are complete. At the depth limit there is no next
         // ray, so sampling a continuation lobe and running roulette cannot contribute to the result.
@@ -1375,9 +1683,19 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
 
         // Indirect continuation: importance-sample the diffuse OR the GGX specular lobe, chosen by their
         // relative reflectance. With PBR off, use the cosine-weighted Lambertian fallback.
+#if CAUSTICA_SHARC_UPDATE
+        float3 throughputBeforeBounce = throughput;
+#endif
         if (pbr) {
             float ps = clamp(luminance(F0) / (luminance(F0) + luminance(diffAlb) + 1.0e-4), 0.1, 0.9);
             if (rndf(sampler) < ps) {
+#if CAUSTICA_SHARC_UPDATE
+                causticaSharcDiscardCurrentVertex(sharcState);
+#endif
+#if CAUSTICA_SHARC_QUERY
+                sharcPreviousLobeDiffuse = false;
+                sharcPreviousGlossyAlpha = rough;
+#endif
                 float3 h = sampleGGXVNDF(n, v, rough, sampler);
                 float3 l = reflect(rd, h); // rd = -v: reflect the incoming ray about the microfacet normal
                 float ndl2 = dot(n, l);
@@ -1390,8 +1708,15 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
                 ro = p;
                 rd = l;
                 rayConeSpread = max(rayConeSpread, rough * rough * RAY_CONE_GLOSSY_SPREAD_SCALE);
+#if CAUSTICA_SHARC_QUERY
+                // Glossy queries use the documented effective-cone test at the next hit.
+#endif
                 showCelestial = true; // specular lobe: this ray is a (glossy) mirror — show the disc
             } else {
+#if CAUSTICA_SHARC_QUERY
+                sharcPreviousLobeDiffuse = true;
+                sharcPreviousGlossyAlpha = 0.0;
+#endif
                 float diffusePdf;
                 float3 l = sampleEon(n, v, perceptualRough, sampler, diffusePdf);
                 float3 diffuse = evaluateEonDiffuse(l, v, n, perceptualRough, diffAlb)
@@ -1405,6 +1730,10 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
                 showCelestial = false; // diffuse lobe: disc covered by NEE, hide it (anti-firefly)
             }
         } else {
+#if CAUSTICA_SHARC_QUERY
+            sharcPreviousLobeDiffuse = true;
+            sharcPreviousGlossyAlpha = 0.0;
+#endif
             throughput *= albedo; // Lambertian fallback (PI and cos cancel)
             showCelestial = false; // diffuse bounce: hide the disc (covered by NEE)
             ro = p;
@@ -1420,6 +1749,12 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
             }
             throughput /= q;
         }
+#if CAUSTICA_SHARC_UPDATE
+        SharcSetThroughput(sharcState, throughput / max(throughputBeforeBounce, float3(1.0e-6)));
+#endif
+#if CAUSTICA_SHARC_QUERY
+        if ((payload.flags & PAYLOAD_SHARC_DYNAMIC) != 0u) sharcPathEligible = false;
+#endif
     }
     return L;
 }
@@ -1427,6 +1762,50 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
 [shader("raygeneration")]
 void main() {
     pc = ConstPtr<WorldPush>(pcAddr.worldPushAddr)[0]; // load the per-frame push data from the BDA buffer
+#if CAUSTICA_SHARC_UPDATE || CAUSTICA_SHARC_QUERY
+    sharcFrame = ConstPtr<SharcFrame>(pcAddr.sharcFrameAddr)[0];
+    sharcParameters = causticaSharcParameters(
+            sharcFrame.hashEntriesAddr,
+            sharcFrame.accumulationAddr,
+            sharcFrame.resolvedAddr,
+            sharcFrame.capacity,
+            sharcFrame.cameraPosition,
+            sharcFrame.sceneScale,
+            sharcFrame.radianceScale,
+            (sharcFrame.flags & 1u) != 0u);
+    sharcStats = SharcRWPtr<uint>(sharcFrame.statsAddr);
+#endif
+#if CAUSTICA_SHARC_UPDATE
+    // One rotating sample in each configurable square tile. The reference default is 5x5 (4%).
+    uint2 tile = DispatchRaysIndex().xy;
+    uint tileSize = max(sharcFrame.updateTileSize, 1u);
+    uint tileHash = sampleHash(tile.x ^ sampleHash(tile.y + 0x9e3779b9u));
+    uint tileArea = tileSize * tileSize;
+    uint sampleOffset = (tileHash + sharcFrame.frameIndex) % tileArea;
+    int2 pix = int2(tile * tileSize + uint2(sampleOffset % tileSize, sampleOffset / tileSize));
+    int2 fullSize = int2(sharcFrame.renderWidth, sharcFrame.renderHeight);
+    if (pix.x >= fullSize.x || pix.y >= fullSize.y) {
+        return;
+    }
+    float2 size = float2(fullSize);
+    float2 uv = (float2(pix) + 0.5) / size;
+    float2 ndc = uv * 2.0 - 1.0;
+    float4 nearH = mul(pc.invViewProj, float4(ndc.x, ndc.y, 1.0, 1.0));
+    float4 farH = mul(pc.invViewProj, float4(ndc.x, ndc.y, 0.0, 1.0));
+    float3 nearP = nearH.xyz / nearH.w;
+    float3 farP = farH.xyz / farH.w;
+    float3 origin = nearP + pc.camOffset;
+    float3 direction = normalize(farP - nearP);
+    PathSampler sampler;
+    sampler.pixelHash = sampleHash(uint(pix.x) ^ sampleHash(uint(pix.y) + 0x9e3779b9u));
+    sampler.sampleIndex = sharcFrame.frameIndex;
+    sampler.bounceHash = 0u;
+    sampler.dimension = 0u;
+    pc.maxBounces = min(pc.maxBounces, sharcFrame.updateMaxBounces);
+    tracePath(origin, direction, primaryRayConeSpread(ndc, size, direction),
+            false, false, false, sampler);
+    return;
+#else
     int2 pix = int2(DispatchRaysIndex().xy);
     float2 size = float2(DispatchRaysDimensions().xy);
     float2 uv = (float2(pix) + 0.5) / size;
@@ -1437,7 +1816,12 @@ void main() {
     uint completedSamples = offlineGroundTruth ? uint(max(offlineState.a, 0.0) + 0.5) : 0u;
 
     uint spp = max(pc.spp, 1u);
+#if CAUSTICA_SHARC_QUERY && CAUSTICA_SHARC_DIAGNOSTICS
+    bool sharcDebugView = pc.debugView >= 9u && pc.debugView <= 16u;
+    bool primaryOnly = pc.debugView != 0u && !sharcDebugView;
+#else
     bool primaryOnly = pc.debugView != 0u;
+#endif
     bool writeRrGuides = (pc.flags & FRAME_FLAG_RR_GUIDES) != 0u;
     bool writeMotionGuides = writeRrGuides || (pc.flags & FRAME_FLAG_FG_GUIDES) != 0u;
     bool captureGuides = writeMotionGuides || primaryOnly;
@@ -1445,7 +1829,11 @@ void main() {
             || pc.debugView == 2u || pc.debugView == 5u || pc.debugView == 6u || pc.debugView == 7u;
     int2 pilotTile = pix >> 3;
     float4 pilotState = offlineGroundTruth ? offlinePilotRead[pilotTile] : float4(0.0);
+#if CAUSTICA_SHARC_QUERY && CAUSTICA_SHARC_DIAGNOSTICS
+    uint pathCount = (primaryOnly || sharcDebugView) ? 1u : spp;
+#else
     uint pathCount = primaryOnly ? 1u : spp;
+#endif
     if (offlineGroundTruth && !offlineCalibrating && pilotState.a >= 4.0) {
         float relativeNoise = sqrt(max(pilotState.r, max(pilotState.g, pilotState.b)));
         float predictedError = relativeNoise / sqrt(float(completedSamples + 1u));
@@ -1462,6 +1850,15 @@ void main() {
     gv_animatedGuide = 0.0;
     gv_specPreviousNormal = float3(0.0, 0.0, 0.0);
     gv_psrMirror = false;
+#if CAUSTICA_SHARC_QUERY && CAUSTICA_SHARC_DIAGNOSTICS
+    gv_sharcDebug = float3(0.02);
+    gv_sharcHashDebug = float3(0.0);
+    gv_sharcTerminationDepth = 0.0;
+    gv_sharcCachedRadianceDebug = float3(0.0);
+    gv_sharcVoxelSizeDebug = float3(0.0);
+    gv_sharcEligibilityDebug = float3(0.02);
+    gv_sharcNumericDebug = float3(0.0, 0.2, 0.0);
+#endif
     uint pixelHash = sampleHash(uint(pix.x) ^ sampleHash(uint(pix.y) + 0x9e3779b9u));
     bool pilotLeader = offlineGroundTruth && !offlineCalibrating
             && (pix.x & 7) == 0 && (pix.y & 7) == 0;
@@ -1622,7 +2019,28 @@ void main() {
             dbg = gv_specAlb;                       // specular albedo
         } else if (pc.debugView == 7u) {
             dbg = float3(clamp(0.5 + specMotion * 0.05, 0.0, 1.0), 0.5); // reflection motion
-        } else {
+        }
+#if CAUSTICA_SHARC_QUERY && CAUSTICA_SHARC_DIAGNOSTICS
+        else if (pc.debugView == 9u) {
+            dbg = gv_sharcDebug;                    // green hit, red miss, dark ineligible
+        } else if (pc.debugView == 10u) {
+            float depth = gv_sharcTerminationDepth / max(float(pc.maxBounces), 1.0);
+            dbg = float3(depth, 1.0 - depth, 0.15);
+        } else if (pc.debugView == 11u) {
+            dbg = HashGridDebugOccupancy(uint2(pix), uint2(size), sharcParameters.hashMapData);
+        } else if (pc.debugView == 12u) {
+            dbg = gv_sharcHashDebug;
+        } else if (pc.debugView == 13u) {
+            dbg = gv_sharcCachedRadianceDebug;
+        } else if (pc.debugView == 14u) {
+            dbg = gv_sharcVoxelSizeDebug;
+        } else if (pc.debugView == 15u) {
+            dbg = gv_sharcEligibilityDebug;
+        } else if (pc.debugView == 16u) {
+            dbg = gv_sharcNumericDebug;
+        }
+#endif
+        else {
             dbg = float3(clamp(0.5 + motion * 0.05, 0.0, 1.0), 0.5); // motion: red=+x, green=+y
         }
         outImage[pix] = float4(dbg, 1.0);
@@ -1645,4 +2063,5 @@ void main() {
         // Single noisy estimate; the denoiser (DLSS-RR) handles temporal convergence.
         outImage[pix] = float4(frameRadiance, 1.0);
     }
+#endif
 }

@@ -13,6 +13,7 @@ import dev.comfyfluffy.caustica.client.CausticaJitter;
 import dev.comfyfluffy.caustica.client.OfflineGroundTruth;
 import dev.comfyfluffy.caustica.mixin.CommandEncoderAccessor;
 import dev.comfyfluffy.caustica.rt.gen.PushAddrData;
+import dev.comfyfluffy.caustica.rt.gen.SharcPushAddrData;
 import dev.comfyfluffy.caustica.rt.gen.WorldPushData;
 import dev.comfyfluffy.caustica.rt.gen.WorldPushData.BreakEntry;
 import dev.comfyfluffy.caustica.rt.gen.WorldPushData.Float2;
@@ -66,6 +67,7 @@ import dev.comfyfluffy.caustica.rt.pipeline.RtSdrPresentPipeline;
 import dev.comfyfluffy.caustica.rt.pipeline.RtExposure;
 import dev.comfyfluffy.caustica.rt.pipeline.RtPathSampleSequence;
 import dev.comfyfluffy.caustica.rt.pipeline.RtPipeline;
+import dev.comfyfluffy.caustica.rt.pipeline.RtSharcResolvePipeline;
 import dev.comfyfluffy.caustica.rt.terrain.RtTerrain;
 
 import java.nio.ByteBuffer;
@@ -91,6 +93,36 @@ public final class RtComposite {
     public static boolean enabled() {
         return CausticaConfig.Rt.ENABLED.value();
     }
+
+    public boolean sharcActive() {
+        return sharcCache != null && sharcUpdatePipeline != null && sharcResolvePipeline != null
+                && sharcQueryPipeline != null;
+    }
+
+    public void requestSharcReset(String reason) {
+        if (sharcCache != null) sharcCache.requestReset(reason);
+    }
+
+    public int sharcCapacity() {
+        return sharcCache == null ? 0 : sharcCache.capacity();
+    }
+
+    public long sharcBytes() {
+        return sharcCache == null ? 0L : sharcCache.bytes();
+    }
+
+    public long sharcResetCountValue() {
+        return sharcCache == null ? 0L : sharcCache.resetCount();
+    }
+
+    public String sharcLastResetReason() {
+        return sharcCache == null ? "none" : sharcCache.lastResetReason();
+    }
+
+    public long baselineTraceGpuNanos() { return traceGpuProfiler == null ? 0L : traceGpuProfiler.baselineTraceNanos(); }
+    public long sharcUpdateGpuNanos() { return traceGpuProfiler == null ? 0L : traceGpuProfiler.sharcUpdateNanos(); }
+    public long sharcResolveGpuNanos() { return traceGpuProfiler == null ? 0L : traceGpuProfiler.sharcResolveNanos(); }
+    public long sharcQueryGpuNanos() { return traceGpuProfiler == null ? 0L : traceGpuProfiler.sharcQueryNanos(); }
 
     // WorldPushData and its serializer are generated from Slang's reflected Std430DataLayout. Java never
     // owns or calculates a shader byte offset, struct size, array stride, or fixed-array capacity.
@@ -180,6 +212,19 @@ public final class RtComposite {
     }
 
     private RtPipeline worldPipeline;
+    private RtPipeline sharcUpdatePipeline;
+    private RtPipeline sharcQueryPipeline;
+    private RtPipeline sharcDiagnosticUpdatePipeline;
+    private RtPipeline sharcDiagnosticQueryPipeline;
+    private RtSharcResolvePipeline sharcResolvePipeline;
+    private RtSharcCache sharcCache;
+    private RtTraceGpuProfiler traceGpuProfiler;
+    private int sharcTerrainX = Integer.MIN_VALUE;
+    private int sharcTerrainY = Integer.MIN_VALUE;
+    private int sharcTerrainZ = Integer.MIN_VALUE;
+    private float sharcSceneScale = Float.NaN;
+    private String sharcCreationResetReason = "enabled";
+    private Object sharcWorldIdentity;
     // Set at the HEAD of Minecraft.reloadResourcePacks() (mixin): a resource reload recreates the block
     // atlas + entity textures. We tear down the world pipeline there (drops all descriptor references) and
     // rebuild it once the NEW atlas is in place — detected by the atlas view handle changing away from
@@ -565,6 +610,8 @@ public final class RtComposite {
             exposure.ensureResources(ctx);
             refreshPipelineShapeIfNeeded(ctx);
             RtPipeline active = ensureWorld(ctx);
+            syncSharcResources(ctx, !OfflineGroundTruth.INSTANCE.active());
+            syncTraceGpuProfiler(ctx);
             refreshMaterialBindingsIfNeeded(ctx);
             updateMotion();
             recordFrame(ctx, active, nativeColor);
@@ -635,6 +682,111 @@ public final class RtComposite {
         return worldPipeline;
     }
 
+    private boolean sharcRequested() {
+        return CausticaConfig.Rt.Sharc.ENABLED.value() && RtSharcSupport.available();
+    }
+
+    /** Lazily owns every SHaRC-only allocation so disabled/offline mode retains the baseline ABI and memory use. */
+    private void syncSharcResources(RtContext ctx, boolean allowed) {
+        boolean want = allowed && sharcRequested();
+        int exponent = CausticaConfig.Rt.Sharc.CACHE_EXPONENT.value();
+        if (!want) {
+            if (sharcCache != null) {
+                ctx.waitIdle("disable SHaRC");
+                destroySharcResources();
+                sharcCreationResetReason = "enabled";
+            }
+            return;
+        }
+        if (sharcCache != null && sharcCache.exponent() == exponent) return;
+        if (sharcCache != null) {
+            ctx.waitIdle("resize SHaRC cache");
+            destroySharcResources();
+            sharcCreationResetReason = "cache size changed";
+        }
+        try {
+            sharcUpdatePipeline = RtPipeline.create(ctx, RtDeviceBringup.sharcUpdateRaygenShader(),
+                    new String[]{"world_sharc.rmiss.spv", "world_sharc_guide.rmiss.spv"},
+                    "world_sharc.rchit.spv", "world_sharc.rahit.spv", SharcPushAddrData.BYTE_SIZE,
+                    true, GUIDE_COUNT, bindlessTextureCapacity, true, true);
+            sharcQueryPipeline = RtPipeline.create(ctx, RtDeviceBringup.sharcQueryRaygenShader(),
+                    new String[]{"world_sharc.rmiss.spv", "world_sharc_guide.rmiss.spv"},
+                    "world_sharc.rchit.spv", "world_sharc.rahit.spv", SharcPushAddrData.BYTE_SIZE,
+                    true, GUIDE_COUNT, bindlessTextureCapacity, true, true);
+            sharcDiagnosticUpdatePipeline = RtPipeline.create(ctx, RtDeviceBringup.sharcDiagnosticUpdateRaygenShader(),
+                    new String[]{"world_sharc.rmiss.spv", "world_sharc_guide.rmiss.spv"},
+                    "world_sharc.rchit.spv", "world_sharc.rahit.spv", SharcPushAddrData.BYTE_SIZE,
+                    true, GUIDE_COUNT, bindlessTextureCapacity, true, true);
+            sharcDiagnosticQueryPipeline = RtPipeline.create(ctx, RtDeviceBringup.sharcDiagnosticQueryRaygenShader(),
+                    new String[]{"world_sharc.rmiss.spv", "world_sharc_guide.rmiss.spv"},
+                    "world_sharc.rchit.spv", "world_sharc.rahit.spv", SharcPushAddrData.BYTE_SIZE,
+                    true, GUIDE_COUNT, bindlessTextureCapacity, true, true);
+            sharcResolvePipeline = RtSharcResolvePipeline.create(ctx);
+            sharcCache = RtSharcCache.create(ctx, exponent);
+            sharcCache.requestReset(sharcCreationResetReason);
+            sharcCreationResetReason = "enabled";
+            if (output != null) {
+                sharcUpdatePipeline.setStorageImage(output.view);
+                sharcQueryPipeline.setStorageImage(output.view);
+                sharcDiagnosticUpdatePipeline.setStorageImage(output.view);
+                sharcDiagnosticQueryPipeline.setStorageImage(output.view);
+                bindGuideImages();
+            }
+            bindWorldTextures(ctx);
+            CausticaMod.LOGGER.info("SHaRC enabled: {} entries, {} MiB, {}", sharcCache.capacity(),
+                    sharcCache.bytes() / (1024 * 1024), RtSharcSupport.status());
+        } catch (Throwable t) {
+            destroySharcResources();
+            RtSharcSupport.fail("pipeline setup failed: " + t.getClass().getSimpleName());
+            RtDlssRr.INSTANCE.requestHistoryReset();
+            CausticaMod.LOGGER.error("SHaRC setup failed; using baseline tracer", t);
+        }
+    }
+
+    private RtPipeline[] worldPipelines() {
+        return new RtPipeline[]{worldPipeline, sharcUpdatePipeline, sharcQueryPipeline,
+                sharcDiagnosticUpdatePipeline, sharcDiagnosticQueryPipeline};
+    }
+
+    private void syncTraceGpuProfiler(RtContext ctx) {
+        boolean wanted = sharcCache != null || RtFrameStats.enabled();
+        if (wanted && traceGpuProfiler == null) {
+            try {
+                traceGpuProfiler = RtTraceGpuProfiler.create(ctx);
+            } catch (Throwable t) {
+                if (sharcCache != null) {
+                    destroySharcResources();
+                    RtSharcSupport.fail("GPU timestamp setup failed: " + t.getClass().getSimpleName());
+                    RtDlssRr.INSTANCE.requestHistoryReset();
+                    CausticaMod.LOGGER.error("SHaRC GPU timing setup failed; using baseline tracer", t);
+                } else {
+                    CausticaMod.LOGGER.warn("RT GPU timestamps unavailable; frame rendering continues", t);
+                }
+            }
+        } else if (!wanted && traceGpuProfiler != null) {
+            ctx.waitIdle("disable RT GPU timestamps");
+            traceGpuProfiler.destroy();
+            traceGpuProfiler = null;
+        }
+    }
+
+    private void destroySharcResources() {
+        if (sharcUpdatePipeline != null) sharcUpdatePipeline.destroy();
+        if (sharcQueryPipeline != null) sharcQueryPipeline.destroy();
+        if (sharcDiagnosticUpdatePipeline != null) sharcDiagnosticUpdatePipeline.destroy();
+        if (sharcDiagnosticQueryPipeline != null) sharcDiagnosticQueryPipeline.destroy();
+        if (sharcResolvePipeline != null) sharcResolvePipeline.destroy();
+        if (sharcCache != null) sharcCache.destroy();
+        sharcUpdatePipeline = null;
+        sharcQueryPipeline = null;
+        sharcDiagnosticUpdatePipeline = null;
+        sharcDiagnosticQueryPipeline = null;
+        sharcResolvePipeline = null;
+        sharcCache = null;
+        sharcTerrainX = sharcTerrainY = sharcTerrainZ = Integer.MIN_VALUE;
+        sharcWorldIdentity = null;
+    }
+
     private void refreshPipelineShapeIfNeeded(RtContext ctx) {
         if (worldPipeline == null || reloadRebindRequested) {
             return;
@@ -646,6 +798,7 @@ public final class RtComposite {
         ctx.waitIdle("bindless texture capacity growth");
         worldPipeline.destroy();
         worldPipeline = null;
+        destroySharcResources();
         bindlessTextureCapacity = 0;
         materialBindingsReady = false;
     }
@@ -663,11 +816,12 @@ public final class RtComposite {
         long sampler = atlasSampler(ctx);
         long atlasView = blockAtlasView();
         boundAtlasHandle = atlasView; // remember what we bound so a reload can detect the new atlas
-        worldPipeline.setAtlasSampler(atlasView, sampler);
+        for (RtPipeline pipeline : worldPipelines()) if (pipeline != null) pipeline.setAtlasSampler(atlasView, sampler);
         // Bindless slot 0 = fallback texture (the block atlas) so an entity whose texture can't be
         // resolved samples something defined rather than an unbound (partially-bound) descriptor.
         RtEntityTextures.INSTANCE.reset(bindlessTextureCapacity);
-        worldPipeline.setBindlessTexture(0, 0, atlasView, sampler); // binding 0 (albedo), slot 0 fallback
+        for (RtPipeline pipeline : worldPipelines()) if (pipeline != null)
+            pipeline.setBindlessTexture(0, 0, atlasView, sampler); // binding 0 (albedo), slot 0 fallback
         // LabPBR _s + _n parallel atlases. Bind the (block-atlas-sized) atlases; their pixels fill
         // lazily as terrain extraction encounters sprites and refresh via flush(). Fall back to the block
         // atlas view if an atlas didn't initialize so bindings 9/10 always hold a valid descriptor —
@@ -679,8 +833,10 @@ public final class RtComposite {
             RtBlockMaterials.INSTANCE.prepareAll();
             long specView = RtBlockMaterials.INSTANCE.viewS();
             long normalView = RtBlockMaterials.INSTANCE.viewN();
-            worldPipeline.setBlockSpecAtlas(specView != 0L ? specView : atlasView, sampler);
-            worldPipeline.setBlockNormalAtlas(normalView != 0L ? normalView : atlasView, sampler);
+            for (RtPipeline pipeline : worldPipelines()) if (pipeline != null) {
+                pipeline.setBlockSpecAtlas(specView != 0L ? specView : atlasView, sampler);
+                pipeline.setBlockNormalAtlas(normalView != 0L ? normalView : atlasView, sampler);
+            }
             materialBindingsReady = true;
         }
         // Sky rewrite: bind the vanilla celestials atlas (sun + moon phases) for world.rmiss. The view
@@ -688,7 +844,8 @@ public final class RtComposite {
         // directions), so the block-atlas fallback is never read if the celestials atlas isn't ready.
         long celView = celestialsAtlasView();
         if (worldPipeline.hasSkyAtlas()) {
-            worldPipeline.setSkyAtlas(celView != 0L ? celView : atlasView, sampler);
+            for (RtPipeline pipeline : worldPipelines()) if (pipeline != null)
+                pipeline.setSkyAtlas(celView != 0L ? celView : atlasView, sampler);
         }
         setCelestialUvAtlas(celView);
         RtTerrain.markAllDirty();
@@ -731,6 +888,7 @@ public final class RtComposite {
         }
         requestTemporalReset();
         reloadRebindRequested = true;
+        sharcCreationResetReason = "resource pack/material reload";
         materialBindingsReady = false;
         setCelestialUvAtlas(0L);
         RtEntities.INSTANCE.onResourceReload();
@@ -739,6 +897,7 @@ public final class RtComposite {
             ctx.waitIdle("resource reload");
             worldPipeline.destroy();
             worldPipeline = null;
+            destroySharcResources();
             bindlessTextureCapacity = 0;
         }
     }
@@ -748,16 +907,18 @@ public final class RtComposite {
         if (worldPipeline == null || gNormal == null) {
             return;
         }
-        worldPipeline.setExtraStorageImage(0, gNormal.view);
-        worldPipeline.setExtraStorageImage(1, gAlbedo.view);
-        worldPipeline.setExtraStorageImage(2, gDepth.view);
-        worldPipeline.setExtraStorageImage(3, gMotion.view);
-        worldPipeline.setExtraStorageImage(4, gSpecAlbedo.view);
-        worldPipeline.setExtraStorageImage(5, gSpecMotion.view);
-        worldPipeline.setExtraStorageImage(6, groundTruthAccum.view);
-        worldPipeline.setExtraStorageImage(7, gAnimatedGuide.view);
-        worldPipeline.setExtraStorageImage(8, offlinePilotA.view);
-        worldPipeline.setExtraStorageImage(9, offlinePilotB.view);
+        for (RtPipeline pipeline : worldPipelines()) if (pipeline != null) {
+            pipeline.setExtraStorageImage(0, gNormal.view);
+            pipeline.setExtraStorageImage(1, gAlbedo.view);
+            pipeline.setExtraStorageImage(2, gDepth.view);
+            pipeline.setExtraStorageImage(3, gMotion.view);
+            pipeline.setExtraStorageImage(4, gSpecAlbedo.view);
+            pipeline.setExtraStorageImage(5, gSpecMotion.view);
+            pipeline.setExtraStorageImage(6, groundTruthAccum.view);
+            pipeline.setExtraStorageImage(7, gAnimatedGuide.view);
+            pipeline.setExtraStorageImage(8, offlinePilotA.view);
+            pipeline.setExtraStorageImage(9, offlinePilotB.view);
+        }
     }
 
     private void destroyGuideImages() {
@@ -952,7 +1113,7 @@ public final class RtComposite {
 
         requestTemporalReset(); // recreated images -> every temporal consumer starts from a clean frame
         if (worldPipeline != null) {
-            worldPipeline.setStorageImage(output.view);
+            for (RtPipeline pipeline : worldPipelines()) if (pipeline != null) pipeline.setStorageImage(output.view);
             bindGuideImages();
         }
         RtImage displayInput = rrOutput != null ? rrOutput : output;
@@ -1009,6 +1170,7 @@ public final class RtComposite {
             int worldDebugView = offlineGroundTruth ? 0
                     : debugView == CausticaConfig.Rt.Composite.DEBUG_VIEW_TONEMAP_COMPARISON
                     ? 0 : debugView;
+            if (worldDebugView >= 9 && sharcCache == null) worldDebugView = 0;
             float emissiveIntensity = CausticaConfig.Rt.Composite.TORCH_EMISSION_MULTIPLIER.value();
             boolean emissiveIntensityChanged = !Float.isNaN(lastEmissiveIntensity)
                     && Float.floatToIntBits(emissiveIntensity) != Float.floatToIntBits(lastEmissiveIntensity);
@@ -1181,7 +1343,7 @@ public final class RtComposite {
             if (!offlineGroundTruth || buildOfflineSnapshot) {
                 RtFrameStats.FRAME.count("entityTextureSlots", RtEntityTextures.INSTANCE.usedSlots());
                 RtFrameStats.FRAME.count("entityTexturePending", RtEntityTextures.INSTANCE.pendingUploads());
-                RtEntityTextures.INSTANCE.uploadPending(active, atlasSampler(ctx));
+                RtEntityTextures.INSTANCE.uploadPending(atlasSampler(ctx), worldPipelines());
             // Re-upload the LabPBR _s atlas if extraction added sprites since the last frame (the
             // view handle is stable, so no re-bind needed). Before the trace records, like uploadPending.
                 RtBlockMaterials.INSTANCE.flush();
@@ -1202,7 +1364,7 @@ public final class RtComposite {
                     frameTlas = RtAccel.prepareTlas(ctx, fe.instances(), tlasRing);
                 }
             }
-            active.setTlas(frameTlas.accel.handle);
+            for (RtPipeline pipeline : worldPipelines()) if (pipeline != null) pipeline.setTlas(frameTlas.accel.handle);
             currentTlasHandle = frameTlas.accel.handle;
             if (offlineGroundTruth) {
                 boolean evenPilotFrame = (groundTruthAccumulationFrames & 1) == 0;
@@ -1222,12 +1384,65 @@ public final class RtComposite {
             // Push the BDA ring slot's address plus the small hot subset that rchit/rahit read on every
             // hit (tableAddr/entityTableAddr/frameIndex) as real inline push constants, so those lookups
             // don't pay for a second global-memory dereference through pcAddr.worldPushAddr first.
-            ByteBuffer pushAddr = stack.malloc(PushAddrData.BYTE_SIZE);
-            new PushAddrData(pushBuf.deviceAddress, terrain.tableAddress(), fe.geomTableAddr(),
-                    (int) frameCounter).write(pushAddr);
-            try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "world trace");
-                 RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.trace")) {
-                active.trace(cmd, renderW, renderH, pushAddr);
+            if (sharcCache != null && !offlineGroundTruth) {
+                if (traceGpuProfiler != null) traceGpuProfiler.begin(cmd, true);
+                float sceneScale = CausticaConfig.Rt.Sharc.SCENE_SCALE.value();
+                if (level != sharcWorldIdentity) {
+                    if (sharcWorldIdentity != null) sharcCache.requestReset("world or dimension changed");
+                    sharcWorldIdentity = level;
+                }
+                if (terrain.blockX != sharcTerrainX || terrain.blockY != sharcTerrainY || terrain.blockZ != sharcTerrainZ) {
+                    if (sharcTerrainX != Integer.MIN_VALUE) sharcCache.requestReset("terrain origin rebased");
+                    sharcTerrainX = terrain.blockX; sharcTerrainY = terrain.blockY; sharcTerrainZ = terrain.blockZ;
+                }
+                if (!Float.isNaN(sharcSceneScale)
+                        && Float.floatToIntBits(sceneScale) != Float.floatToIntBits(sharcSceneScale)) {
+                    sharcCache.requestReset("scene scale changed");
+                }
+                sharcSceneScale = sceneScale;
+                RtSharcCache.Frame sharcFrame = sharcCache.beginFrame(frameCounter,
+                        (float) (camX - terrain.blockX), (float) (camY - terrain.blockY),
+                        (float) (camZ - terrain.blockZ), renderW, renderH);
+                publishSharcStats(sharcFrame.previousStats());
+                if (sharcCache.recordPendingClear(cmd, stack)) {
+                    CausticaMod.LOGGER.info("SHaRC cache reset #{}: {}", sharcCache.resetCount(),
+                            sharcCache.lastResetReason());
+                }
+                ByteBuffer sharcPush = stack.malloc(SharcPushAddrData.BYTE_SIZE);
+                new SharcPushAddrData(pushBuf.deviceAddress, terrain.tableAddress(), fe.geomTableAddr(),
+                        (int) frameCounter, sharcFrame.address()).write(sharcPush);
+                boolean sharcDiagnostics = RtFrameStats.enabled()
+                        || (worldDebugView >= 9 && worldDebugView <= 16);
+                RtPipeline updatePipeline = sharcDiagnostics ? sharcDiagnosticUpdatePipeline : sharcUpdatePipeline;
+                RtPipeline queryPipeline = sharcDiagnostics ? sharcDiagnosticQueryPipeline : sharcQueryPipeline;
+                try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "SHaRC sparse update");
+                     RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.sharcUpdate")) {
+                    int updateTileSize = CausticaConfig.Rt.Sharc.UPDATE_TILE_SIZE.value();
+                    updatePipeline.trace(cmd, (renderW + updateTileSize - 1) / updateTileSize,
+                            (renderH + updateTileSize - 1) / updateTileSize, sharcPush);
+                }
+                if (traceGpuProfiler != null) traceGpuProfiler.updateEnd(cmd);
+                sharcCache.updateToResolveBarrier(cmd, stack);
+                try (RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.sharcResolve")) {
+                    sharcResolvePipeline.dispatch(cmd, sharcFrame.address(), sharcCache.capacity());
+                }
+                if (traceGpuProfiler != null) traceGpuProfiler.resolveEnd(cmd);
+                sharcCache.resolveToQueryBarrier(cmd, stack);
+                try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "SHaRC full query");
+                     RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.sharcQuery")) {
+                    queryPipeline.trace(cmd, renderW, renderH, sharcPush);
+                }
+                if (traceGpuProfiler != null) traceGpuProfiler.queryEnd(cmd);
+            } else {
+                ByteBuffer pushAddr = stack.malloc(PushAddrData.BYTE_SIZE);
+                new PushAddrData(pushBuf.deviceAddress, terrain.tableAddress(), fe.geomTableAddr(),
+                        (int) frameCounter).write(pushAddr);
+                if (traceGpuProfiler != null) traceGpuProfiler.begin(cmd, false);
+                try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "world trace");
+                     RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.trace")) {
+                    active.trace(cmd, renderW, renderH, pushAddr);
+                }
+                if (traceGpuProfiler != null) traceGpuProfiler.baselineEnd(cmd);
             }
             if (offlineGroundTruth) {
                 groundTruthAccumulationFrames++;
@@ -1567,6 +1782,7 @@ public final class RtComposite {
             worldPipeline.destroy();
             worldPipeline = null;
         }
+        destroySharcResources();
         bindlessTextureCapacity = 0;
         materialBindingsReady = false;
         if (pushRing != null) {
@@ -1581,6 +1797,10 @@ public final class RtComposite {
             pathSampleSequence.destroy();
             pathSampleSequence = null;
         }
+        if (traceGpuProfiler != null) {
+            traceGpuProfiler.destroy();
+            traceGpuProfiler = null;
+        }
         if (atlasSampler != 0L) {
             RtContext ctx = RtContext.currentOrNull();
             if (ctx != null) {
@@ -1588,6 +1808,43 @@ public final class RtComposite {
             }
             atlasSampler = 0L;
         }
+    }
+
+    private static void publishSharcStats(RtSharcCache.Stats stats) {
+        RtFrameStats.FRAME.count("sharcQueryAttempts", stats.queryAttempts());
+        RtFrameStats.FRAME.count("sharcQueryHits", stats.queryHits());
+        RtFrameStats.FRAME.count("sharcQueryMisses", stats.queryMisses());
+        RtFrameStats.FRAME.count("sharcUpdateHits", stats.updateHits());
+        RtFrameStats.FRAME.count("sharcUpdateMisses", stats.updateMisses());
+        RtFrameStats.FRAME.count("sharcInsertFailures", stats.insertFailures());
+        RtFrameStats.FRAME.count("sharcTerminatedBounceSum", stats.terminatedBounceSum());
+        RtFrameStats.FRAME.count("sharcTerminatedPaths", stats.terminatedPaths());
+        if (stats.terminatedPaths() > 0) {
+            RtFrameStats.FRAME.count("sharcAverageTerminatedBounceX1000",
+                    stats.terminatedBounceSum() * 1000L / stats.terminatedPaths());
+        }
+        RtFrameStats.FRAME.count("sharcOccupiedEntries", stats.occupiedEntries());
+        RtFrameStats.FRAME.count("sharcInsertions", stats.insertions());
+        RtFrameStats.FRAME.count("sharcCollisions", stats.collisions());
+        RtFrameStats.FRAME.count("sharcStaleEvictions", stats.staleEvictions());
+        RtFrameStats.FRAME.count("sharcNumericRisks", stats.numericRisks());
+        RtFrameStats.FRAME.count("sharcResolvedSaturations", stats.resolvedSaturations());
+        RtFrameStats.FRAME.count("sharcMaxCachedLumaBits", stats.maxCachedLumaBits());
+        RtFrameStats.FRAME.count("sharcShortSegmentRejects", stats.shortSegmentRejects());
+        RtFrameStats.FRAME.count("sharcGlossyRejects", stats.glossyRejects());
+        RtFrameStats.FRAME.count("sharcDynamicRejects", stats.dynamicRejects());
+        RtFrameStats.FRAME.count("sharcAllocatedBytes", sharcAllocatedBytes());
+        RtFrameStats.FRAME.count("sharcResetCount", sharcResetCount());
+    }
+
+    private static long sharcAllocatedBytes() {
+        RtSharcCache cache = INSTANCE.sharcCache;
+        return cache == null ? 0L : cache.bytes();
+    }
+
+    private static long sharcResetCount() {
+        RtSharcCache cache = INSTANCE.sharcCache;
+        return cache == null ? 0L : cache.resetCount();
     }
 
     private long atlasSampler(RtContext ctx) {

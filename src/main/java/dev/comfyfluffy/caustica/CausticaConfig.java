@@ -79,6 +79,7 @@ public final class CausticaConfig {
             Rt.DlssRr.ENABLED,
             Rt.Fg.ENABLED, Rt.Fg.MODE, Rt.Fg.MULTI_FRAME_COUNT, Rt.Fg.DYNAMIC_TARGET_FPS,
             Rt.Reflex.ENABLED, Rt.Exposure.MODE, Rt.FrameStats.ENABLED,
+            Rt.Sharc.ENABLED, Rt.Sharc.CACHE_EXPONENT, Rt.Sharc.UPDATE_TILE_SIZE,
             Rt.Sdr.TONEMAP_MODE, Rt.Hdr.ENABLED, Rt.Hdr.TONEMAP_MODE, Rt.PsychoV23.COMPRESSION,
         };
     }
@@ -694,6 +695,34 @@ public final class CausticaConfig {
 
             private Omm() {
             }
+        }
+
+        public static final class Sharc {
+            public static final BooleanSetting ENABLED = bool("caustica.rt.sharc", "sharc.enabled", false);
+            public static final IntSetting CACHE_EXPONENT =
+                    clampedInt("caustica.rt.sharcCacheExponent", "sharc.cache-exponent", 18, 16, 22);
+            public static final FloatSetting SCENE_SCALE =
+                    clampedFloat("caustica.rt.sharcSceneScale", "sharc.scene-scale", 6.25f, 1.0f, 100.0f);
+            public static final FloatSetting RADIANCE_SCALE =
+                    clampedFloat("caustica.rt.sharcRadianceScale", "sharc.radiance-scale", 1000.0f, 50.0f, 10000.0f);
+            public static final IntSetting ACCUMULATION_FRAMES =
+                    clampedInt("caustica.rt.sharcAccumulationFrames", "sharc.accumulation-frames", 64, 1, 1024);
+            public static final IntSetting STALE_FRAMES =
+                    clampedInt("caustica.rt.sharcStaleFrames", "sharc.stale-frames", 64, 8, 1024);
+            public static final BooleanSetting ANTI_FIREFLY =
+                    bool("caustica.rt.sharcAntiFirefly", "sharc.anti-firefly", true);
+            public static final IntSetting UPDATE_TILE_SIZE =
+                    clampedInt("caustica.rt.sharcUpdateTileSize", "sharc.update-tile-size", 32, 2, 64);
+            public static final IntSetting UPDATE_MAX_BOUNCES =
+                    clampedInt("caustica.rt.sharcUpdateMaxBounces", "sharc.update-max-bounces", 2, 1, 8);
+            public static final FloatSetting MIN_SEGMENT_RATIO =
+                    clampedFloat("caustica.rt.sharcMinSegmentRatio", "sharc.min-segment-ratio", 1.0f, 0.25f, 4.0f);
+            public static final BooleanSetting GLOSSY_QUERY =
+                    bool("caustica.rt.sharcGlossyQuery", "sharc.glossy-query", false);
+            public static final BooleanSetting LIVE_SECONDARY_DIRECT =
+                    bool("caustica.rt.sharcLiveSecondaryDirect", "sharc.live-secondary-direct", true);
+
+            private Sharc() {}
         }
 
         public static final class Entities {

@@ -21,6 +21,7 @@ import org.lwjgl.vulkan.VkPhysicalDeviceRayQueryFeaturesKHR;
 import org.lwjgl.vulkan.VkPhysicalDeviceRayTracingInvocationReorderFeaturesEXT;
 import org.lwjgl.vulkan.VkPhysicalDeviceRayTracingInvocationReorderFeaturesNV;
 import org.lwjgl.vulkan.VkPhysicalDeviceFeatures;
+import org.lwjgl.vulkan.VkPhysicalDeviceFeatures2;
 import org.lwjgl.vulkan.VkPhysicalDeviceVulkan12Features;
 import org.lwjgl.vulkan.VkPhysicalDeviceOpacityMicromapFeaturesEXT;
 import org.lwjgl.vulkan.VkPhysicalDeviceOpacityMicromapPropertiesEXT;
@@ -110,6 +111,7 @@ public final class RtDeviceBringup {
     private static volatile SerBackend serBackend = SerBackend.NONE;
     private static volatile boolean ommEnabled; // VK_EXT_opacity_micromap actually enabled on the device
     private static volatile boolean wideLinesEnabled; // VkPhysicalDeviceFeatures.wideLines actually enabled
+    private static volatile boolean sharcInt64AtomicsEnabled;
     private static volatile float maxLineWidth = 1.0f; // device's lineWidthRange[1]; 1.0 unless wideLinesEnabled
     private static volatile int overlayMsaaSamples = VK10.VK_SAMPLE_COUNT_1_BIT; // capped to the device's framebufferColorSampleCounts
     private static volatile int maxOpacity4StateSubdivisionLevel;
@@ -141,6 +143,27 @@ public final class RtDeviceBringup {
 
     public static String worldRaygenShader() {
         return serBackend.worldRaygenShader;
+    }
+
+    public static String sharcQueryRaygenShader() {
+        return serBackend == SerBackend.NV ? "world_sharc_nv.rgen.spv" : "world_sharc.rgen.spv";
+    }
+
+    public static String sharcUpdateRaygenShader() {
+        return serBackend == SerBackend.NV ? "world_sharc_update_nv.rgen.spv" : "world_sharc_update.rgen.spv";
+    }
+
+    public static String sharcDiagnosticQueryRaygenShader() {
+        return serBackend == SerBackend.NV ? "world_sharc_diagnostic_nv.rgen.spv" : "world_sharc_diagnostic.rgen.spv";
+    }
+
+    public static String sharcDiagnosticUpdateRaygenShader() {
+        return serBackend == SerBackend.NV ? "world_sharc_update_diagnostic_nv.rgen.spv"
+                : "world_sharc_update_diagnostic.rgen.spv";
+    }
+
+    public static boolean sharcInt64AtomicsEnabled() {
+        return sharcInt64AtomicsEnabled;
     }
 
     public static boolean serNvEnabled() {
@@ -203,6 +226,16 @@ public final class RtDeviceBringup {
             VkPhysicalDeviceFeatures features = VkPhysicalDeviceFeatures.calloc(stack);
             VK10.vkGetPhysicalDeviceFeatures(physicalDevice.vkPhysicalDevice(), features);
             return features.wideLines();
+        }
+    }
+
+    private static boolean supportsShaderBufferInt64Atomics(VulkanPhysicalDevice physicalDevice) {
+        try (MemoryStack stack = MemoryStack.stackPush()) {
+            VkPhysicalDeviceVulkan12Features features = VkPhysicalDeviceVulkan12Features.calloc(stack).sType$Default();
+            VkPhysicalDeviceFeatures2 features2 = VkPhysicalDeviceFeatures2.calloc(stack).sType$Default()
+                    .pNext(features.address());
+            VK12.vkGetPhysicalDeviceFeatures2(physicalDevice.vkPhysicalDevice(), features2);
+            return features.shaderBufferInt64Atomics();
         }
     }
 
@@ -291,6 +324,13 @@ public final class RtDeviceBringup {
         // bufferDeviceAddress merges into vanilla's existing Vulkan12Features struct.
         features.add(new VulkanFeature(VulkanBackend.VK12_FEATURES_STRUCT, "bufferDeviceAddress",
                 VkPhysicalDeviceVulkan12Features.BUFFERDEVICEADDRESS));
+        // Optional SHaRC native atomic path. The separately packaged shaders require this exact feature;
+        // if absent, they remain unavailable and the baseline pipeline is used.
+        sharcInt64AtomicsEnabled = RtSharcSupport.packaged() && supportsShaderBufferInt64Atomics(physicalDevice);
+        if (sharcInt64AtomicsEnabled) {
+            features.add(new VulkanFeature(VulkanBackend.VK12_FEATURES_STRUCT, "shaderBufferInt64Atomics",
+                    VkPhysicalDeviceVulkan12Features.SHADERBUFFERINT64ATOMICS));
+        }
         // Bindless entity textures: a runtime-sized sampler2D[] indexed non-uniformly in the hit shader,
         // with partially-bound + update-after-bind slots (a growing per-RenderType registry). Core on the
         // VK 1.4 device; just needs enabling alongside bufferDeviceAddress on the same struct.
@@ -360,6 +400,7 @@ public final class RtDeviceBringup {
         CausticaMod.LOGGER.info(
                 "Ray tracing: enabling {} + {}{} + features [bufferDeviceAddress, accelerationStructure, rayTracingPipeline, rayQuery, rayTracingInvocationReorder({})"
                         + (wideLinesEnabled ? ", wideLines(max=" + maxLineWidth + ")" : "")
+                        + (sharcInt64AtomicsEnabled ? ", shaderBufferInt64Atomics(SHaRC)" : "")
                         + (ommEnabled ? ", opacityMicromap" : "") + "] + overlayMsaa=" + overlayMsaaSamples + "x on [{}]",
                 RT_EXTENSIONS, serBackend.extensionName, ommEnabled ? " + " + OPTIONAL_RT_EXTENSIONS : "",
                 serBackend.label, physicalDevice.deviceName());

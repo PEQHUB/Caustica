@@ -4,6 +4,8 @@ import com.mojang.blaze3d.pipeline.RenderTarget;
 import dev.comfyfluffy.caustica.CausticaMod;
 import dev.comfyfluffy.caustica.rt.RtComposite;
 import dev.comfyfluffy.caustica.rt.RtContext;
+import dev.comfyfluffy.caustica.rt.RtDeviceBringup;
+import dev.comfyfluffy.caustica.rt.RtRuntimeStatus;
 import dev.comfyfluffy.caustica.rt.terrain.RtTerrain;
 import net.minecraft.client.Minecraft;
 
@@ -37,7 +39,8 @@ public final class VanillaRenderController {
 
 		if (!Boolean.valueOf(this.rtActive).equals(this.lastLoggedRtActive)) {
 			this.lastLoggedRtActive = this.rtActive;
-			CausticaMod.LOGGER.info("RT output mode: {}", this.rtActive ? "rt" : "vanilla");
+			CausticaMod.LOGGER.info("RT output request: {} (backend={})",
+					this.rtActive ? "rt" : "vanilla", RtRuntimeStatus.backend());
 		}
 
 		if (!this.rtActive) {
@@ -146,8 +149,14 @@ public final class VanillaRenderController {
 		if (!RtComposite.enabled()) {
 			return "caustica.rt is false";
 		}
+		if (!RtRuntimeStatus.vulkan()) {
+			return RtRuntimeStatus.unavailableReason();
+		}
+		if (!RtDeviceBringup.rtRequested()) {
+			return RtRuntimeStatus.unavailableReason();
+		}
 		if (RtContext.currentOrNull() == null) {
-			return "RT context is not ready";
+			return RtRuntimeStatus.unavailableReason();
 		}
 		if (RtTerrain.currentOrNull() == null) {
 			return "RT terrain is not ready";

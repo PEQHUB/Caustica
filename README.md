@@ -62,7 +62,7 @@ Series; Multi Frame Generation above 2x requires a supported GeForce RTX 50 Seri
 
 Do not download or install Streamline separately. The production JAR contains the required signed
 Streamline 2.12 plugins and extracts them into `minecraft/caustica-streamline/natives` on first launch.
-The NVIDIA binaries remain separately licensed and are not covered by Caustica's LGPL license; see
+The NVIDIA binaries and SHaRC shader object code remain separately licensed and are not covered by Caustica's LGPL license; see
 [the distribution notice](DISTRIBUTION_NOTICE.md) and [third-party notices](THIRD_PARTY_NOTICES.md).
 
 ## Using DLSS
@@ -120,7 +120,7 @@ Caustica's project-owned source code and documentation are licensed under the
 GNU Lesser General Public License v3.0 or later. See [LICENSE.md](LICENSE.md),
 [COPYING](COPYING), and [COPYING.LESSER](COPYING.LESSER).
 
-Release artifacts may bundle NVIDIA DLSS/NGX SDK components under NVIDIA's own
+Release artifacts may bundle NVIDIA DLSS/NGX SDK components and SHaRC shader object code under NVIDIA's own
 license terms. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ## TODO List

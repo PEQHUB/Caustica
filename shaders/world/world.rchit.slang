@@ -6,6 +6,10 @@
 // WorldPush BDA struct: they're read on every single hit (the hottest chain in the frame), and going
 // through worldPushAddr first would cost an extra global-memory load just to find the address of the
 // load we actually want. The cold WorldPush struct is dereferenced only for the breaking overlay.
+#ifndef CAUSTICA_SHARC
+#define CAUSTICA_SHARC 0
+#endif
+
 import world_common;
 
 [[vk::push_constant]] PushAddr pcAddr;
@@ -221,6 +225,9 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
         }
         payload.albedo = srgbToLinear(entityTex[NonUniformResourceIndex(pslot)].SampleLevel(puv, particleLod).rgb) * pr.tint.rgb;
         payload.normal = pn;
+#if CAUSTICA_SHARC
+        payload.geometricNormal = pn;
+#endif
         payload.hitT = RayTCurrent();
         // Per-particle motion vector: interpolate the captured per-vertex displacement (uniform across
         // the billboard's verts) with the same indices/barycentrics as the UV. dispAddr == 0 falls back
@@ -233,6 +240,9 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
         }
         payload.f0 = float3(0.0, 0.0, 0.0);
         payloadSetPacked(payload, MATERIAL_PARTICLE, 1.0, 0.0, 0.0, 0.0);
+#if CAUSTICA_SHARC
+        payload.flags |= PAYLOAD_SHARC_DYNAMIC;
+#endif
         return;
     }
     // Dynamic entities: instances with this custom-index flag bit carry real captured ModelPart
@@ -253,6 +263,9 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
         if (dot(n, vdir) < 0.0) {
             n = -n;
         }
+#if CAUSTICA_SHARC
+        float3 geometricNormal = n;
+#endif
         // Interpolate the captured entity-texture UV (same scheme as terrain) and sample the bindless
         // per-type texture; tint.rgb is the model colour multiplier (white for most, tinted for sheep/…).
         ConstPtr<uint> eidxBuf = ConstPtr<uint>(g.idxAddr);
@@ -299,6 +312,9 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
 
         payload.albedo = albedo * ao;
         payload.normal = n;
+#if CAUSTICA_SHARC
+        payload.geometricNormal = geometricNormal;
+#endif
         payload.hitT = RayTCurrent();
         // Per-vertex motion vector: interpolate the captured per-vertex displacement with the same
         // indices/barycentrics used for the UV above. Rotation and skeletal/lid animation use a
@@ -311,6 +327,9 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
         }
         payload.f0 = f0;
         payloadSetPacked(payload, MATERIAL_OPAQUE, rough, metal, emission, sss);
+#if CAUSTICA_SHARC
+        payload.flags |= PAYLOAD_SHARC_DYNAMIC;
+#endif
         return;
     }
 
@@ -341,6 +360,9 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
         }
         payload.albedo = tint;
         payload.normal = n;
+#if CAUSTICA_SHARC
+        payload.geometricNormal = n;
+#endif
         payload.hitT = RayTCurrent();
         payload.motionPrev = float3(0.0, 0.0, 0.0);
         float rough = pr.mat.x;
@@ -378,6 +400,9 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
     if (dot(n, vdir) < 0.0) {
         n = -n;
     }
+#if CAUSTICA_SHARC
+    float3 geometricNormal = n;
+#endif
 
     // LabPBR normal map (_n), gated by mat.w — shared decode (TBN from position-fetch + UVs).
     float ao = 1.0;
@@ -400,6 +425,9 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
         payload.albedo = applyBreaking(opticalColor, rayCone, WorldRayOrigin(), WorldRayDirection(),
                 RayTCurrent(), n);
         payload.normal = n;
+#if CAUSTICA_SHARC
+        payload.geometricNormal = geometricNormal;
+#endif
         payload.hitT = RayTCurrent();
         payload.motionPrev = float3(0.0, 0.0, 0.0);
         payload.f0 = dielectric ? float3(0.04, 0.04, 0.04) : float3(0.02, 0.02, 0.02);
@@ -429,6 +457,9 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
         payload.albedo = texAlbedo * tintLinear;
     }
     payload.normal = n;
+#if CAUSTICA_SHARC
+    payload.geometricNormal = geometricNormal;
+#endif
     payload.hitT = RayTCurrent();
     payload.motionPrev = float3(0.0, 0.0, 0.0); // static terrain: camera-only motion vector
     uint material = pr.tint.w > 0.5 ? MATERIAL_WATER : MATERIAL_OPAQUE;

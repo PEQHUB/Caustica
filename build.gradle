@@ -132,6 +132,35 @@ if (!actualSlangVersion.readLines().any { it.trim() == requiredSlangVersion }) {
 			+ pinnedSlangc.absolutePath)
 }
 
+// NVIDIA SHaRC is an external, separately licensed shader SDK. Its source is never copied into the
+// LGPL source tree; only validated SPIR-V object code and the NVIDIA license enter a runtime JAR.
+def sharcVersion = "1.6.5.0"
+def sharcCommit = "0b9f58bbc8c41736042d4da964830a247e424a00"
+def configuredSharcSdk = (findProperty("sharcSdk") ?: System.getenv("SHARC_SDK") ?: "").toString()
+def sharcHeaderHashes = [
+	"include/HashGridCommon.h": "980D4CE2FE53273D55FE1DD771B155F89BB28C86D19947427F318D8661F082A4",
+	"include/SharcCommon.h": "0F61B11E89E0EA80292194DDE6B33478D6E45DD2D9971A77F5658045A9F6BDC3",
+	"include/SharcGlsl.h": "C1802A975BC47196709892C89E35C7212BDBB41568A3AC60F37460AAE52F9469",
+	"include/SharcTypes.h": "0B9D8AC0A4A8C8B303F6BDD338652CA251E5E5152B47CB55972DDD5904B4CC08",
+	"License.md": "8FF8A1723EE41B2647B5B5CD5EF961C7F58FA617803D6DE3EA68F954F85FF419"
+]
+def validateSharcSdk = {
+	if (configuredSharcSdk.isBlank()) return
+	def root = file(configuredSharcSdk)
+	def digest = java.security.MessageDigest.getInstance("SHA-256")
+	def invalid = sharcHeaderHashes.findAll { relative, expected ->
+		def candidate = new File(root, relative)
+		if (!candidate.isFile()) return true
+		digest.reset()
+		def actual = digest.digest(candidate.bytes).encodeHex().toString().toUpperCase(java.util.Locale.ROOT)
+		return actual != expected
+	}.keySet()
+	if (!invalid.empty) {
+		throw new GradleException("SHARC_SDK is not the pinned NVIDIA SHaRC v${sharcVersion} (${sharcCommit}); "
+				+ "missing or hash-mismatched: ${invalid.join(', ')}")
+	}
+}
+
 abstract class CompileShaders extends DefaultTask {
 	@InputDirectory abstract DirectoryProperty getSrcDir()
 	@OutputDirectory abstract DirectoryProperty getOutDir()
@@ -139,6 +168,7 @@ abstract class CompileShaders extends DefaultTask {
 	@Input abstract Property<String> getSpirvVal()
 	@Input abstract Property<String> getSpirvDis()
 	@Input abstract Property<String> getSlangc()
+	@Input abstract Property<String> getSharcSdk()
 
 	@Inject abstract ExecOperations getExecOps()
 
@@ -181,6 +211,7 @@ abstract class CompileShaders extends DefaultTask {
 		}
 		def shaderFiles = srcDir.get().asFileTree.matching {
 			include stageIncludes
+			exclude "sharc/**"
 		}.files.sort { it.absolutePath }
 		def duplicateOutputs = shaderFiles
 				.groupBy { "${outBase(it)}.spv" }
@@ -209,6 +240,63 @@ abstract class CompileShaders extends DefaultTask {
 				}
 			} else {
 				compileOne(src, spv, [])
+			}
+		}
+		def sharcRootPath = sharcSdk.get()
+		if (!sharcRootPath.isBlank()) {
+			def sharcRoot = new File(sharcRootPath)
+			def sharcInclude = ["-I", new File(srcDir.get().asFile, "world").absolutePath,
+					"-I", new File(srcDir.get().asFile, "sharc").absolutePath,
+					"-I", new File(sharcRoot, "include").absolutePath]
+			def variantDefines = ["-DCAUSTICA_SHARC=1"]
+			def queryDefines = variantDefines + ["-DCAUSTICA_SHARC_QUERY=1", "-DCAUSTICA_SHARC_UPDATE=0",
+					"-DCAUSTICA_SHARC_DIAGNOSTICS=0"]
+			def updateDefines = variantDefines + ["-DCAUSTICA_SHARC_QUERY=0", "-DCAUSTICA_SHARC_UPDATE=1",
+					"-DCAUSTICA_SHARC_DIAGNOSTICS=0",
+					"-warnings-disable", "41000"]
+			def diagnosticQueryDefines = variantDefines + ["-DCAUSTICA_SHARC_QUERY=1",
+					"-DCAUSTICA_SHARC_UPDATE=0", "-DCAUSTICA_SHARC_DIAGNOSTICS=1"]
+			def diagnosticUpdateDefines = variantDefines + ["-DCAUSTICA_SHARC_QUERY=0",
+					"-DCAUSTICA_SHARC_UPDATE=1", "-DCAUSTICA_SHARC_DIAGNOSTICS=1",
+					"-warnings-disable", "41000"]
+			def world = new File(srcDir.get().asFile, "world")
+			def sharc = new File(srcDir.get().asFile, "sharc")
+			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc.rgen.spv"),
+					queryDefines + sharcInclude + ["-capability", "spvShaderInvocationReorderEXT"])
+			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_nv.rgen.spv"),
+					queryDefines + sharcInclude + ["-capability", "spvShaderInvocationReorderNV"])
+			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_update.rgen.spv"),
+					updateDefines + sharcInclude + ["-capability", "spvShaderInvocationReorderEXT"])
+			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_update_nv.rgen.spv"),
+					updateDefines + sharcInclude + ["-capability", "spvShaderInvocationReorderNV"])
+			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_diagnostic.rgen.spv"),
+					diagnosticQueryDefines + sharcInclude + ["-capability", "spvShaderInvocationReorderEXT"])
+			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_diagnostic_nv.rgen.spv"),
+					diagnosticQueryDefines + sharcInclude + ["-capability", "spvShaderInvocationReorderNV"])
+			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_update_diagnostic.rgen.spv"),
+					diagnosticUpdateDefines + sharcInclude + ["-capability", "spvShaderInvocationReorderEXT"])
+			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_update_diagnostic_nv.rgen.spv"),
+					diagnosticUpdateDefines + sharcInclude + ["-capability", "spvShaderInvocationReorderNV"])
+			[
+					"world.rchit.slang": "world_sharc.rchit.spv",
+					"world.rahit.slang": "world_sharc.rahit.spv",
+					"world.rmiss.slang": "world_sharc.rmiss.spv",
+					"world_guide.rmiss.slang": "world_sharc_guide.rmiss.spv"
+			].each { sourceName, outputName ->
+				compileOneSlang(new File(world, sourceName), new File(scratchDir, outputName),
+						variantDefines + sharcInclude)
+			}
+			compileOneSlang(new File(sharc, "sharc_resolve.comp.slang"),
+					new File(scratchDir, "sharc_resolve.comp.spv"), sharcInclude)
+			// Prove the exact BDA + native 64-bit atomic contract independently of the runtime shaders.
+			compileOneSlang(new File(sharc, "sharc_atomic_probe.comp.slang"),
+					new File(temporaryDir, "sharc_atomic_probe.comp.spv"), sharcInclude)
+			["world_sharc.rgen.spv", "world_sharc_nv.rgen.spv"].each { name ->
+				def raygen = new File(scratchDir, name)
+				if (!raygen.isFile() || raygen.length() > 180_000L) {
+					throw new GradleException("SHaRC query raygen complexity budget exceeded: ${name} is "
+							+ "${raygen.isFile() ? raygen.length() : 'missing'} bytes (limit 180000)")
+				}
 			}
 		}
 		// Slang 2026.13 compiles the reviewed streamline-core raygen to 114,068 bytes. Keep a tightly
@@ -255,6 +343,12 @@ def compileShaders = tasks.register("compileShaders", CompileShaders) {
 	spirvVal = resolveVulkanTool("spirv-val")
 	spirvDis = resolveVulkanTool("spirv-dis")
 	slangc = pinnedSlangc.absolutePath
+	sharcSdk = configuredSharcSdk
+	if (!configuredSharcSdk.isBlank()) {
+		inputs.files(sharcHeaderHashes.keySet().collect { new File(file(configuredSharcSdk), it) })
+				.withPropertyName("sharcSdk.${sharcVersion}")
+	}
+	doFirst { validateSharcSdk() }
 }
 
 def generateShaderRecords = tasks.register("generateShaderRecords", GenerateShaderRecords) {
@@ -272,6 +366,34 @@ sourceSets.main.java.srcDir(files(layout.buildDirectory.dir("generated/sources/s
 // Emit the .spv into the main resources so they land in the jar / on the runClient classpath at the
 // same /caustica/rt/ path the loader (RtPipeline/RtBlendPipeline) reads. builtBy wires the dependency.
 sourceSets.main.resources.srcDir(files(shaderGenRoot).builtBy(compileShaders))
+
+def sharcMetadataRoot = layout.buildDirectory.dir("generated/sharc-metadata")
+def generateSharcMetadata = tasks.register("generateSharcMetadata") {
+	group = "build"
+	description = "Emits SHaRC packaged-capability metadata and the NVIDIA license when available."
+	inputs.property("sharcSdk", configuredSharcSdk)
+	inputs.property("sharcVersion", sharcVersion)
+	inputs.property("sharcCommit", sharcCommit)
+	outputs.dir(sharcMetadataRoot)
+	doLast {
+		validateSharcSdk()
+		delete(sharcMetadataRoot)
+		def root = sharcMetadataRoot.get().asFile
+		def marker = new File(root, "caustica/sharc.properties")
+		marker.parentFile.mkdirs()
+		marker.setText("version=${sharcVersion}\ncommit=${sharcCommit}\nartifacts=${!configuredSharcSdk.isBlank()}\n", "UTF-8")
+		if (!configuredSharcSdk.isBlank()) {
+			copy {
+				from(new File(file(configuredSharcSdk), "License.md")) {
+					rename { "NVIDIA-SHARC-SDK.txt" }
+					into "META-INF/licenses/nvidia"
+				}
+				into root
+			}
+		}
+	}
+}
+sourceSets.main.resources.srcDir(files(sharcMetadataRoot).builtBy(generateSharcMetadata))
 
 // Streamline is the sole DLSS-RR and DLSSG runtime. The SDK zip is intentionally not checked into
 // the repository; STREAMLINE_SDK must point at the verified NVIDIA Streamline 2.12.0 extraction.
@@ -516,6 +638,8 @@ tasks.named("sourcesJar", Jar).configure {
 	exclude "caustica/natives/**"
 	exclude "caustica/rt/*.spv"
 	exclude "caustica/streamline.properties"
+	exclude "caustica/sharc.properties"
+	exclude "META-INF/licenses/nvidia/NVIDIA-SHARC-SDK.txt"
 }
 
 tasks.named("jar", Jar).configure {
@@ -536,6 +660,7 @@ def verifyProductionArtifact = tasks.register("verifyProductionArtifact") {
 		def required = [
 			"fabric.mod.json",
 			"caustica/streamline.properties",
+			"caustica/sharc.properties",
 			"caustica/natives/windows-x64/streamlinebridge.dll",
 			"caustica/natives/windows-x64/sl.interposer.dll",
 			"caustica/natives/windows-x64/sl.dlss_d.dll",
@@ -549,6 +674,24 @@ def verifyProductionArtifact = tasks.register("verifyProductionArtifact") {
 			"META-INF/licenses/nvidia/NVIDIA-RTX-SDKS.txt",
 			"META-INF/licenses/nvidia/NVIDIA-REFLEX-SDK.txt"
 		]
+		if (!configuredSharcSdk.isBlank()) {
+				required.addAll([
+				"caustica/rt/world_sharc.rgen.spv",
+				"caustica/rt/world_sharc_nv.rgen.spv",
+				"caustica/rt/world_sharc_update.rgen.spv",
+				"caustica/rt/world_sharc_update_nv.rgen.spv",
+				"caustica/rt/world_sharc_diagnostic.rgen.spv",
+				"caustica/rt/world_sharc_diagnostic_nv.rgen.spv",
+				"caustica/rt/world_sharc_update_diagnostic.rgen.spv",
+				"caustica/rt/world_sharc_update_diagnostic_nv.rgen.spv",
+				"caustica/rt/world_sharc.rchit.spv",
+				"caustica/rt/world_sharc.rahit.spv",
+				"caustica/rt/world_sharc.rmiss.spv",
+				"caustica/rt/world_sharc_guide.rmiss.spv",
+				"caustica/rt/sharc_resolve.comp.spv",
+				"META-INF/licenses/nvidia/NVIDIA-SHARC-SDK.txt"
+			])
+		}
 		def runtimeZip = new java.util.zip.ZipFile(runtimeJar)
 		try {
 			def names = runtimeZip.entries().collect { it.name } as Set
@@ -570,6 +713,16 @@ def verifyProductionArtifact = tasks.register("verifyProductionArtifact") {
 			if (!properties.readLines().contains("variant=production")) {
 				throw new GradleException("Production JAR does not identify the production Streamline variant")
 			}
+			def sharcProperties = new Properties()
+			runtimeZip.getInputStream(runtimeZip.getEntry("caustica/sharc.properties")).withCloseable {
+				sharcProperties.load(it)
+			}
+			def expectedSharcArtifacts = configuredSharcSdk.isBlank() ? "false" : "true"
+			if (sharcProperties.getProperty("artifacts") != expectedSharcArtifacts
+					|| sharcProperties.getProperty("version") != sharcVersion
+					|| sharcProperties.getProperty("commit") != sharcCommit) {
+				throw new GradleException("Production JAR SHaRC capability marker is inconsistent")
+			}
 		} finally {
 			runtimeZip.close()
 		}
@@ -578,7 +731,8 @@ def verifyProductionArtifact = tasks.register("verifyProductionArtifact") {
 		try {
 			def leaked = sourceZip.entries().collect { it.name }.findAll { name ->
 				name.startsWith("caustica/natives/") || name.endsWith(".spv")
-						|| name == "caustica/streamline.properties"
+						|| name == "caustica/streamline.properties" || name == "caustica/sharc.properties"
+						|| name == "META-INF/licenses/nvidia/NVIDIA-SHARC-SDK.txt"
 			}
 			if (!leaked.empty) {
 				throw new GradleException("Sources JAR leaks generated/proprietary payloads: ${leaked.join(', ')}")

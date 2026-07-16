@@ -52,4 +52,12 @@ public final class RtBuffer {
         }
         Vma.vmaFlushAllocation(vma, allocation, offset, length);
     }
+
+    /** Invalidate a host-visible range before CPU reads GPU-written data. */
+    public void invalidate(long offset, long length) {
+        if (!hostVisible) {
+            throw new IllegalStateException("Cannot invalidate a non-host-visible buffer");
+        }
+        Vma.vmaInvalidateAllocation(vma, allocation, offset, length);
+    }
 }

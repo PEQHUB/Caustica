@@ -11,3 +11,4 @@ out/
 *.class
 third_party/
 bin/
+.deps/

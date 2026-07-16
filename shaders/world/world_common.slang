@@ -2,6 +2,10 @@
 // records and serializers from Slang reflection.
 module world_common;
 
+#ifndef CAUSTICA_SHARC
+#define CAUSTICA_SHARC 0
+#endif
+
 // Read-only device pointer. Current Vulkan SDK Slang exposes Ptr with three generic arguments; explicit
 // vk::offset annotations below pin the one natural-layout tail that differs from std430 so the generated
 // Java serializer remains in lock-step without requiring scalarBlockLayout.
@@ -15,6 +19,40 @@ public struct PushAddr {
     public uint64_t tableAddr;
     public uint64_t entityTableAddr;
     public uint frameIndex;
+};
+
+// SHaRC pipelines preserve PushAddr's first 32 bytes so the unchanged hit/miss stages see the exact
+// baseline ABI. Only the SHaRC raygen variants read the final BDA lane.
+public struct SharcPushAddr {
+    public uint64_t worldPushAddr;
+    public uint64_t tableAddr;
+    public uint64_t entityTableAddr;
+    public uint frameIndex;
+    public uint64_t sharcFrameAddr;
+};
+
+// Separate from WorldPush so the baseline pipeline's payload and per-frame data remain byte-for-byte
+// unchanged when SHaRC is not packaged or is disabled.
+public struct SharcFrame {
+    public uint64_t hashEntriesAddr;
+    public uint64_t accumulationAddr;
+    public uint64_t resolvedAddr;
+    public uint64_t statsAddr;
+    public float3 cameraPosition;
+    public uint capacity;
+    public float3 cameraPositionPrev;
+    public uint frameIndex;
+    public float sceneScale;
+    public float radianceScale;
+    public uint accumulationFrameNum;
+    public uint staleFrameNumMax;
+    public uint flags; // bit 0 anti-firefly filter, bit 1 diagnostic counters
+    public uint renderWidth;
+    public uint renderHeight;
+    public uint updateTileSize;
+    public uint updateMaxBounces;
+    public float minSegmentRatio;
+    public uint queryFlags; // bit 0 strict glossy cone queries, bit 1 evaluate secondary direct before query
 };
 
 // Block-breaking overlay entry: xyz = breaking block position (rebased, same space as gl_WorldRay*),
@@ -66,6 +104,11 @@ public struct Payload {
     public uint   roughMetal;  // packHalf2x16(roughness, metalness)
     public uint   emissionSss; // packHalf2x16(emission, sss)
     public uint   rayCone;     // packHalf2x16(width, spread)
+#if CAUSTICA_SHARC
+    // Compiled only into the SHaRC pipeline family. Cache keys use the unperturbed geometric normal;
+    // the existing `normal` member remains the shading normal used by BRDF evaluation.
+    public float3 geometricNormal;
+#endif
 };
 
 public static const uint PAYLOAD_SHOW_CELESTIAL = 4u;
@@ -77,6 +120,9 @@ public static const uint PAYLOAD_INTERFACE_ENTERING = 8u;
 public static const uint PAYLOAD_WATER_ENTERING = PAYLOAD_INTERFACE_ENTERING;
 public static const uint PAYLOAD_OPTICAL_CLASS_SHIFT = 4u;
 public static const uint PAYLOAD_OPTICAL_CLASS_MASK = 0xfu << PAYLOAD_OPTICAL_CLASS_SHIFT;
+#if CAUSTICA_SHARC
+public static const uint PAYLOAD_SHARC_DYNAMIC = 1u << 8u;
+#endif
 
 // Terrain per-triangle record (48 B, stride must match RtTerrain's upload).
 // mat = {roughness, metalness, hasS, hasN} for solid/cutout; TRANSLUCENT-bucket prims repurpose it as

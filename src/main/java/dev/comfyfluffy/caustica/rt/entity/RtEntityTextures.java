@@ -226,12 +226,14 @@ public final class RtEntityTextures {
     }
 
     /** Write any newly-registered entity textures into the pipeline's bindless set (before the trace). */
-    public void uploadPending(RtPipeline pipeline, long sampler) {
+    public void uploadPending(long sampler, RtPipeline... pipelines) {
         if (pending.isEmpty()) {
             return;
         }
         for (Pending p : pending) {
-            pipeline.setBindlessTexture(p.binding(), p.slot(), p.view(), sampler);
+            for (RtPipeline pipeline : pipelines) {
+                if (pipeline != null) pipeline.setBindlessTexture(p.binding(), p.slot(), p.view(), sampler);
+            }
         }
         pending.clear();
     }

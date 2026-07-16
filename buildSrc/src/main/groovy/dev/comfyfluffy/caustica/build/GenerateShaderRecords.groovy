@@ -199,6 +199,15 @@ abstract class GenerateShaderRecords extends DefaultTask {
         sb.toString()
     }
 
+    private static Map reflectedArrayRecord(Map reflection, String parameterName, String expectedType) {
+        def parameter = reflection.parameters.find { it.name == parameterName }
+        def probeArray = parameter?.type?.resultType?.fields?.find { it.name == "values" }
+        if (probeArray?.type?.kind != "array" || probeArray.type.elementType?.name != expectedType) {
+            throw new GradleException("unexpected ${expectedType} reflection probe shape")
+        }
+        [type: probeArray.type.elementType as Map, byteSize: probeArray.type.uniformStride as int]
+    }
+
     @TaskAction
     void generate() {
         def reflectionFile = new File(temporaryDir, "shader-records-reflection.json")
@@ -214,13 +223,9 @@ abstract class GenerateShaderRecords extends DefaultTask {
         }
 
         def reflection = new JsonSlurper().parse(reflectionFile)
-        def parameter = reflection.parameters.find { it.name == "worldPushLayoutProbe" }
-        def probeArray = parameter?.type?.resultType?.fields?.find { it.name == "values" }
-        if (probeArray?.type?.kind != "array" || probeArray.type.elementType?.name != "WorldPush") {
-            throw new GradleException("unexpected WorldPush reflection probe shape")
-        }
-        Map worldType = probeArray.type.elementType as Map
-        int worldByteSize = probeArray.type.uniformStride as int
+        def world = reflectedArrayRecord(reflection, "worldPushLayoutProbe", "WorldPush")
+        def sharcFrame = reflectedArrayRecord(reflection, "sharcFrameLayoutProbe", "SharcFrame")
+        def sharcPushAddr = reflectedArrayRecord(reflection, "sharcPushAddrLayoutProbe", "SharcPushAddr")
 
         def pushParameter = reflection.parameters.find { it.name == "pushAddrLayoutProbe" }
         if (pushParameter?.type?.elementType?.name != "PushAddr") {
@@ -236,8 +241,12 @@ abstract class GenerateShaderRecords extends DefaultTask {
         def packageDir = new File(generatedRoot, "dev/comfyfluffy/caustica/rt/gen")
         packageDir.mkdirs()
         new File(packageDir, "WorldPushData.java").setText(
-                generateJava(worldType, worldByteSize, "WorldPushData"), "UTF-8")
+                generateJava(world.type as Map, world.byteSize as int, "WorldPushData"), "UTF-8")
         new File(packageDir, "PushAddrData.java").setText(
                 generateJava(pushAddrType, pushAddrByteSize, "PushAddrData"), "UTF-8")
+        new File(packageDir, "SharcFrameData.java").setText(
+                generateJava(sharcFrame.type as Map, sharcFrame.byteSize as int, "SharcFrameData"), "UTF-8")
+        new File(packageDir, "SharcPushAddrData.java").setText(
+                generateJava(sharcPushAddr.type as Map, sharcPushAddr.byteSize as int, "SharcPushAddrData"), "UTF-8")
     }
 }

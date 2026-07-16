@@ -31,6 +31,7 @@ public final class CausticaClient implements ClientModInitializer {
 		// The GpuDevice exists well before the first tick, so a one-shot at tick start
 		// runs on the render thread with the device idle between frames.
 		ClientTickEvents.START_CLIENT_TICK.register(client -> {
+			CausticaDebugBridge.tick(client);
 			while (OfflineGroundTruth.KEY.consumeClick()) {
 				OfflineGroundTruth.INSTANCE.handleHotkey(client);
 			}

@@ -63,6 +63,9 @@ public final class RtFrameStats {
                     "frame.prepareTlas",
                     "frame.recordTlas",
                     "frame.trace",
+                    "frame.sharcUpdate",
+                    "frame.sharcResolve",
+                    "frame.sharcQuery",
                     "frame.exposure",
                     "frame.dlssRr",
                     "frame.upscale",
@@ -83,7 +86,15 @@ public final class RtFrameStats {
                     "firstPersonBodyInstances", "firstPersonHeadInstances", "firstPersonPairDropped",
                     "firstPersonBodyTextureSubmissions", "firstPersonBodyTextureFallbacks",
                     "firstPersonHeadTextureSubmissions", "firstPersonHeadTextureFallbacks",
-                    "entityTextureSlots", "entityTexturePending"},
+                    "entityTextureSlots", "entityTexturePending",
+                    "sharcQueryAttempts", "sharcQueryHits", "sharcQueryMisses",
+                    "sharcUpdateHits", "sharcUpdateMisses", "sharcInsertFailures",
+                    "sharcTerminatedBounceSum", "sharcTerminatedPaths", "sharcOccupiedEntries",
+                    "baselineTraceGpuNanos", "sharcUpdateGpuNanos", "sharcResolveGpuNanos",
+                    "sharcQueryGpuNanos", "sharcInsertions", "sharcCollisions", "sharcStaleEvictions",
+                    "sharcAllocatedBytes", "sharcResetCount", "sharcAverageTerminatedBounceX1000",
+                    "sharcNumericRisks", "sharcResolvedSaturations", "sharcMaxCachedLumaBits",
+                    "sharcShortSegmentRejects", "sharcGlossyRejects", "sharcDynamicRejects"},
             true);
 
     private static final List<GarbageCollectorMXBean> GC_BEANS = ManagementFactory.getGarbageCollectorMXBeans();
