@@ -33,6 +33,9 @@
 #ifndef CAUSTICA_SHARC_GLOSSY
 #define CAUSTICA_SHARC_GLOSSY 1
 #endif
+#ifndef CAUSTICA_SHARC_LIVE_SECONDARY_DIRECT
+#define CAUSTICA_SHARC_LIVE_SECONDARY_DIRECT 0
+#endif
 
 import world_common;
 
@@ -1544,6 +1547,7 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
         float3 materialEmissive = albedo * emission * emissiveRadiance;
 
 #if CAUSTICA_SHARC_QUERY
+#if !CAUSTICA_SHARC_LIVE_SECONDARY_DIRECT
         if ((sharcFrame.queryFlags & 2u) == 0u) {
             float3 cachedRadiance;
             if (causticaTrySharcQuery(bounce, hitPos, albedo, materialEmissive,
@@ -1553,6 +1557,7 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
                 break;
             }
         }
+#endif
 #endif
         float3 cacheableDirectLighting = float3(0.0);
         float3 liveDirectLighting = float3(0.0);
@@ -1629,7 +1634,11 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
         }
 
 #if CAUSTICA_SHARC_QUERY
+#if CAUSTICA_SHARC_LIVE_SECONDARY_DIRECT
+        {
+#else
         if ((sharcFrame.queryFlags & 2u) != 0u) {
+#endif
             float3 cachedRadiance;
             if (causticaTrySharcQuery(bounce, hitPos, albedo, materialEmissive,
                     sharcPathEligible, sharcPreviousLobeDiffuse, sharcPreviousGlossyAlpha,

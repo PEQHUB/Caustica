@@ -83,6 +83,13 @@ This artifact also adds opt-in full-pipeline GPU timestamps and the bridge-drive
 Frame Statistics off, the extra BLAS/TLAS/reconstruction/exposure/display/copy timestamp writes are not
 recorded. SHaRC Detailed Counters remains a separate, explicitly expensive diagnostic switch.
 
+Artifact `6F972BDE7D9E61F3943EC13D6EBFD5EB63496E4056FB57363C96590FF3894657` further specializes the
+same safe-default shader for enabled live secondary direct lighting, reducing it to 151,612 bytes. Two
+consecutive 4K cave captures measured 100.18 FPS / 7.102 ms mean query and 100.69 FPS / 7.114 ms mean
+query, compared with the prior artifact's 97.31 FPS / 7.407 ms. The general shader remains selected if
+glossy querying is enabled or live secondary direct lighting is disabled, so all exposed tuning
+combinations remain functional.
+
 ## Menu and diagnostics
 
 In **Caustica Settings**, set **SHaRC Indirect Cache** to `Ready`/`Active` and select Low,

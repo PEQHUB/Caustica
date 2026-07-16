@@ -28,6 +28,8 @@ final class SharcIntegrationContractTest {
         assertTrue(composite.indexOf("sharcResolvePipeline.dispatch") < composite.indexOf("queryPipeline.trace"));
         assertTrue(composite.contains("? sharcQueryPipeline : sharcDiffuseQueryPipeline"));
         assertTrue(raygen.contains("#if CAUSTICA_SHARC_GLOSSY"));
+        assertTrue(raygen.contains("#if CAUSTICA_SHARC_LIVE_SECONDARY_DIRECT"));
+        assertTrue(composite.contains("!CausticaConfig.Rt.Sharc.LIVE_SECONDARY_DIRECT.value()"));
         assertTrue(composite.contains("(renderW + updateTileSize - 1) / updateTileSize"));
         assertTrue(raygen.contains("tile * tileSize"));
         assertTrue(raygen.contains("pc.maxBounces = min(pc.maxBounces, sharcFrame.updateMaxBounces)"));

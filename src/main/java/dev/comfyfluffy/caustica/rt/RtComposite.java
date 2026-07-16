@@ -1433,6 +1433,7 @@ public final class RtComposite {
                 RtPipeline updatePipeline = sharcDiagnostics ? sharcDiagnosticUpdatePipeline : sharcUpdatePipeline;
                 RtPipeline queryPipeline = sharcDiagnostics ? sharcDiagnosticQueryPipeline
                         : CausticaConfig.Rt.Sharc.GLOSSY_QUERY.value()
+                        || !CausticaConfig.Rt.Sharc.LIVE_SECONDARY_DIRECT.value()
                         ? sharcQueryPipeline : sharcDiffuseQueryPipeline;
                 try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "SHaRC sparse update");
                      RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.sharcUpdate")) {

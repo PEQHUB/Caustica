@@ -54,6 +54,14 @@ general shader measured 95 FPS / 7.636 ms median query and the restored speciali
 98 FPS / 7.387 ms. A second specialized run measured 98 FPS / 7.429 ms. The specialization does not
 change the estimator: with the glossy flag off, the eliminated glossy predicate was always false.
 
+The next accepted specialization also fixes the enabled **Live Secondary Direct** ordering at compile
+time for that same safe-default shader; other knob combinations still select the general shader. This
+reduced the raygen to 151,612 bytes. Artifact
+`6F972BDE7D9E61F3943EC13D6EBFD5EB63496E4056FB57363C96590FF3894657` produced two consecutive
+4K cave captures of 100.18 FPS / 7.102 ms query and 100.69 FPS / 7.114 ms query, versus the prior
+artifact's 97.31 FPS / 7.407 ms query. The ordering and radiance expression are unchanged; only the
+runtime flag branches and unreachable early-query path are absent from the specialized shader.
+
 Each accepted optimization gets its own commit containing source, tests, and the corresponding updated
 runtime evidence. Diagnostic instrumentation stays separately switchable and may be removed without
 changing the render path.
