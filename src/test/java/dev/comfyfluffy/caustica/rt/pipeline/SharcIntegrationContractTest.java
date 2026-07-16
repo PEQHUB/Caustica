@@ -62,6 +62,10 @@ final class SharcIntegrationContractTest {
         assertTrue(bridge.contains("state.setProperty(\"renderWidth\""));
         assertTrue(bridge.contains("sequence < PROCESS_START_MILLIS"));
         assertTrue(bridge.contains("client.getWindow().toggleFullScreen()"));
+        assertTrue(bridge.contains("new RtSharcOptionsScreen(client.gui.screen(), client.options)"));
+        assertTrue(bridge.contains("Screenshot.grab(client, false)"));
+        assertTrue(script.contains("[bool]$OpenSharcSettings"));
+        assertTrue(script.contains("[bool]$Screenshot"));
     }
 
     @Test
@@ -79,6 +83,9 @@ final class SharcIntegrationContractTest {
     @Test
     void causticaMenuExposesStatusMemoryAndDebugViews() throws Exception {
         String options = read("src/main/java/dev/comfyfluffy/caustica/client/RtVideoOptions.java");
+        String screen = read("src/main/java/dev/comfyfluffy/caustica/client/RtSharcOptionsScreen.java");
+        String widgets = read("src/main/java/dev/comfyfluffy/caustica/client/ui/CausticaWidgets.java");
+        String config = read("src/main/java/dev/comfyfluffy/caustica/CausticaConfig.java");
         String lang = read("src/main/resources/assets/caustica/lang/en_us.json");
         assertTrue(options.contains("public static OptionInstance<?>[] sharcOptions()"));
         assertTrue(options.contains("sharcSceneScale()"));
@@ -95,6 +102,17 @@ final class SharcIntegrationContractTest {
         assertTrue(lang.contains("SHaRC Voxel Hash"));
         assertTrue(lang.contains("SHaRC Cached Radiance"));
         assertTrue(lang.contains("SHaRC Query Eligibility"));
+        assertTrue(screen.contains("extends Screen"));
+        assertTrue(screen.contains("restoreParityDefaults"));
+        assertTrue(screen.contains("CausticaConfig.Rt.Sharc.ENABLED.set(false)"));
+        assertTrue(widgets.contains("public static final int PANEL = 0x00000000"));
+        assertTrue(widgets.contains("public static final int PANEL_2 = 0x24000000"));
+        assertTrue(config.contains("\"sharc.enabled\", false"));
+        assertTrue(config.contains("\"sharc.cache-exponent\", 20, 16, 22"));
+        assertTrue(config.contains("\"sharc.update-tile-size\", 8, 2, 64"));
+        assertTrue(config.contains("\"sharc.update-max-bounces\", 2, 1, 8"));
+        assertTrue(config.contains("\"sharc.glossy-query\", false"));
+        assertTrue(config.contains("\"sharc.live-secondary-direct\", true"));
     }
 
     @Test

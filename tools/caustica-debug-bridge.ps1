@@ -18,6 +18,8 @@ param(
     [bool]$LiveSecondaryDirect,
     [bool]$SharcDetailedStats,
     [bool]$Fullscreen,
+    [bool]$OpenSharcSettings,
+    [bool]$Screenshot,
     [int]$Seconds = 20
 )
 
@@ -69,6 +71,8 @@ if ($PSBoundParameters.ContainsKey('GlossyQuery')) { $lines += "glossyQuery=$($G
 if ($PSBoundParameters.ContainsKey('LiveSecondaryDirect')) { $lines += "liveSecondaryDirect=$($LiveSecondaryDirect.ToString().ToLowerInvariant())" }
 if ($PSBoundParameters.ContainsKey('SharcDetailedStats')) { $lines += "sharcDetailedStats=$($SharcDetailedStats.ToString().ToLowerInvariant())" }
 if ($PSBoundParameters.ContainsKey('Fullscreen')) { $lines += "fullscreen=$($Fullscreen.ToString().ToLowerInvariant())" }
+if ($PSBoundParameters.ContainsKey('OpenSharcSettings')) { $lines += "openSharcSettings=$($OpenSharcSettings.ToString().ToLowerInvariant())" }
+if ($PSBoundParameters.ContainsKey('Screenshot')) { $lines += "screenshot=$($Screenshot.ToString().ToLowerInvariant())" }
 if ($Action -eq 'reset') { $lines += 'resetCache=true' }
 if ($Action -eq 'shutdown') { $lines += 'shutdown=true' }
 $temporary = "$command.tmp"

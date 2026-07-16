@@ -25,12 +25,16 @@ final class CausticaDebugBridge {
     private static long lastCommandSequence = -1L;
     private static String lastCommandResult = "none";
     private static int ticks;
+    private static int screenshotDelayTicks;
 
     private CausticaDebugBridge() {}
 
     static void tick(Minecraft client) {
         if (++ticks % 2 == 0) {
             applyCommand(client);
+        }
+        if (screenshotDelayTicks > 0 && --screenshotDelayTicks == 0) {
+            net.minecraft.client.Screenshot.grab(client, false);
         }
         if (ticks % 10 == 0) {
             publishState(client);
@@ -63,6 +67,12 @@ final class CausticaDebugBridge {
             setBoolean(command, "glossyQuery", CausticaConfig.Rt.Sharc.GLOSSY_QUERY);
             setBoolean(command, "liveSecondaryDirect", CausticaConfig.Rt.Sharc.LIVE_SECONDARY_DIRECT);
             setBoolean(command, "sharcDetailedStats", CausticaConfig.Rt.Sharc.DETAILED_STATS);
+            if (Boolean.parseBoolean(command.getProperty("openSharcSettings", "false"))) {
+                client.setScreenAndShow(new RtSharcOptionsScreen(client.gui.screen(), client.options));
+            }
+            if (Boolean.parseBoolean(command.getProperty("screenshot", "false"))) {
+                screenshotDelayTicks = 5;
+            }
             if (Boolean.parseBoolean(command.getProperty("resetCache", "false"))) {
                 RtComposite.INSTANCE.requestSharcReset("debug bridge reset");
             }
@@ -88,6 +98,8 @@ final class CausticaDebugBridge {
         state.setProperty("commandSequence", Long.toString(lastCommandSequence));
         state.setProperty("commandResult", lastCommandResult);
         state.setProperty("fps", Integer.toString(client.getFps()));
+        var screen = client.gui.screen();
+        state.setProperty("screen", screen == null ? "none" : screen.getClass().getSimpleName());
         state.setProperty("inWorld", Boolean.toString(client.level != null));
         state.setProperty("fullscreen", Boolean.toString(client.getWindow().isFullscreen()));
         state.setProperty("windowWidth", Integer.toString(client.getWindow().getWidth()));

@@ -8,6 +8,19 @@ the GPU executed SHaRC or that image quality and torch transport are correct.
 > only 0.098% occupancy, and the estimator/material contract has not yet been validated. The current
 > correctness and acceptance plan is `docs/sharc-architecture-and-validation-plan.md`.
 
+## Current default contract
+
+Visual parity is guaranteed by keeping SHaRC disabled by default. With SHaRC off, the original world
+pipeline owns secondary transport and no cache is allocated or queried. The enabled tuning preset is a
+conservative performance-cache starting point, not an identical estimator: 40 MiB, scene scale 6.25,
+radiance scale 1000, 64 history/stale frames, 8x8 rotating updates, two update bounces, a one-voxel
+minimum segment, glossy queries off, live secondary direct on, and NVIDIA anti-firefly weighting on.
+Diagnostics and frame statistics default off.
+
+The transparent SHaRC workstation includes **Restore Parity Defaults**, which restores that complete
+tuning set, disables SHaRC and diagnostics, and clears any resident cache. This is also the migration
+path for persisted experimental values from earlier builds.
+
 ## Observed live proof (2026-07-16)
 
 The production JAR with SHA-256
@@ -92,9 +105,10 @@ combinations remain functional.
 
 ## Menu and diagnostics
 
-In **Caustica Settings**, set **SHaRC Indirect Cache** to `Ready`/`Active` and select Low,
-Balanced, or High memory. An unavailable build, GPU, or pipeline shows its actual fallback reason in
-the same control instead of claiming that SHaRC is active.
+In **Caustica Settings**, open the clear SHaRC workstation and enable **SHaRC Indirect Cache** only
+when cached secondary transport is desired. An unavailable build, GPU, or pipeline shows its actual
+fallback reason instead of claiming that SHaRC is active. The header explicitly distinguishes
+`Off - baseline parity` from enabled cache operation.
 
 The existing **Debug View** control includes:
 

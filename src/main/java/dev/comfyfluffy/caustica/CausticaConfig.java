@@ -700,7 +700,7 @@ public final class CausticaConfig {
         public static final class Sharc {
             public static final BooleanSetting ENABLED = bool("caustica.rt.sharc", "sharc.enabled", false);
             public static final IntSetting CACHE_EXPONENT =
-                    clampedInt("caustica.rt.sharcCacheExponent", "sharc.cache-exponent", 18, 16, 22);
+                    clampedInt("caustica.rt.sharcCacheExponent", "sharc.cache-exponent", 20, 16, 22);
             public static final FloatSetting SCENE_SCALE =
                     clampedFloat("caustica.rt.sharcSceneScale", "sharc.scene-scale", 6.25f, 1.0f, 100.0f);
             public static final FloatSetting RADIANCE_SCALE =
@@ -712,7 +712,7 @@ public final class CausticaConfig {
             public static final BooleanSetting ANTI_FIREFLY =
                     bool("caustica.rt.sharcAntiFirefly", "sharc.anti-firefly", true);
             public static final IntSetting UPDATE_TILE_SIZE =
-                    clampedInt("caustica.rt.sharcUpdateTileSize", "sharc.update-tile-size", 32, 2, 64);
+                    clampedInt("caustica.rt.sharcUpdateTileSize", "sharc.update-tile-size", 8, 2, 64);
             public static final IntSetting UPDATE_MAX_BOUNCES =
                     clampedInt("caustica.rt.sharcUpdateMaxBounces", "sharc.update-max-bounces", 2, 1, 8);
             public static final FloatSetting MIN_SEGMENT_RATIO =
