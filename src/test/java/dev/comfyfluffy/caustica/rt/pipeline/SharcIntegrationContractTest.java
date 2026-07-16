@@ -29,6 +29,7 @@ final class SharcIntegrationContractTest {
         assertTrue(composite.contains("? sharcQueryPipeline : sharcDiffuseQueryPipeline"));
         assertTrue(raygen.contains("#if CAUSTICA_SHARC_GLOSSY"));
         assertTrue(raygen.contains("#if CAUSTICA_SHARC_LIVE_SECONDARY_DIRECT"));
+        assertTrue(read("build.gradle").contains("\"-DCAUSTICA_SHARC_LIVE_SECONDARY_DIRECT=1\", \"-O2\", \"-fp-mode\", \"precise\""));
         assertTrue(composite.contains("!CausticaConfig.Rt.Sharc.LIVE_SECONDARY_DIRECT.value()"));
         assertTrue(composite.contains("(renderW + updateTileSize - 1) / updateTileSize"));
         assertTrue(raygen.contains("tile * tileSize"));
@@ -58,6 +59,7 @@ final class SharcIntegrationContractTest {
         assertTrue(script.contains("[ValidateSet('get','set','wait','reset','shutdown')]"));
         assertTrue(bridge.contains("state.setProperty(\"backend\""));
         assertTrue(bridge.contains("state.setProperty(\"artifactSha256\""));
+        assertTrue(bridge.contains("state.setProperty(\"renderWidth\""));
         assertTrue(bridge.contains("sequence < PROCESS_START_MILLIS"));
         assertTrue(bridge.contains("client.getWindow().toggleFullScreen()"));
     }
@@ -68,6 +70,8 @@ final class SharcIntegrationContractTest {
         String profiler = read("src/main/java/dev/comfyfluffy/caustica/rt/RtTraceGpuProfiler.java");
         assertTrue(composite.contains("syncSharcResources(ctx, !OfflineGroundTruth.INSTANCE.active())"));
         assertTrue(profiler.contains("vkCmdWriteTimestamp"));
+        assertTrue(read("src/main/java/dev/comfyfluffy/caustica/rt/RtFrameStats.java")
+                .contains("\"disocclusionGpuNanos\", \"dlssRrGpuNanos\""));
         assertTrue(profiler.contains("VK_QUERY_RESULT_64_BIT"));
         assertFalse(profiler.contains("VK_QUERY_RESULT_WAIT_BIT"));
     }

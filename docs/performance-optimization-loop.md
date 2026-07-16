@@ -40,12 +40,22 @@ whole-frame performance. Branching around glossy-cone math when glossy queries w
 96.42 FPS / 7.564 ms query versus its same-session control's 96.88 FPS / 7.516 ms. All three were
 rejected and reverted.
 
+Prefetching the immutable SHaRC result before secondary NEE to skip discarded diffuse-BRDF arithmetic
+was also rejected. Its first run was statistically neutral, while the foreground-validated repeat fell
+to 98.25 FPS / 7.342 ms query-pass time versus the 100.13 FPS / 7.166 ms control. Keeping cached
+radiance live across NEE likely increased register pressure more than the removed arithmetic saved.
+
+Rejecting primary, ineligible, and dynamic paths before SHaRC voxel/cone calculations was also
+reverted. Its foreground-validated query pass averaged 7.231 ms versus an interleaved exact-control
+build at 7.168 ms. The intended arithmetic reduction did not translate into lower GPU time.
+
 ## Current cave stage map
 
-The accepted SHaRC cave configuration measured approximately 7.26 ms query trace, 1.69 ms
-reconstruction, 0.39 ms BLAS, 0.24 ms TLAS, 0.09 ms sparse update, and less than 0.06 ms in each
-exposure/display/copy stage. Therefore query traversal/shading is the first optimization target,
-reconstruction is second, and acceleration-structure changes must prove they do not degrade traversal.
+The accepted SHaRC cave configuration now measures approximately 6.42 ms query trace, 1.70 ms
+reconstruction, 0.42 ms BLAS, 0.24 ms TLAS, 0.09 ms sparse update, and less than 0.06 ms in each
+exposure/display/copy stage. Reconstruction is split into approximately 0.03 ms of Caustica-owned
+disocclusion work and 1.67 ms in Streamline DLSS-RR. Therefore query traversal/shading remains the
+first owned optimization target; acceleration-structure changes must prove they do not degrade it.
 
 The first accepted post-SHaRC optimization specializes a diffuse-only production query shader when
 **SHaRC Glossy Query** is off, while retaining and selecting the general shader when that tuning knob is
@@ -61,6 +71,16 @@ reduced the raygen to 151,612 bytes. Artifact
 4K cave captures of 100.18 FPS / 7.102 ms query and 100.69 FPS / 7.114 ms query, versus the prior
 artifact's 97.31 FPS / 7.407 ms query. The ordering and radiance expression are unchanged; only the
 runtime flag branches and unreachable early-query path are absent from the specialized shader.
+
+The specialized safe-default query shader is now compiled with Slang `-O2 -fp-mode precise`. This
+changes compiler optimization only, retains precise floating-point semantics, and reduces the
+validated raygen from 151,612 to 133,460 bytes. Against the same instrumentation build at default
+`-O1`, the 4K-output/1080p-internal cave capture improved from 100.17 FPS / 7.217 ms query to
+108.43 FPS / 6.437 ms. A 30-sample repeat measured 108.43 FPS / 6.424 ms. Artifact
+`0750202785667432146BCD2E7FF27EE456597651C083620982752F3D2480225F` is the foreground-validated
+runtime A/B proof build. The final artifact
+`BCF094D60C8DAF7CBE104820924373799B450B9475C2891253BF08B698E520BC`, which only cleans up the
+profiler assignment, passed a foreground smoke capture at 107.67 FPS / 6.524 ms query.
 
 Each accepted optimization gets its own commit containing source, tests, and the corresponding updated
 runtime evidence. Diagnostic instrumentation stays separately switchable and may be removed without

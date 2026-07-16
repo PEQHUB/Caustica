@@ -107,12 +107,17 @@ final class CausticaDebugBridge {
         state.setProperty("sharcUpdateGpuNanos", Long.toString(RtComposite.INSTANCE.sharcUpdateGpuNanos()));
         state.setProperty("sharcResolveGpuNanos", Long.toString(RtComposite.INSTANCE.sharcResolveGpuNanos()));
         state.setProperty("sharcQueryGpuNanos", Long.toString(RtComposite.INSTANCE.sharcQueryGpuNanos()));
+        state.setProperty("sharcQueryPassGpuNanos", Long.toString(RtComposite.INSTANCE.sharcQueryGpuNanos()));
         state.setProperty("blasGpuNanos", Long.toString(RtComposite.INSTANCE.blasGpuNanos()));
         state.setProperty("tlasGpuNanos", Long.toString(RtComposite.INSTANCE.tlasGpuNanos()));
         state.setProperty("reconstructionGpuNanos", Long.toString(RtComposite.INSTANCE.reconstructionGpuNanos()));
+        state.setProperty("disocclusionGpuNanos", Long.toString(RtComposite.INSTANCE.disocclusionGpuNanos()));
+        state.setProperty("dlssRrGpuNanos", Long.toString(RtComposite.INSTANCE.dlssRrGpuNanos()));
         state.setProperty("exposureGpuNanos", Long.toString(RtComposite.INSTANCE.exposureGpuNanos()));
         state.setProperty("displayGpuNanos", Long.toString(RtComposite.INSTANCE.displayGpuNanos()));
         state.setProperty("copyGpuNanos", Long.toString(RtComposite.INSTANCE.copyGpuNanos()));
+        state.setProperty("renderWidth", Integer.toString(RtComposite.INSTANCE.renderWidth()));
+        state.setProperty("renderHeight", Integer.toString(RtComposite.INSTANCE.renderHeight()));
         state.setProperty("backend", RtRuntimeStatus.backend());
         state.setProperty("rtRequested", Boolean.toString(RtDeviceBringup.rtRequested()));
         state.setProperty("rtContextReady", Boolean.toString(RtRuntimeStatus.rtContextReady()));

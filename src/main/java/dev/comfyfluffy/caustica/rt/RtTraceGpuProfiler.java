@@ -13,7 +13,7 @@ import static org.lwjgl.vulkan.VK10.*;
 /** Non-blocking, six-frame-ring Vulkan timestamps for the complete RT composite GPU pipeline. */
 public final class RtTraceGpuProfiler {
     private static final int RING = 6;
-    private static final int QUERIES = 10;
+    private static final int QUERIES = 11;
     private final RtContext ctx;
     private final long pool;
     private final double nanosPerTick;
@@ -28,6 +28,8 @@ public final class RtTraceGpuProfiler {
     private volatile long blasNanos;
     private volatile long tlasNanos;
     private volatile long reconstructionNanos;
+    private volatile long disocclusionNanos;
+    private volatile long dlssRrNanos;
     private volatile long exposureNanos;
     private volatile long displayNanos;
     private volatile long copyNanos;
@@ -72,17 +74,20 @@ public final class RtTraceGpuProfiler {
         write(cmd, 4, VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR);
         write(cmd, 5, VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR);
     }
-    public void reconstructionEnd(VkCommandBuffer cmd) {
+    public void disocclusionEnd(VkCommandBuffer cmd) {
         if (fullPipeline[slot]) write(cmd, 6, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
     }
-    public void exposureEnd(VkCommandBuffer cmd) {
+    public void reconstructionEnd(VkCommandBuffer cmd) {
         if (fullPipeline[slot]) write(cmd, 7, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
     }
-    public void displayEnd(VkCommandBuffer cmd) {
+    public void exposureEnd(VkCommandBuffer cmd) {
         if (fullPipeline[slot]) write(cmd, 8, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
     }
-    public void copyEnd(VkCommandBuffer cmd) {
+    public void displayEnd(VkCommandBuffer cmd) {
         if (fullPipeline[slot]) write(cmd, 9, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+    }
+    public void copyEnd(VkCommandBuffer cmd) {
+        if (fullPipeline[slot]) write(cmd, 10, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
     }
 
     private void write(VkCommandBuffer cmd, int offset, int stage) {
@@ -116,13 +121,17 @@ public final class RtTraceGpuProfiler {
                 RtFrameStats.FRAME.count("baselineTraceGpuNanos", baselineTraceNanos);
             }
             if (full) {
-                reconstructionNanos = elapsed(values.get(5), values.get(6));
-                exposureNanos = elapsed(values.get(6), values.get(7));
-                displayNanos = elapsed(values.get(7), values.get(8));
-                copyNanos = elapsed(values.get(8), values.get(9));
+                disocclusionNanos = elapsed(values.get(5), values.get(6));
+                dlssRrNanos = elapsed(values.get(6), values.get(7));
+                reconstructionNanos = elapsed(values.get(5), values.get(7));
+                exposureNanos = elapsed(values.get(7), values.get(8));
+                displayNanos = elapsed(values.get(8), values.get(9));
+                copyNanos = elapsed(values.get(9), values.get(10));
                 RtFrameStats.FRAME.count("blasGpuNanos", blasNanos);
                 RtFrameStats.FRAME.count("tlasGpuNanos", tlasNanos);
                 RtFrameStats.FRAME.count("reconstructionGpuNanos", reconstructionNanos);
+                RtFrameStats.FRAME.count("disocclusionGpuNanos", disocclusionNanos);
+                RtFrameStats.FRAME.count("dlssRrGpuNanos", dlssRrNanos);
                 RtFrameStats.FRAME.count("exposureGpuNanos", exposureNanos);
                 RtFrameStats.FRAME.count("displayGpuNanos", displayNanos);
                 RtFrameStats.FRAME.count("copyGpuNanos", copyNanos);
@@ -141,6 +150,8 @@ public final class RtTraceGpuProfiler {
     public long blasNanos() { return blasNanos; }
     public long tlasNanos() { return tlasNanos; }
     public long reconstructionNanos() { return reconstructionNanos; }
+    public long disocclusionNanos() { return disocclusionNanos; }
+    public long dlssRrNanos() { return dlssRrNanos; }
     public long exposureNanos() { return exposureNanos; }
     public long displayNanos() { return displayNanos; }
     public long copyNanos() { return copyNanos; }

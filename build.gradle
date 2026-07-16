@@ -252,7 +252,7 @@ abstract class CompileShaders extends DefaultTask {
 			def queryDefines = variantDefines + ["-DCAUSTICA_SHARC_QUERY=1", "-DCAUSTICA_SHARC_UPDATE=0",
 					"-DCAUSTICA_SHARC_DIAGNOSTICS=0"]
 			def diffuseQueryDefines = queryDefines + ["-DCAUSTICA_SHARC_GLOSSY=0",
-					"-DCAUSTICA_SHARC_LIVE_SECONDARY_DIRECT=1"]
+					"-DCAUSTICA_SHARC_LIVE_SECONDARY_DIRECT=1", "-O2", "-fp-mode", "precise"]
 			def updateDefines = variantDefines + ["-DCAUSTICA_SHARC_QUERY=0", "-DCAUSTICA_SHARC_UPDATE=1",
 					"-DCAUSTICA_SHARC_DIAGNOSTICS=0",
 					"-warnings-disable", "41000"]

@@ -96,6 +96,7 @@ public final class RtFrameStats {
                     "sharcNumericRisks", "sharcResolvedSaturations", "sharcMaxCachedLumaBits",
                     "sharcShortSegmentRejects", "sharcGlossyRejects", "sharcDynamicRejects",
                     "blasGpuNanos", "tlasGpuNanos", "reconstructionGpuNanos",
+                    "disocclusionGpuNanos", "dlssRrGpuNanos",
                     "exposureGpuNanos", "displayGpuNanos", "copyGpuNanos"},
             true);
 

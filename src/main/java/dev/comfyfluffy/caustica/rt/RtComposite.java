@@ -126,9 +126,13 @@ public final class RtComposite {
     public long blasGpuNanos() { return traceGpuProfiler == null ? 0L : traceGpuProfiler.blasNanos(); }
     public long tlasGpuNanos() { return traceGpuProfiler == null ? 0L : traceGpuProfiler.tlasNanos(); }
     public long reconstructionGpuNanos() { return traceGpuProfiler == null ? 0L : traceGpuProfiler.reconstructionNanos(); }
+    public long disocclusionGpuNanos() { return traceGpuProfiler == null ? 0L : traceGpuProfiler.disocclusionNanos(); }
+    public long dlssRrGpuNanos() { return traceGpuProfiler == null ? 0L : traceGpuProfiler.dlssRrNanos(); }
     public long exposureGpuNanos() { return traceGpuProfiler == null ? 0L : traceGpuProfiler.exposureNanos(); }
     public long displayGpuNanos() { return traceGpuProfiler == null ? 0L : traceGpuProfiler.displayNanos(); }
     public long copyGpuNanos() { return traceGpuProfiler == null ? 0L : traceGpuProfiler.copyNanos(); }
+    public int renderWidth() { return renderW; }
+    public int renderHeight() { return renderH; }
 
     // WorldPushData and its serializer are generated from Slang's reflected Std430DataLayout. Java never
     // owns or calculates a shader byte offset, struct size, array stride, or fixed-array capacity.
@@ -1473,6 +1477,7 @@ public final class RtComposite {
                 boolean resetTemporal = !fgPreviousViewProjectionValid || emissiveIntensityChanged;
                 dlssdDisocclusionPipeline.dispatch(cmd, renderW, renderH, resetTemporal, frameCounter);
                 VulkanCommandEncoder.memoryBarrier(cmd, stack);
+                if (traceGpuProfiler != null) traceGpuProfiler.disocclusionEnd(cmd);
                 try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "DLSS-RR evaluate");
                      RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.dlssRr")) {
                     rrDone = RtDlssRr.INSTANCE.evaluate(cmd.address(), output, gDepth, gMotion, gAlbedo,
@@ -1484,6 +1489,8 @@ public final class RtComposite {
                             mvCamDeltaX, mvCamDeltaY, mvCamDeltaZ,
                             resetTemporal);
                 }
+            } else if (traceGpuProfiler != null) {
+                traceGpuProfiler.disocclusionEnd(cmd);
             }
             RtDlssRr.INSTANCE.recordFallback(rrPath, rrDone);
 
