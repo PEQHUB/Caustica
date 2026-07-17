@@ -431,6 +431,7 @@ public final class RtVideoOptions {
             sharcUpdateTileSize(), sharcUpdateMaxBounces(), sharcMinSegmentRatio(),
             bool("caustica.options.rt.sharcGlossyQuery", CausticaConfig.Rt.Sharc.GLOSSY_QUERY),
             bool("caustica.options.rt.sharcLiveSecondaryDirect", CausticaConfig.Rt.Sharc.LIVE_SECONDARY_DIRECT),
+            bool("caustica.options.rt.sharcPrimaryDiffuseReuse", CausticaConfig.Rt.Sharc.PRIMARY_DIFFUSE_REUSE),
             bool("caustica.options.rt.sharcAntiFirefly", CausticaConfig.Rt.Sharc.ANTI_FIREFLY),
             bool("caustica.options.rt.sharcDetailedStats", CausticaConfig.Rt.Sharc.DETAILED_STATS),
             debugView(), bool("caustica.options.frameStats", CausticaConfig.Rt.FrameStats.ENABLED),
@@ -459,8 +460,8 @@ public final class RtVideoOptions {
                 OptionInstance.cachedConstantTooltip(Component.translatable("caustica.options.rt.sharcMemory.tooltip")),
                 (caption, exponent) -> Options.genericValueLabel(caption,
                         Component.translatable("caustica.options.rt.sharcMemory." + exponent)),
-                new OptionInstance.IntRange(16, 22),
-                Math.clamp(setting.configuredValue(), 16, 22),
+                new OptionInstance.IntRange(16, 28),
+                Math.clamp(setting.configuredValue(), 16, 28),
                 setting::set);
     }
 

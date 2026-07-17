@@ -25,7 +25,8 @@ public final class RtDlssRr {
     // render-space inputs while DLSSG viewport 0 consumes final-present-space inputs, so RR owns viewport 1.
     private static final int VIEWPORT = 1;
     private static final int RESULT_OK = 0;
-    private static final int RESOURCE_COUNT = 10;
+    private static final int CORE_RESOURCE_COUNT = 10;
+    private static final int DIFFUSE_PATH_RESOURCE_COUNT = 11;
     private static final int LIFECYCLE_VALID_UNTIL_EVALUATE = 2;
 
     private static final int BUFFER_DEPTH = 0;
@@ -38,6 +39,7 @@ public final class RtDlssRr {
     private static final int BUFFER_DISOCCLUSION_MASK = 11;
     private static final int BUFFER_NORMAL_ROUGHNESS = 14;
     private static final int BUFFER_BIAS_CURRENT_COLOR_HINT = 29;
+    private static final int BUFFER_DIFFUSE_RAY_DIRECTION_HIT_DISTANCE = 46;
 
     private StreamlineLibrary library;
     private boolean initialized;
@@ -140,7 +142,11 @@ public final class RtDlssRr {
     }
 
     public static int requiredResourceCount() {
-        return RESOURCE_COUNT;
+        return requiredResourceCount(CausticaConfig.Rt.DlssRr.DIFFUSE_PATH_GUIDE.value());
+    }
+
+    static int requiredResourceCount(boolean diffusePathGuide) {
+        return diffusePathGuide ? DIFFUSE_PATH_RESOURCE_COUNT : CORE_RESOURCE_COUNT;
     }
 
     /**
@@ -150,7 +156,8 @@ public final class RtDlssRr {
      */
     public boolean evaluate(long commandBuffer, RtImage color, RtImage depth, RtImage motion,
             RtImage diffuseAlbedo, RtImage specularAlbedo, RtImage normalRoughness,
-            RtImage specularMotion, RtImage disocclusion, RtImage biasCurrentColor, RtImage output,
+            RtImage specularMotion, RtImage disocclusion, RtImage biasCurrentColor,
+            RtImage diffuseRayDirectionHitDistance, RtImage output,
             int renderWidth, int renderHeight, int displayWidth, int displayHeight,
             float jitterX, float jitterY, Matrix4fc projection,
             Matrix4fc currentViewProjection, Matrix4fc previousViewProjection, Matrix4fc viewRotation,
@@ -176,8 +183,10 @@ public final class RtDlssRr {
                     cameraX, cameraY, cameraZ, cameraDeltaX, cameraDeltaY, cameraDeltaZ,
                     reset || resetHistory);
 
+            boolean diffusePathGuide = CausticaConfig.Rt.DlssRr.DIFFUSE_PATH_GUIDE.value();
+            int resourceCount = requiredResourceCount(diffusePathGuide);
             MemorySegment resources = StreamlineAbi.allocate(arena,
-                    StreamlineAbi.RESOURCE_DESC_SIZE * RESOURCE_COUNT);
+                    StreamlineAbi.RESOURCE_DESC_SIZE * resourceCount);
             writeResource(resources, 0, color, VK10.VK_FORMAT_R16G16B16A16_SFLOAT,
                     renderWidth, renderHeight, BUFFER_SCALING_INPUT_COLOR);
             writeResource(resources, 1, depth, VK10.VK_FORMAT_R32_SFLOAT,
@@ -198,11 +207,16 @@ public final class RtDlssRr {
                     renderWidth, renderHeight, BUFFER_BIAS_CURRENT_COLOR_HINT);
             writeResource(resources, 9, output, VK10.VK_FORMAT_R16G16B16A16_SFLOAT,
                     displayWidth, displayHeight, BUFFER_SCALING_OUTPUT_COLOR);
+            if (diffusePathGuide) {
+                writeResource(resources, 10, diffuseRayDirectionHitDistance,
+                        VK10.VK_FORMAT_R16G16B16A16_SFLOAT, renderWidth, renderHeight,
+                        BUFFER_DIFFUSE_RAY_DIRECTION_HIT_DISTANCE);
+            }
 
             resourcesCreated = true;
-            lastResourceCount = RESOURCE_COUNT;
+            lastResourceCount = resourceCount;
             javaEvaluateCalls++;
-            lastEvaluateResult = library.evaluateDlssd(frameToken, VIEWPORT, resources, RESOURCE_COUNT,
+            lastEvaluateResult = library.evaluateDlssd(frameToken, VIEWPORT, resources, resourceCount,
                     constants, commandBuffer);
             check(lastEvaluateResult, "slEvaluateFeature(DLSS-RR)");
             resetHistory = false;

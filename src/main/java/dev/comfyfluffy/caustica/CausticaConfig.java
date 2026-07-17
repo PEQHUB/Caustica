@@ -76,10 +76,10 @@ public final class CausticaConfig {
             Rt.ENABLED, Rt.Composite.SPP, Rt.Composite.MAX_BOUNCES, Rt.Terrain.ASYNC_DISPATCH_PER_PASS, Rt.Omm.ENABLED,
             Rt.Entities.ENABLED, Rt.Entities.GLOW_ENABLED, Rt.FirstPerson.ENABLED,
             Rt.FirstPerson.DISABLE_VANILLA_MODEL, Rt.EntityTextures.MAX_TEXTURES,
-            Rt.DlssRr.ENABLED,
+            Rt.DlssRr.ENABLED, Rt.DlssRr.DIFFUSE_PATH_GUIDE,
             Rt.Fg.ENABLED, Rt.Fg.MODE, Rt.Fg.MULTI_FRAME_COUNT, Rt.Fg.DYNAMIC_TARGET_FPS,
             Rt.Reflex.ENABLED, Rt.Exposure.MODE, Rt.FrameStats.ENABLED,
-            Rt.Sharc.ENABLED, Rt.Sharc.CACHE_EXPONENT, Rt.Sharc.UPDATE_TILE_SIZE,
+            Rt.Sharc.ENABLED, Rt.Sharc.PRIMARY_DIFFUSE_REUSE, Rt.Sharc.CACHE_EXPONENT, Rt.Sharc.UPDATE_TILE_SIZE,
             Rt.Sdr.TONEMAP_MODE, Rt.Hdr.ENABLED, Rt.Hdr.TONEMAP_MODE, Rt.PsychoV23.COMPRESSION,
         };
     }
@@ -700,27 +700,29 @@ public final class CausticaConfig {
         public static final class Sharc {
             public static final BooleanSetting ENABLED = bool("caustica.rt.sharc", "sharc.enabled", true);
             public static final IntSetting CACHE_EXPONENT =
-                    clampedInt("caustica.rt.sharcCacheExponent", "sharc.cache-exponent", 20, 16, 22);
+                      clampedInt("caustica.rt.sharcCacheExponent", "sharc.cache-exponent", 20, 16, 28);
             public static final FloatSetting SCENE_SCALE =
-                    clampedFloat("caustica.rt.sharcSceneScale", "sharc.scene-scale", 6.25f, 1.0f, 100.0f);
+                    clampedFloat("caustica.rt.sharcSceneScale", "sharc.scene-scale", 32.0f, 1.0f, 100.0f);
             public static final FloatSetting RADIANCE_SCALE =
                     clampedFloat("caustica.rt.sharcRadianceScale", "sharc.radiance-scale", 1000.0f, 50.0f, 10000.0f);
             public static final IntSetting ACCUMULATION_FRAMES =
-                    clampedInt("caustica.rt.sharcAccumulationFrames", "sharc.accumulation-frames", 64, 1, 1024);
+                    clampedInt("caustica.rt.sharcAccumulationFrames", "sharc.accumulation-frames", 256, 1, 1024);
             public static final IntSetting STALE_FRAMES =
-                    clampedInt("caustica.rt.sharcStaleFrames", "sharc.stale-frames", 64, 8, 1024);
+                    clampedInt("caustica.rt.sharcStaleFrames", "sharc.stale-frames", 256, 8, 1024);
             public static final BooleanSetting ANTI_FIREFLY =
                     bool("caustica.rt.sharcAntiFirefly", "sharc.anti-firefly", true);
             public static final IntSetting UPDATE_TILE_SIZE =
-                    clampedInt("caustica.rt.sharcUpdateTileSize", "sharc.update-tile-size", 8, 2, 64);
+                    clampedInt("caustica.rt.sharcUpdateTileSize", "sharc.update-tile-size", 5, 2, 64);
             public static final IntSetting UPDATE_MAX_BOUNCES =
-                    clampedInt("caustica.rt.sharcUpdateMaxBounces", "sharc.update-max-bounces", 2, 1, 8);
+                    clampedInt("caustica.rt.sharcUpdateMaxBounces", "sharc.update-max-bounces", 4, 1, 8);
             public static final FloatSetting MIN_SEGMENT_RATIO =
-                    clampedFloat("caustica.rt.sharcMinSegmentRatio", "sharc.min-segment-ratio", 1.0f, 0.25f, 4.0f);
+                    clampedFloat("caustica.rt.sharcMinSegmentRatio", "sharc.min-segment-ratio", 0.25f, 0.25f, 4.0f);
             public static final BooleanSetting GLOSSY_QUERY =
                     bool("caustica.rt.sharcGlossyQuery", "sharc.glossy-query", false);
             public static final BooleanSetting LIVE_SECONDARY_DIRECT =
                     bool("caustica.rt.sharcLiveSecondaryDirect", "sharc.live-secondary-direct", true);
+            public static final BooleanSetting PRIMARY_DIFFUSE_REUSE =
+                    bool("caustica.rt.sharcPrimaryDiffuseReuse", "sharc.primary-diffuse-reuse", false);
             public static final BooleanSetting DETAILED_STATS =
                     bool("caustica.rt.sharcDetailedStats", "sharc.detailed-stats", false);
 
@@ -804,6 +806,8 @@ public final class CausticaConfig {
 
         public static final class DlssRr {
             public static final BooleanSetting ENABLED = bool("caustica.rt.dlssRr", "dlss-rr.enabled", true);
+            public static final BooleanSetting DIFFUSE_PATH_GUIDE = bool(
+                    "caustica.rt.dlssRr.diffusePathGuide", "dlss-rr.diffuse-path-guide", false);
             public static final IntSetting PRESET = intValue("caustica.rt.dlssRr.preset", "dlss-rr.preset", 0);
             public static final IntSetting QUALITY = intValue("caustica.rt.dlssRr.quality", "dlss-rr.quality", 0);
 

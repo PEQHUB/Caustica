@@ -36,6 +36,9 @@
 #ifndef CAUSTICA_SHARC_LIVE_SECONDARY_DIRECT
 #define CAUSTICA_SHARC_LIVE_SECONDARY_DIRECT 0
 #endif
+#ifndef CAUSTICA_SHARC_PRIMARY_DIFFUSE
+#define CAUSTICA_SHARC_PRIMARY_DIFFUSE 0
+#endif
 #ifndef CAUSTICA_OFFLINE
 #define CAUSTICA_OFFLINE 0
 #endif
@@ -70,6 +73,7 @@ static SharcRWPtr<uint> sharcStats;
 [[vk::binding(7, 0)]] [format("rgba16f")] RWTexture2D<float4> gSpecAlbedo; // specular albedo (0 — diffuse-only)
 [[vk::binding(8, 0)]] [format("rg16f")]   RWTexture2D<float2> gSpecMotion; // reflection MVs for RR
 [[vk::binding(10, 0)]] [format("r16f")] RWTexture2D<float> gAnimatedGuide; // temporal responsivity source
+[[vk::binding(13, 0)]] [format("rgba16f")] RWTexture2D<float4> gDiffuseRayDirectionHitDistance;
 #else
 [[vk::binding(9, 0)]] [format("rgba32f")] RWTexture2D<float4> groundTruthAccum; // RGB mean + sample count
 [[vk::binding(11, 0)]] [format("rgba32f")] RWTexture2D<float4> offlinePilotRead;
@@ -146,6 +150,7 @@ static float4 shadowVis; // rgb = transmittance; a = nearest water-crossing t (-
 #if CAUSTICA_SHARC_QUERY
 bool causticaTrySharcQuery(int bounce, float3 hitPos, float3 albedo, float3 materialEmissive,
         bool pathEligible, bool previousLobeDiffuse, float previousGlossyAlpha,
+        bool primaryDiffuseEligible,
         out float3 cachedRadiance) {
     cachedRadiance = float3(0.0);
     bool dynamicSurface = (payload.flags & PAYLOAD_SHARC_DYNAMIC) != 0u;
@@ -161,7 +166,13 @@ bool causticaTrySharcQuery(int bounce, float3 hitPos, float3 albedo, float3 mate
 #endif
     bool segmentEligible = payload.hitT >= minSegment;
     bool lobeEligible = previousLobeDiffuse || glossyEligible;
-    bool queryEligible = bounce > 0 && pathEligible && !dynamicSurface && segmentEligible && lobeEligible;
+    bool secondaryEligible = bounce > 0 && segmentEligible && lobeEligible;
+#if CAUSTICA_SHARC_PRIMARY_DIFFUSE
+    bool primaryEligible = bounce == 0 && primaryDiffuseEligible;
+#else
+    bool primaryEligible = false;
+#endif
+    bool queryEligible = pathEligible && !dynamicSurface && (primaryEligible || secondaryEligible);
 #if CAUSTICA_SHARC_DIAGNOSTICS
     bool statsEnabled = (sharcFrame.flags & 2u) != 0u;
     if (pc.debugView == 14u) {
@@ -169,7 +180,8 @@ bool causticaTrySharcQuery(int bounce, float3 hitPos, float3 albedo, float3 mate
                 saturate(log2(1.0 + minSegment) / 8.0), 0.1);
     }
     if (pc.debugView == 15u) {
-        if (bounce == 0) gv_sharcEligibilityDebug = float3(0.08);
+        if (bounce == 0) gv_sharcEligibilityDebug = primaryEligible
+                ? float3(0.05, 1.0, 0.15) : float3(0.08);
         else if (dynamicSurface) gv_sharcEligibilityDebug = float3(1.0, 0.0, 1.0);
         else if (!segmentEligible) gv_sharcEligibilityDebug = float3(1.0, 0.55, 0.0);
         else if (!lobeEligible) gv_sharcEligibilityDebug = float3(0.15, 0.35, 1.0);
@@ -245,6 +257,10 @@ static float3 gv_opticalGuideDir;
 static uint gv_opticalGuideMode; // 0 none, 1 water, 2 glass exit, 3 glass entry (trace exact exit)
 static float gv_opticalExitEta;
 static float gv_animatedGuide;
+// Optional DLSSD B-mode guide: normalized world-space direction of the first diffuse continuation
+// and the world-space distance to its first hit. Zero means that the primary path chose no diffuse ray.
+static float4 gv_diffuseRayDirectionHitDistance;
+static bool gv_diffuseGuidePending;
 // Previous animated-reflector normal; zero selects the current normal for static surfaces.
 static float3 gv_specPreviousNormal;
 // Primary Surface Replacement (PSR) is reserved for exact, static metallic mirrors. The radiance path
@@ -267,6 +283,7 @@ static const uint FRAME_FLAG_RR_GUIDES = 1u << 5u;
 static const uint FRAME_FLAG_FG_GUIDES = 1u << 6u;
 static const uint FRAME_FLAG_OFFLINE_GROUND_TRUTH = 1u << 7u;
 static const uint FRAME_FLAG_OFFLINE_CALIBRATING = 1u << 8u;
+static const uint FRAME_FLAG_DIFFUSE_PATH_GUIDE = 1u << 9u;
 
 uint payloadMaterial() { return payload.flags & PAYLOAD_MATERIAL_MASK; }
 uint payloadOpticalClass() {
@@ -1217,6 +1234,14 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
         traceRadiance(bounce == 0 ? CULL_PRIMARY : CULL_SECONDARY, ro, 0.0, rd, 10000.0);
 #endif
 
+        // The direction is captured when bounce 0 spawns its diffuse continuation. This invocation is
+        // therefore that ray's first world-space hit; record its distance before any material branch can
+        // terminate, replace, or continue the path. A miss keeps distance zero.
+        if (captureGuides && bounce == 1 && gv_diffuseGuidePending) {
+            gv_diffuseRayDirectionHitDistance.w = max(payload.hitT, 0.0);
+            gv_diffuseGuidePending = false;
+        }
+
         if (payload.hitT < 0.0) {
             // world.rmiss writes sky radiance (gradient + sun/moon disc + stars) into payload.albedo. The
             // packed show-celestial flag decides whether this path segment may see the bright disc.
@@ -1430,6 +1455,11 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
             throughput *= albedo;
             ro = hitPos + n * SURF_BIAS;
             rd = cosineDir(n, sampler);
+            if (captureGuides && bounce == 0
+                    && (pc.flags & FRAME_FLAG_DIFFUSE_PATH_GUIDE) != 0u) {
+                gv_diffuseRayDirectionHitDistance = float4(rd, 0.0);
+                gv_diffuseGuidePending = true;
+            }
             rayConeSpread = max(rayConeSpread, RAY_CONE_DIFFUSE_SPREAD);
             showCelestial = false; // diffuse receiver: direct sun/moon was handled by NEE above
             continue;
@@ -1598,6 +1628,7 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
             float3 cachedRadiance;
             if (causticaTrySharcQuery(bounce, hitPos, albedo, materialEmissive,
                     sharcPathEligible, sharcPreviousLobeDiffuse, sharcPreviousGlossyAlpha,
+                    false,
                     cachedRadiance)) {
                 L += throughput * cachedRadiance;
                 break;
@@ -1683,11 +1714,21 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
 #if CAUSTICA_SHARC_LIVE_SECONDARY_DIRECT
         {
 #else
-        if ((sharcFrame.queryFlags & 2u) != 0u) {
+        if ((sharcFrame.queryFlags & 2u) != 0u
+#if CAUSTICA_SHARC_PRIMARY_DIFFUSE
+                || bounce == 0
+#endif
+        ) {
 #endif
             float3 cachedRadiance;
+            // Primary reuse is deliberately narrower than secondary continuation reuse. Directionless
+            // cache data may replace only static, rough, diffuse camera-visible receivers; primary GGX,
+            // SSS and authored emission remain live, and misses fall through to the baseline continuation.
+            bool primaryDiffuseEligible = metal <= 0.1 && perceptualRough >= 0.5
+                    && luminance(diffAlb) > 1.0e-4;
             if (causticaTrySharcQuery(bounce, hitPos, albedo, materialEmissive,
                     sharcPathEligible, sharcPreviousLobeDiffuse, sharcPreviousGlossyAlpha,
+                    primaryDiffuseEligible,
                     cachedRadiance)) {
                 L += throughput * (cachedRadiance + liveDirectLighting);
                 break;
@@ -1788,6 +1829,11 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
                         / max(diffusePdf * (1.0 - ps), 1.0e-7);
                 ro = p;
                 rd = l;
+                if (captureGuides && bounce == 0
+                        && (pc.flags & FRAME_FLAG_DIFFUSE_PATH_GUIDE) != 0u) {
+                    gv_diffuseRayDirectionHitDistance = float4(rd, 0.0);
+                    gv_diffuseGuidePending = true;
+                }
                 rayConeSpread = max(rayConeSpread, RAY_CONE_DIFFUSE_SPREAD);
                 showCelestial = false; // diffuse lobe: disc covered by NEE, hide it (anti-firefly)
             }
@@ -1800,6 +1846,11 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
             showCelestial = false; // diffuse bounce: hide the disc (covered by NEE)
             ro = p;
             rd = cosineDir(n, sampler);
+            if (captureGuides && bounce == 0
+                    && (pc.flags & FRAME_FLAG_DIFFUSE_PATH_GUIDE) != 0u) {
+                gv_diffuseRayDirectionHitDistance = float4(rd, 0.0);
+                gv_diffuseGuidePending = true;
+            }
             rayConeSpread = max(rayConeSpread, RAY_CONE_DIFFUSE_SPREAD);
         }
 
@@ -1966,6 +2017,8 @@ void main() {
     gv_opticalGuideMode = 0u;
     gv_opticalExitEta = 1.0;
     gv_animatedGuide = 0.0;
+    gv_diffuseRayDirectionHitDistance = float4(0.0, 0.0, 0.0, 0.0);
+    gv_diffuseGuidePending = false;
     gv_specPreviousNormal = float3(0.0, 0.0, 0.0);
     gv_psrMirror = false;
 #if CAUSTICA_SHARC_QUERY && CAUSTICA_SHARC_DIAGNOSTICS
@@ -2084,6 +2137,9 @@ void main() {
         gSpecAlbedo[pix] = float4(gv_specAlb, 1.0);
         gSpecMotion[pix] = specMotion;
         gAnimatedGuide[pix] = gv_animatedGuide;
+        if ((pc.flags & FRAME_FLAG_DIFFUSE_PATH_GUIDE) != 0u) {
+            gDiffuseRayDirectionHitDistance[pix] = gv_diffuseRayDirectionHitDistance;
+        }
     } else if (writeMotionGuides) {
         gDepth[pix] = gv_depth;
         gMotion[pix] = motion;

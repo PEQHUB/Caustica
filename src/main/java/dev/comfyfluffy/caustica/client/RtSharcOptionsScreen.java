@@ -30,7 +30,8 @@ public final class RtSharcOptionsScreen extends Screen {
     private static final int GAP = 4;
     private static final int CONTROL_HEIGHT = 22;
     private static final int MAX_CONTENT_WIDTH = 920;
-    private static final List<Integer> CACHE_EXPONENTS = List.of(16, 17, 18, 19, 20, 21, 22);
+    private static final List<Integer> CACHE_EXPONENTS = List.of(
+            16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28);
     private static final List<Integer> DEBUG_VIEWS = List.of(
             0, 1, 2, 3, 4, 5, 6, 7,
             CausticaConfig.Rt.Composite.DEBUG_VIEW_TONEMAP_COMPARISON, 9, 10, 11, 12, 13, 14, 15, 16);
@@ -89,6 +90,8 @@ public final class RtSharcOptionsScreen extends Screen {
         addControl(toggle("caustica.options.rt.sharcGlossyQuery", CausticaConfig.Rt.Sharc.GLOSSY_QUERY));
         addControl(toggle("caustica.options.rt.sharcLiveSecondaryDirect",
                 CausticaConfig.Rt.Sharc.LIVE_SECONDARY_DIRECT));
+        addControl(toggle("caustica.options.rt.sharcPrimaryDiffuseReuse",
+                CausticaConfig.Rt.Sharc.PRIMARY_DIFFUSE_REUSE));
         addControl(toggle("caustica.options.rt.sharcAntiFirefly", CausticaConfig.Rt.Sharc.ANTI_FIREFLY));
         addControl(toggle("caustica.options.rt.sharcDetailedStats", CausticaConfig.Rt.Sharc.DETAILED_STATS));
 
@@ -178,6 +181,7 @@ public final class RtSharcOptionsScreen extends Screen {
         CausticaConfig.Rt.Sharc.GLOSSY_QUERY.set(CausticaConfig.Rt.Sharc.GLOSSY_QUERY.defaultValue());
         CausticaConfig.Rt.Sharc.LIVE_SECONDARY_DIRECT.set(
                 CausticaConfig.Rt.Sharc.LIVE_SECONDARY_DIRECT.defaultValue());
+        CausticaConfig.Rt.Sharc.PRIMARY_DIFFUSE_REUSE.set(false);
         CausticaConfig.Rt.Sharc.DETAILED_STATS.set(false);
         CausticaConfig.Rt.Composite.DEBUG_VIEW.set(0);
         CausticaConfig.Rt.FrameStats.ENABLED.set(false);
@@ -192,7 +196,8 @@ public final class RtSharcOptionsScreen extends Screen {
 
     private Component statusText() {
         String status = !RtSharcSupport.available() ? RtSharcSupport.status()
-                : RtComposite.INSTANCE.sharcActive() ? "Active"
+                : RtComposite.INSTANCE.sharcPrimaryDiffuseActive() ? "Active - C raw primary debug"
+                : RtComposite.INSTANCE.sharcActive() ? "Active - B secondary only"
                 : CausticaConfig.Rt.Sharc.ENABLED.value() ? "Ready - parity preset" : "Off";
         return Component.literal("NVIDIA SHaRC 1.6.5.0  •  " + status);
     }

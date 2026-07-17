@@ -47,7 +47,8 @@ public class CausticaSettingsScreen extends Screen {
     private static final int MAX_CONTENT_WIDTH = 760;
     private static final int TARGET_CELL_WIDTH = 250;
     private static final List<Integer> DLSS_QUALITY_ORDER = List.of(3, 0, 1, 2, 5);
-    private static final List<Integer> SHARC_CACHE_EXPONENTS = List.of(16, 17, 18, 19, 20, 21, 22);
+    private static final List<Integer> SHARC_CACHE_EXPONENTS = List.of(
+            16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28);
     private static final List<String> SDR_TONEMAPPERS = List.of(
             CausticaConfig.Rt.Sdr.TONEMAP_AGX, CausticaConfig.Rt.Sdr.TONEMAP_PBR_NEUTRAL,
             CausticaConfig.Rt.Sdr.TONEMAP_REINHARD, CausticaConfig.Rt.Sdr.TONEMAP_ACES,
@@ -195,6 +196,10 @@ public class CausticaSettingsScreen extends Screen {
                 .resetOnShift(() -> CausticaConfig.Rt.Composite.SUN_ANGULAR_RADIUS.set(
                         CausticaConfig.Rt.Composite.SUN_ANGULAR_RADIUS.defaultValue())));
         controls.add(toggle(Component.translatable("caustica.options.rt.dlssRr"), CausticaConfig.Rt.DlssRr.ENABLED));
+        controls.add(toggle(Component.translatable("caustica.options.rt.dlssDiffusePathGuide"),
+                CausticaConfig.Rt.DlssRr.DIFFUSE_PATH_GUIDE)
+                .tooltip(Component.translatable("caustica.options.rt.dlssDiffusePathGuide.tooltip"))
+                .activeWhen(CausticaConfig.Rt.DlssRr.ENABLED::configuredValue));
         controls.add(new Dropdown<>(180, Component.translatable("caustica.options.rt.dlssQuality"), DLSS_QUALITY_ORDER,
                 CausticaConfig.Rt.DlssRr.QUALITY::configuredValue, CausticaConfig.Rt.DlssRr.QUALITY::set,
                 value -> Component.translatable("caustica.options.rt.dlssQuality." + value), null)
@@ -262,6 +267,9 @@ public class CausticaSettingsScreen extends Screen {
         controls.add(toggle(Component.translatable("caustica.options.rt.sharcLiveSecondaryDirect"),
                 CausticaConfig.Rt.Sharc.LIVE_SECONDARY_DIRECT)
                 .tooltip(Component.translatable("caustica.options.rt.sharcLiveSecondaryDirect.tooltip")));
+        controls.add(toggle(Component.translatable("caustica.options.rt.sharcPrimaryDiffuseReuse"),
+                CausticaConfig.Rt.Sharc.PRIMARY_DIFFUSE_REUSE)
+                .tooltip(Component.translatable("caustica.options.rt.sharcPrimaryDiffuseReuse.tooltip")));
         controls.add(toggle(Component.translatable("caustica.options.rt.sharcAntiFirefly"),
                 CausticaConfig.Rt.Sharc.ANTI_FIREFLY)
                 .tooltip(Component.translatable("caustica.options.rt.sharcAntiFirefly.tooltip")));
@@ -272,8 +280,6 @@ public class CausticaSettingsScreen extends Screen {
 
         body.addChild(new InfoStrip(contentWidth, this::sharcStatusText));
         addGrid(List.of(
-                new ActionButton(180, () -> Component.translatable("caustica.options.rt.sharcSettings.title"),
-                        () -> minecraft.setScreenAndShow(new RtSharcOptionsScreen(this, options)), false),
                 new ActionButton(180, () -> Component.translatable("caustica.options.rt.sharcReset"),
                         () -> RtComposite.INSTANCE.requestSharcReset("manual menu reset"), false),
                 new ActionButton(180, () -> Component.translatable("caustica.options.rt.sharcRestoreParity"),
@@ -440,7 +446,8 @@ public class CausticaSettingsScreen extends Screen {
 
     private Component sharcStatusText() {
         String state = !RtSharcSupport.available() ? RtSharcSupport.status()
-                : RtComposite.INSTANCE.sharcActive() ? "Active"
+                : RtComposite.INSTANCE.sharcPrimaryDiffuseActive() ? "Active - C raw primary debug"
+                : RtComposite.INSTANCE.sharcActive() ? "Active - B secondary only"
                 : CausticaConfig.Rt.Sharc.ENABLED.configuredValue() ? "Ready - parity preset" : "Off";
         return Component.literal("NVIDIA SHaRC 1.6.5.0  |  " + state);
     }
@@ -457,6 +464,7 @@ public class CausticaSettingsScreen extends Screen {
         CausticaConfig.Rt.Sharc.MIN_SEGMENT_RATIO.set(CausticaConfig.Rt.Sharc.MIN_SEGMENT_RATIO.defaultValue());
         CausticaConfig.Rt.Sharc.GLOSSY_QUERY.set(CausticaConfig.Rt.Sharc.GLOSSY_QUERY.defaultValue());
         CausticaConfig.Rt.Sharc.LIVE_SECONDARY_DIRECT.set(CausticaConfig.Rt.Sharc.LIVE_SECONDARY_DIRECT.defaultValue());
+        CausticaConfig.Rt.Sharc.PRIMARY_DIFFUSE_REUSE.set(false);
         CausticaConfig.Rt.Sharc.ANTI_FIREFLY.set(CausticaConfig.Rt.Sharc.ANTI_FIREFLY.defaultValue());
         CausticaConfig.Rt.Sharc.DETAILED_STATS.set(false);
         CausticaConfig.Rt.Composite.DEBUG_VIEW.set(0);

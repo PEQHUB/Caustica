@@ -18,8 +18,8 @@ import world_common;
 // Parallel LabPBR _s (specular) and _n (normal) atlases, stitched to mirror the block atlas sprite
 // layout (RtBlockMaterials), sampled at the SAME uv as blockAtlas. Read only when the prim is flagged
 // (pr.mat.z for _s, pr.mat.w for _n).
-[[vk::binding(13, 0)]] Sampler2D blockSpecAtlas;
-[[vk::binding(14, 0)]] Sampler2D blockNormalAtlas;
+[[vk::binding(14, 0)]] Sampler2D blockSpecAtlas;
+[[vk::binding(15, 0)]] Sampler2D blockNormalAtlas;
 // Bindless entity textures — a runtime-sized array indexed per-prim (tint.w) by the entity hit path.
 // Slot 0 is a fallback. Parallel per-type LabPBR _n / _s at the same slot.
 [[vk::binding(0, 1)]] Sampler2D entityTex[];

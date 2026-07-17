@@ -15,7 +15,13 @@ import static org.lwjgl.vulkan.VK10.*;
 /** Owns SHaRC's persistent tables and the frames-in-flight-safe BDA frame/stat rings. */
 public final class RtSharcCache {
     public static final int MIN_EXPONENT = 16;
-    public static final int MAX_EXPONENT = 22;
+    /**
+     * 2^28 entries consume exactly 10 GiB (8-byte hash + 16-byte accumulation +
+     * 16-byte resolved data per entry). 2^29 would jump to 20 GiB, which is not
+     * a safe opt-in ceiling even on a 32 GiB RTX 5090 once the rest of the
+     * renderer and driver allocations are included.
+     */
+    public static final int MAX_EXPONENT = 28;
     private static final int RING = 6;
     private static final int STATS_BYTES = 96;
 

@@ -264,11 +264,14 @@ abstract class CompileShaders extends DefaultTask {
 					"-DCAUSTICA_SHARC_DIAGNOSTICS=0"]
 			def diffuseQueryDefines = queryDefines + ["-DCAUSTICA_SHARC_GLOSSY=0",
 					"-DCAUSTICA_SHARC_LIVE_SECONDARY_DIRECT=1"]
+			def primaryQueryDefines = queryDefines + ["-DCAUSTICA_SHARC_PRIMARY_DIFFUSE=1"]
 			def updateDefines = variantDefines + ["-DCAUSTICA_SHARC_QUERY=0", "-DCAUSTICA_SHARC_UPDATE=1",
 					"-DCAUSTICA_SHARC_DIAGNOSTICS=0",
 					"-warnings-disable", "41000"]
 			def diagnosticQueryDefines = variantDefines + ["-DCAUSTICA_SHARC_QUERY=1",
 					"-DCAUSTICA_SHARC_UPDATE=0", "-DCAUSTICA_SHARC_DIAGNOSTICS=1"]
+			def primaryDiagnosticQueryDefines = diagnosticQueryDefines +
+					["-DCAUSTICA_SHARC_PRIMARY_DIFFUSE=1"]
 			def diagnosticUpdateDefines = variantDefines + ["-DCAUSTICA_SHARC_QUERY=0",
 					"-DCAUSTICA_SHARC_UPDATE=1", "-DCAUSTICA_SHARC_DIAGNOSTICS=1",
 					"-warnings-disable", "41000"]
@@ -282,6 +285,10 @@ abstract class CompileShaders extends DefaultTask {
 					diffuseQueryDefines + sharcInclude + ["-capability", "spvShaderInvocationReorderEXT"])
 			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_diffuse_nv.rgen.spv"),
 					diffuseQueryDefines + sharcInclude + ["-capability", "spvShaderInvocationReorderNV"])
+			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_primary.rgen.spv"),
+					primaryQueryDefines + sharcInclude + ["-capability", "spvShaderInvocationReorderEXT"])
+			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_primary_nv.rgen.spv"),
+					primaryQueryDefines + sharcInclude + ["-capability", "spvShaderInvocationReorderNV"])
 			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_update.rgen.spv"),
 					updateDefines + sharcInclude + ["-capability", "spvShaderInvocationReorderEXT"])
 			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_update_nv.rgen.spv"),
@@ -290,6 +297,10 @@ abstract class CompileShaders extends DefaultTask {
 					diagnosticQueryDefines + sharcInclude + ["-capability", "spvShaderInvocationReorderEXT"])
 			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_diagnostic_nv.rgen.spv"),
 					diagnosticQueryDefines + sharcInclude + ["-capability", "spvShaderInvocationReorderNV"])
+			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_primary_diagnostic.rgen.spv"),
+					primaryDiagnosticQueryDefines + sharcInclude + ["-capability", "spvShaderInvocationReorderEXT"])
+			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_primary_diagnostic_nv.rgen.spv"),
+					primaryDiagnosticQueryDefines + sharcInclude + ["-capability", "spvShaderInvocationReorderNV"])
 			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_update_diagnostic.rgen.spv"),
 					diagnosticUpdateDefines + sharcInclude + ["-capability", "spvShaderInvocationReorderEXT"])
 			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_update_diagnostic_nv.rgen.spv"),
@@ -319,6 +330,13 @@ abstract class CompileShaders extends DefaultTask {
 				def raygen = new File(scratchDir, name)
 				if (!raygen.isFile() || raygen.length() > 180_000L) {
 					throw new GradleException("SHaRC diffuse-query raygen complexity budget exceeded: ${name} is "
+							+ "${raygen.isFile() ? raygen.length() : 'missing'} bytes (limit 180000)")
+				}
+			}
+			["world_sharc_primary.rgen.spv", "world_sharc_primary_nv.rgen.spv"].each { name ->
+				def raygen = new File(scratchDir, name)
+				if (!raygen.isFile() || raygen.length() > 180_000L) {
+					throw new GradleException("SHaRC primary-query raygen complexity budget exceeded: ${name} is "
 							+ "${raygen.isFile() ? raygen.length() : 'missing'} bytes (limit 180000)")
 				}
 			}
@@ -732,10 +750,14 @@ def verifyProductionArtifact = tasks.register("verifyProductionArtifact") {
 				"caustica/rt/world_sharc_nv.rgen.spv",
 				"caustica/rt/world_sharc_diffuse.rgen.spv",
 				"caustica/rt/world_sharc_diffuse_nv.rgen.spv",
+				"caustica/rt/world_sharc_primary.rgen.spv",
+				"caustica/rt/world_sharc_primary_nv.rgen.spv",
 				"caustica/rt/world_sharc_update.rgen.spv",
 				"caustica/rt/world_sharc_update_nv.rgen.spv",
 				"caustica/rt/world_sharc_diagnostic.rgen.spv",
 				"caustica/rt/world_sharc_diagnostic_nv.rgen.spv",
+				"caustica/rt/world_sharc_primary_diagnostic.rgen.spv",
+				"caustica/rt/world_sharc_primary_diagnostic_nv.rgen.spv",
 				"caustica/rt/world_sharc_update_diagnostic.rgen.spv",
 				"caustica/rt/world_sharc_update_diagnostic_nv.rgen.spv",
 				"caustica/rt/world_sharc.rchit.spv",

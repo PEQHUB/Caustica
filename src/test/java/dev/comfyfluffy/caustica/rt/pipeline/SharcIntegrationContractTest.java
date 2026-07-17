@@ -70,6 +70,8 @@ final class SharcIntegrationContractTest {
         assertTrue(script.contains("[bool]$OpenCausticaSettings"));
         assertTrue(script.contains("[string]$CausticaCategory"));
         assertTrue(script.contains("[bool]$OpenSharcSettings"));
+        assertTrue(script.contains("[bool]$CloseScreen"));
+        assertTrue(bridge.contains("command.getProperty(\"closeScreen\""));
         assertTrue(script.contains("[bool]$Screenshot"));
     }
 
@@ -84,6 +86,7 @@ final class SharcIntegrationContractTest {
         assertTrue(screen.contains("new ScrollableLayout"));
         assertTrue(screen.contains("Math.clamp((contentWidth + GRID_GAP)"));
         assertTrue(screen.contains("restoreSharcParityDefaults"));
+        assertFalse(screen.contains("new RtSharcOptionsScreen(this, options)"));
         assertTrue(categoryLayout.contains("Deterministic vertical layout"));
         assertTrue(gridLayout.contains("compact responsive grid"));
     }
@@ -128,9 +131,15 @@ final class SharcIntegrationContractTest {
         assertTrue(widgets.contains("public static final int PANEL = 0x00000000"));
         assertTrue(widgets.contains("public static final int PANEL_2 = 0x24000000"));
         assertTrue(config.contains("\"sharc.enabled\", true"));
-        assertTrue(config.contains("\"sharc.cache-exponent\", 20, 16, 22"));
-        assertTrue(config.contains("\"sharc.update-tile-size\", 8, 2, 64"));
-        assertTrue(config.contains("\"sharc.update-max-bounces\", 2, 1, 8"));
+        assertTrue(config.contains("\"sharc.cache-exponent\", 20, 16, 28"));
+        assertTrue(screen.contains("27, 28)"));
+        assertTrue(lang.contains("RTX 5090 Maximum (10 GiB)"));
+        assertTrue(config.contains("\"sharc.scene-scale\", 32.0f, 1.0f, 100.0f"));
+        assertTrue(config.contains("\"sharc.accumulation-frames\", 256, 1, 1024"));
+        assertTrue(config.contains("\"sharc.stale-frames\", 256, 8, 1024"));
+        assertTrue(config.contains("\"sharc.update-tile-size\", 5, 2, 64"));
+        assertTrue(config.contains("\"sharc.update-max-bounces\", 4, 1, 8"));
+        assertTrue(config.contains("\"sharc.min-segment-ratio\", 0.25f, 0.25f, 4.0f"));
         assertTrue(config.contains("\"sharc.glossy-query\", false"));
         assertTrue(config.contains("\"sharc.live-secondary-direct\", true"));
     }
@@ -145,6 +154,30 @@ final class SharcIntegrationContractTest {
         assertTrue(raygen.contains("cachedRadiance + liveDirectLighting"));
         assertTrue(bridge.contains("cacheableDirectLighting / materialDemodulation"));
         assertFalse(bridge.contains("propagatedDirectLighting / materialDemodulation"));
+    }
+
+    @Test
+    void rawPrimaryCacheDebugIsAnIndependentLiveAbcVariant() throws Exception {
+        String raygen = read("shaders/world/world.rgen.slang");
+        String build = read("build.gradle");
+        String composite = read("src/main/java/dev/comfyfluffy/caustica/rt/RtComposite.java");
+        String config = read("src/main/java/dev/comfyfluffy/caustica/CausticaConfig.java");
+        String bridge = read("src/main/java/dev/comfyfluffy/caustica/client/CausticaDebugBridge.java");
+
+        assertTrue(config.contains("\"sharc.primary-diffuse-reuse\", false"));
+        assertTrue(build.contains("-DCAUSTICA_SHARC_PRIMARY_DIFFUSE=1"));
+        assertTrue(build.contains("world_sharc_primary.rgen.spv"));
+        assertTrue(raygen.contains("bool primaryEligible = bounce == 0 && primaryDiffuseEligible"));
+        assertTrue(raygen.contains("metal <= 0.1 && perceptualRough >= 0.5"));
+        assertTrue(raygen.contains("cachedRadiance + liveDirectLighting"));
+        assertTrue(composite.contains("syncSharcPrimaryQueryPipeline"));
+        assertTrue(composite.contains("sharcPrimaryQueryPipeline != null"));
+        assertTrue(composite.contains("RtDlssRr.INSTANCE.requestHistoryReset()"));
+        assertTrue(bridge.contains("setBoolean(command, \"primaryDiffuseReuse\""));
+        assertTrue(bridge.contains("state.setProperty(\"sharcPrimaryDiffuseActive\""));
+        String lang = read("src/main/resources/assets/caustica/lang/en_us.json");
+        assertTrue(lang.contains("Raw Primary Cache Debug"));
+        assertTrue(lang.contains("no spatial interpolation or confidence filter"));
     }
 
     @Test

@@ -3,6 +3,7 @@ param(
     [string]$Action = 'get',
     [string]$Instance = 'C:\Users\Administrator\AppData\Roaming\PrismLauncher\instances\26.2(2)\minecraft',
     [bool]$Sharc,
+    [bool]$DiffusePathGuide,
     [bool]$FrameStats,
     [int]$DebugView,
     [double]$SceneScale,
@@ -16,12 +17,14 @@ param(
     [double]$MinSegmentRatio,
     [bool]$GlossyQuery,
     [bool]$LiveSecondaryDirect,
+    [bool]$PrimaryDiffuseReuse,
     [bool]$SharcDetailedStats,
     [bool]$Fullscreen,
     [bool]$OpenCausticaSettings,
     [ValidateSet('Output','Rendering','SHaRC','Image','View','Diagnostics')]
     [string]$CausticaCategory,
     [bool]$OpenSharcSettings,
+    [bool]$CloseScreen,
     [bool]$Screenshot,
     [int]$Seconds = 20
 )
@@ -59,6 +62,7 @@ New-Item -ItemType Directory -Path $directory -Force | Out-Null
 $sequence = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
 $lines = @("sequence=$sequence")
 if ($PSBoundParameters.ContainsKey('Sharc')) { $lines += "sharc=$($Sharc.ToString().ToLowerInvariant())" }
+if ($PSBoundParameters.ContainsKey('DiffusePathGuide')) { $lines += "diffusePathGuide=$($DiffusePathGuide.ToString().ToLowerInvariant())" }
 if ($PSBoundParameters.ContainsKey('FrameStats')) { $lines += "frameStats=$($FrameStats.ToString().ToLowerInvariant())" }
 if ($PSBoundParameters.ContainsKey('DebugView')) { $lines += "debugView=$DebugView" }
 if ($PSBoundParameters.ContainsKey('SceneScale')) { $lines += "sceneScale=$($SceneScale.ToString([Globalization.CultureInfo]::InvariantCulture))" }
@@ -72,11 +76,13 @@ if ($PSBoundParameters.ContainsKey('UpdateMaxBounces')) { $lines += "updateMaxBo
 if ($PSBoundParameters.ContainsKey('MinSegmentRatio')) { $lines += "minSegmentRatio=$($MinSegmentRatio.ToString([Globalization.CultureInfo]::InvariantCulture))" }
 if ($PSBoundParameters.ContainsKey('GlossyQuery')) { $lines += "glossyQuery=$($GlossyQuery.ToString().ToLowerInvariant())" }
 if ($PSBoundParameters.ContainsKey('LiveSecondaryDirect')) { $lines += "liveSecondaryDirect=$($LiveSecondaryDirect.ToString().ToLowerInvariant())" }
+if ($PSBoundParameters.ContainsKey('PrimaryDiffuseReuse')) { $lines += "primaryDiffuseReuse=$($PrimaryDiffuseReuse.ToString().ToLowerInvariant())" }
 if ($PSBoundParameters.ContainsKey('SharcDetailedStats')) { $lines += "sharcDetailedStats=$($SharcDetailedStats.ToString().ToLowerInvariant())" }
 if ($PSBoundParameters.ContainsKey('Fullscreen')) { $lines += "fullscreen=$($Fullscreen.ToString().ToLowerInvariant())" }
 if ($PSBoundParameters.ContainsKey('OpenCausticaSettings')) { $lines += "openCausticaSettings=$($OpenCausticaSettings.ToString().ToLowerInvariant())" }
 if ($PSBoundParameters.ContainsKey('CausticaCategory')) { $lines += "causticaCategory=$CausticaCategory" }
 if ($PSBoundParameters.ContainsKey('OpenSharcSettings')) { $lines += "openSharcSettings=$($OpenSharcSettings.ToString().ToLowerInvariant())" }
+if ($PSBoundParameters.ContainsKey('CloseScreen')) { $lines += "closeScreen=$($CloseScreen.ToString().ToLowerInvariant())" }
 if ($PSBoundParameters.ContainsKey('Screenshot')) { $lines += "screenshot=$($Screenshot.ToString().ToLowerInvariant())" }
 if ($Action -eq 'reset') { $lines += 'resetCache=true' }
 if ($Action -eq 'shutdown') { $lines += 'shutdown=true' }

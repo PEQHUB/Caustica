@@ -10,8 +10,9 @@ import org.junit.jupiter.api.Test;
 
 final class RtDlssRrResourceContractTest {
     @Test
-    void coreContractIncludesDisocclusionAndCurrentColorBias() {
-        assertEquals(10, RtDlssRr.requiredResourceCount());
+    void diffusePathGuideExtendsTheCoreContractOnlyWhenSelected() {
+        assertEquals(10, RtDlssRr.requiredResourceCount(false));
+        assertEquals(11, RtDlssRr.requiredResourceCount(true));
     }
 
     @Test

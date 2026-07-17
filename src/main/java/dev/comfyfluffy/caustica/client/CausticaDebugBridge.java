@@ -53,6 +53,7 @@ final class CausticaDebugBridge {
         }
         try {
             setBoolean(command, "sharc", CausticaConfig.Rt.Sharc.ENABLED);
+            setBoolean(command, "diffusePathGuide", CausticaConfig.Rt.DlssRr.DIFFUSE_PATH_GUIDE);
             setBoolean(command, "frameStats", CausticaConfig.Rt.FrameStats.ENABLED);
             setInt(command, "debugView", CausticaConfig.Rt.Composite.DEBUG_VIEW);
             setFloat(command, "sceneScale", CausticaConfig.Rt.Sharc.SCENE_SCALE);
@@ -66,7 +67,11 @@ final class CausticaDebugBridge {
             setFloat(command, "minSegmentRatio", CausticaConfig.Rt.Sharc.MIN_SEGMENT_RATIO);
             setBoolean(command, "glossyQuery", CausticaConfig.Rt.Sharc.GLOSSY_QUERY);
             setBoolean(command, "liveSecondaryDirect", CausticaConfig.Rt.Sharc.LIVE_SECONDARY_DIRECT);
+            setBoolean(command, "primaryDiffuseReuse", CausticaConfig.Rt.Sharc.PRIMARY_DIFFUSE_REUSE);
             setBoolean(command, "sharcDetailedStats", CausticaConfig.Rt.Sharc.DETAILED_STATS);
+            if (Boolean.parseBoolean(command.getProperty("closeScreen", "false"))) {
+                client.setScreenAndShow(null);
+            }
             if (Boolean.parseBoolean(command.getProperty("openCausticaSettings", "false"))) {
                 client.setScreenAndShow(new CausticaOptionsScreen(client.gui.screen(), client.options,
                         command.getProperty("causticaCategory")));
@@ -112,6 +117,8 @@ final class CausticaDebugBridge {
         state.setProperty("screenHeight", Integer.toString(client.getWindow().getScreenHeight()));
         state.setProperty("sharcConfigured", CausticaConfig.Rt.Sharc.ENABLED.configuredValue().toString());
         state.setProperty("sharcActive", Boolean.toString(RtComposite.INSTANCE.sharcActive()));
+        state.setProperty("sharcPrimaryDiffuseActive", Boolean.toString(
+                RtComposite.INSTANCE.sharcPrimaryDiffuseActive()));
         state.setProperty("sharcPackaged", Boolean.toString(RtSharcSupport.packaged()));
         state.setProperty("sharcVersion", RtSharcSupport.version());
         state.setProperty("sharcStatus", RtSharcSupport.status());
@@ -129,6 +136,8 @@ final class CausticaDebugBridge {
         state.setProperty("reconstructionGpuNanos", Long.toString(RtComposite.INSTANCE.reconstructionGpuNanos()));
         state.setProperty("disocclusionGpuNanos", Long.toString(RtComposite.INSTANCE.disocclusionGpuNanos()));
         state.setProperty("dlssRrGpuNanos", Long.toString(RtComposite.INSTANCE.dlssRrGpuNanos()));
+        state.setProperty("diffusePathGuide", Boolean.toString(
+                CausticaConfig.Rt.DlssRr.DIFFUSE_PATH_GUIDE.value()));
         state.setProperty("exposureGpuNanos", Long.toString(RtComposite.INSTANCE.exposureGpuNanos()));
         state.setProperty("displayGpuNanos", Long.toString(RtComposite.INSTANCE.displayGpuNanos()));
         state.setProperty("copyGpuNanos", Long.toString(RtComposite.INSTANCE.copyGpuNanos()));
@@ -154,6 +163,8 @@ final class CausticaDebugBridge {
         state.setProperty("glossyQuery", Boolean.toString(CausticaConfig.Rt.Sharc.GLOSSY_QUERY.value()));
         state.setProperty("liveSecondaryDirect", Boolean.toString(
                 CausticaConfig.Rt.Sharc.LIVE_SECONDARY_DIRECT.value()));
+        state.setProperty("primaryDiffuseReuse", Boolean.toString(
+                CausticaConfig.Rt.Sharc.PRIMARY_DIFFUSE_REUSE.value()));
         state.setProperty("sharcDetailedStats", Boolean.toString(CausticaConfig.Rt.Sharc.DETAILED_STATS.value()));
         state.setProperty("timestampMillis", Long.toString(System.currentTimeMillis()));
         try {

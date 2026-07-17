@@ -158,12 +158,22 @@ public final class RtDeviceBringup {
                 : "world_sharc_diffuse.rgen.spv";
     }
 
+    public static String sharcPrimaryQueryRaygenShader() {
+        return serBackend == SerBackend.NV ? "world_sharc_primary_nv.rgen.spv"
+                : "world_sharc_primary.rgen.spv";
+    }
+
     public static String sharcUpdateRaygenShader() {
         return serBackend == SerBackend.NV ? "world_sharc_update_nv.rgen.spv" : "world_sharc_update.rgen.spv";
     }
 
     public static String sharcDiagnosticQueryRaygenShader() {
         return serBackend == SerBackend.NV ? "world_sharc_diagnostic_nv.rgen.spv" : "world_sharc_diagnostic.rgen.spv";
+    }
+
+    public static String sharcPrimaryDiagnosticQueryRaygenShader() {
+        return serBackend == SerBackend.NV ? "world_sharc_primary_diagnostic_nv.rgen.spv"
+                : "world_sharc_primary_diagnostic.rgen.spv";
     }
 
     public static String sharcDiagnosticUpdateRaygenShader() {

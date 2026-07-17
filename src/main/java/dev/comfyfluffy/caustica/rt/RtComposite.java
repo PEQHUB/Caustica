@@ -99,6 +99,11 @@ public final class RtComposite {
                 && sharcQueryPipeline != null && sharcDiffuseQueryPipeline != null;
     }
 
+    public boolean sharcPrimaryDiffuseActive() {
+        return sharcActive() && CausticaConfig.Rt.Sharc.PRIMARY_DIFFUSE_REUSE.value()
+                && sharcPrimaryQueryPipeline != null;
+    }
+
     public void requestSharcReset(String reason) {
         if (sharcCache != null) sharcCache.requestReset(reason);
     }
@@ -140,11 +145,12 @@ public final class RtComposite {
     // Real inline push constants (fast constant-bank reads), separate from the WorldPush BDA ring above.
     // tableAddr/entityTableAddr/frameIndex are duplicated so hit shaders skip a global-memory dereference;
     // PushAddrData is generated from the same Slang module and owns this second ABI as well.
-    private static final int GUIDE_COUNT = 10; // six RR guides, offline mean + pilot ping-pong, animated responsivity
+    private static final int GUIDE_COUNT = 11; // RR guides, offline mean/pilots, animated mask, diffuse path guide
     private static final int FRAME_FLAG_RR_GUIDES = 1 << 5;
     private static final int FRAME_FLAG_FG_GUIDES = 1 << 6;
     private static final int FRAME_FLAG_OFFLINE_GROUND_TRUTH = 1 << 7;
     private static final int FRAME_FLAG_OFFLINE_CALIBRATING = 1 << 8;
+    private static final int FRAME_FLAG_DIFFUSE_PATH_GUIDE = 1 << 9;
     private static final double TEMPORAL_TELEPORT_DISTANCE_SQ = 64.0 * 64.0;
     private static final long TEMPORAL_GAP_NANOS = 500_000_000L;
     // Frames a retired per-frame TLAS must outlive before it's freed (> frames-in-flight); matches
@@ -226,8 +232,10 @@ public final class RtComposite {
     private RtPipeline sharcUpdatePipeline;
     private RtPipeline sharcQueryPipeline;
     private RtPipeline sharcDiffuseQueryPipeline;
+    private RtPipeline sharcPrimaryQueryPipeline;
     private RtPipeline sharcDiagnosticUpdatePipeline;
     private RtPipeline sharcDiagnosticQueryPipeline;
+    private RtPipeline sharcPrimaryDiagnosticQueryPipeline;
     private RtSharcResolvePipeline sharcResolvePipeline;
     private RtSharcCache sharcCache;
     private RtTraceGpuProfiler traceGpuProfiler;
@@ -237,6 +245,8 @@ public final class RtComposite {
     private float sharcSceneScale = Float.NaN;
     private String sharcCreationResetReason = "enabled";
     private Object sharcWorldIdentity;
+    private boolean sharcPrimaryModeKnown;
+    private boolean lastSharcPrimaryMode;
     // Set at the HEAD of Minecraft.reloadResourcePacks() (mixin): a resource reload recreates the block
     // atlas + entity textures. We tear down the world pipeline there (drops all descriptor references) and
     // rebuild it once the NEW atlas is in place — detected by the atlas view handle changing away from
@@ -302,10 +312,13 @@ public final class RtComposite {
     private RtImage offlinePilotA;
     private RtImage offlinePilotB;
     private RtImage gAnimatedGuide;
+    private RtImage gDiffuseRayDirectionHitDistance;
     private RtImage gDepthHistoryA;
     private RtImage gDepthHistoryB;
     private RtImage gDisocclusion;
     private RtImage gBiasCurrentColor;
+    private boolean diffusePathGuideKnown;
+    private boolean lastDiffusePathGuide;
     private RtDlssdDisocclusionPipeline dlssdDisocclusionPipeline;
     // Display-res RT image the display mapper reads: DLSS-RR writes it (render -> display denoise+upscale), or a
     // linear blit of `output` fills it when RR is off/unavailable (the no-RR reference / fallback).
@@ -624,6 +637,7 @@ public final class RtComposite {
             boolean offlineGroundTruth = OfflineGroundTruth.INSTANCE.active();
             RtPipeline active = offlineGroundTruth ? ensureOfflineWorld(ctx) : ensureWorld(ctx);
             syncSharcResources(ctx, !offlineGroundTruth);
+            syncSharcPrimaryQueryPipeline(ctx, !offlineGroundTruth);
             syncSharcDiagnosticPipelines(ctx, !offlineGroundTruth);
             syncTraceGpuProfiler(ctx);
             refreshMaterialBindingsIfNeeded(ctx);
@@ -779,47 +793,94 @@ public final class RtComposite {
         }
     }
 
+    /** Lazily creates C-mode so baseline and secondary-only SHaRC pay no pipeline allocation or setup cost. */
+    private void syncSharcPrimaryQueryPipeline(RtContext ctx, boolean allowed) {
+        boolean want = allowed && sharcCache != null && CausticaConfig.Rt.Sharc.PRIMARY_DIFFUSE_REUSE.value();
+        if (!want || sharcPrimaryQueryPipeline != null) return;
+        try {
+            sharcPrimaryQueryPipeline = RtPipeline.create(ctx, RtDeviceBringup.sharcPrimaryQueryRaygenShader(),
+                    new String[]{"world_sharc.rmiss.spv", "world_sharc_guide.rmiss.spv"},
+                    "world_sharc.rchit.spv", "world_sharc.rahit.spv", SharcPushAddrData.BYTE_SIZE,
+                    true, GUIDE_COUNT, bindlessTextureCapacity, true, true);
+            if (output != null) {
+                sharcPrimaryQueryPipeline.setStorageImage(output.view);
+                bindGuideImages();
+            }
+            bindPipelineTextures(ctx, sharcPrimaryQueryPipeline);
+            RtDlssRr.INSTANCE.requestHistoryReset();
+            CausticaMod.LOGGER.info("SHaRC primary-diffuse reuse pipeline ready");
+        } catch (Throwable t) {
+            if (sharcPrimaryQueryPipeline != null) sharcPrimaryQueryPipeline.destroy();
+            sharcPrimaryQueryPipeline = null;
+            CausticaConfig.Rt.Sharc.PRIMARY_DIFFUSE_REUSE.set(false);
+            RtDlssRr.INSTANCE.requestHistoryReset();
+            CausticaMod.LOGGER.error("SHaRC primary-diffuse reuse setup failed; retaining secondary-only SHaRC", t);
+        }
+    }
+
     /** Diagnostic SHaRC shaders are large and never enter the normal render path; instantiate on demand. */
     private void syncSharcDiagnosticPipelines(RtContext ctx, boolean allowed) {
         int view = debugView();
         boolean want = allowed && sharcCache != null
                 && (CausticaConfig.Rt.Sharc.DETAILED_STATS.value() || (view >= 9 && view <= 16));
         if (!want) {
-            if (sharcDiagnosticUpdatePipeline != null || sharcDiagnosticQueryPipeline != null) {
+            if (sharcDiagnosticUpdatePipeline != null || sharcDiagnosticQueryPipeline != null
+                    || sharcPrimaryDiagnosticQueryPipeline != null) {
                 ctx.waitIdle("disable SHaRC diagnostics");
                 if (sharcDiagnosticUpdatePipeline != null) sharcDiagnosticUpdatePipeline.destroy();
                 if (sharcDiagnosticQueryPipeline != null) sharcDiagnosticQueryPipeline.destroy();
+                if (sharcPrimaryDiagnosticQueryPipeline != null) sharcPrimaryDiagnosticQueryPipeline.destroy();
                 sharcDiagnosticUpdatePipeline = null;
                 sharcDiagnosticQueryPipeline = null;
+                sharcPrimaryDiagnosticQueryPipeline = null;
             }
             return;
         }
-        if (sharcDiagnosticUpdatePipeline != null && sharcDiagnosticQueryPipeline != null) return;
-        sharcDiagnosticUpdatePipeline = RtPipeline.create(ctx, RtDeviceBringup.sharcDiagnosticUpdateRaygenShader(),
-                new String[]{"world_sharc.rmiss.spv", "world_sharc_guide.rmiss.spv"},
-                "world_sharc.rchit.spv", "world_sharc.rahit.spv", SharcPushAddrData.BYTE_SIZE,
-                true, GUIDE_COUNT, bindlessTextureCapacity, true, true);
-        sharcDiagnosticQueryPipeline = RtPipeline.create(ctx, RtDeviceBringup.sharcDiagnosticQueryRaygenShader(),
-                new String[]{"world_sharc.rmiss.spv", "world_sharc_guide.rmiss.spv"},
-                "world_sharc.rchit.spv", "world_sharc.rahit.spv", SharcPushAddrData.BYTE_SIZE,
-                true, GUIDE_COUNT, bindlessTextureCapacity, true, true);
+        if (sharcDiagnosticUpdatePipeline == null) {
+            sharcDiagnosticUpdatePipeline = RtPipeline.create(ctx, RtDeviceBringup.sharcDiagnosticUpdateRaygenShader(),
+                    new String[]{"world_sharc.rmiss.spv", "world_sharc_guide.rmiss.spv"},
+                    "world_sharc.rchit.spv", "world_sharc.rahit.spv", SharcPushAddrData.BYTE_SIZE,
+                    true, GUIDE_COUNT, bindlessTextureCapacity, true, true);
+        }
+        if (sharcDiagnosticQueryPipeline == null) {
+            sharcDiagnosticQueryPipeline = RtPipeline.create(ctx, RtDeviceBringup.sharcDiagnosticQueryRaygenShader(),
+                    new String[]{"world_sharc.rmiss.spv", "world_sharc_guide.rmiss.spv"},
+                    "world_sharc.rchit.spv", "world_sharc.rahit.spv", SharcPushAddrData.BYTE_SIZE,
+                    true, GUIDE_COUNT, bindlessTextureCapacity, true, true);
+        }
+        if (CausticaConfig.Rt.Sharc.PRIMARY_DIFFUSE_REUSE.value()
+                && sharcPrimaryDiagnosticQueryPipeline == null) {
+            sharcPrimaryDiagnosticQueryPipeline = RtPipeline.create(ctx,
+                    RtDeviceBringup.sharcPrimaryDiagnosticQueryRaygenShader(),
+                    new String[]{"world_sharc.rmiss.spv", "world_sharc_guide.rmiss.spv"},
+                    "world_sharc.rchit.spv", "world_sharc.rahit.spv", SharcPushAddrData.BYTE_SIZE,
+                    true, GUIDE_COUNT, bindlessTextureCapacity, true, true);
+        }
         if (output != null) {
             sharcDiagnosticUpdatePipeline.setStorageImage(output.view);
             sharcDiagnosticQueryPipeline.setStorageImage(output.view);
+            if (sharcPrimaryDiagnosticQueryPipeline != null) {
+                sharcPrimaryDiagnosticQueryPipeline.setStorageImage(output.view);
+            }
             bindGuideImages();
         }
         bindPipelineTextures(ctx, sharcDiagnosticUpdatePipeline);
         bindPipelineTextures(ctx, sharcDiagnosticQueryPipeline);
+        if (sharcPrimaryDiagnosticQueryPipeline != null) {
+            bindPipelineTextures(ctx, sharcPrimaryDiagnosticQueryPipeline);
+        }
     }
 
     private RtPipeline[] worldPipelines() {
-        return new RtPipeline[]{worldPipeline, offlinePipeline, sharcUpdatePipeline, sharcQueryPipeline, sharcDiffuseQueryPipeline,
-                sharcDiagnosticUpdatePipeline, sharcDiagnosticQueryPipeline};
+        return new RtPipeline[]{worldPipeline, offlinePipeline, sharcUpdatePipeline, sharcQueryPipeline,
+                sharcDiffuseQueryPipeline, sharcPrimaryQueryPipeline, sharcDiagnosticUpdatePipeline,
+                sharcDiagnosticQueryPipeline, sharcPrimaryDiagnosticQueryPipeline};
     }
 
     private RtPipeline[] onlinePipelines() {
         return new RtPipeline[]{worldPipeline, sharcUpdatePipeline, sharcQueryPipeline, sharcDiffuseQueryPipeline,
-                sharcDiagnosticUpdatePipeline, sharcDiagnosticQueryPipeline};
+                sharcPrimaryQueryPipeline, sharcDiagnosticUpdatePipeline, sharcDiagnosticQueryPipeline,
+                sharcPrimaryDiagnosticQueryPipeline};
     }
 
     private void syncTraceGpuProfiler(RtContext ctx) {
@@ -848,19 +909,24 @@ public final class RtComposite {
         if (sharcUpdatePipeline != null) sharcUpdatePipeline.destroy();
         if (sharcQueryPipeline != null) sharcQueryPipeline.destroy();
         if (sharcDiffuseQueryPipeline != null) sharcDiffuseQueryPipeline.destroy();
+        if (sharcPrimaryQueryPipeline != null) sharcPrimaryQueryPipeline.destroy();
         if (sharcDiagnosticUpdatePipeline != null) sharcDiagnosticUpdatePipeline.destroy();
         if (sharcDiagnosticQueryPipeline != null) sharcDiagnosticQueryPipeline.destroy();
+        if (sharcPrimaryDiagnosticQueryPipeline != null) sharcPrimaryDiagnosticQueryPipeline.destroy();
         if (sharcResolvePipeline != null) sharcResolvePipeline.destroy();
         if (sharcCache != null) sharcCache.destroy();
         sharcUpdatePipeline = null;
         sharcQueryPipeline = null;
         sharcDiffuseQueryPipeline = null;
+        sharcPrimaryQueryPipeline = null;
         sharcDiagnosticUpdatePipeline = null;
         sharcDiagnosticQueryPipeline = null;
+        sharcPrimaryDiagnosticQueryPipeline = null;
         sharcResolvePipeline = null;
         sharcCache = null;
         sharcTerrainX = sharcTerrainY = sharcTerrainZ = Integer.MIN_VALUE;
         sharcWorldIdentity = null;
+        sharcPrimaryModeKnown = false;
     }
 
     private void refreshPipelineShapeIfNeeded(RtContext ctx) {
@@ -1010,6 +1076,7 @@ public final class RtComposite {
                 pipeline.setExtraStorageImage(4, gSpecAlbedo.view);
                 pipeline.setExtraStorageImage(5, gSpecMotion.view);
                 pipeline.setExtraStorageImage(7, gAnimatedGuide.view);
+                pipeline.setExtraStorageImage(10, gDiffuseRayDirectionHitDistance.view);
             }
         }
         if (offlinePipeline != null && groundTruthAccum != null
@@ -1052,6 +1119,10 @@ public final class RtComposite {
         if (gAnimatedGuide != null) {
             gAnimatedGuide.destroy();
             gAnimatedGuide = null;
+        }
+        if (gDiffuseRayDirectionHitDistance != null) {
+            gDiffuseRayDirectionHitDistance.destroy();
+            gDiffuseRayDirectionHitDistance = null;
         }
         if (gDepthHistoryA != null) {
             gDepthHistoryA.destroy();
@@ -1190,6 +1261,8 @@ public final class RtComposite {
         }
         gAnimatedGuide = ctx.createStorageImage(rrGuideW, rrGuideH, VK10.VK_FORMAT_R16_SFLOAT,
                 "DLSSD animated-surface responsivity");
+        gDiffuseRayDirectionHitDistance = ctx.createStorageImage(rrGuideW, rrGuideH,
+                VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "DLSSD diffuse ray direction + hit distance");
         gDepthHistoryA = ctx.createStorageImage(rrGuideW, rrGuideH, VK10.VK_FORMAT_R32_SFLOAT,
                 "DLSSD depth history A");
         gDepthHistoryB = ctx.createStorageImage(rrGuideW, rrGuideH, VK10.VK_FORMAT_R32_SFLOAT,
@@ -1306,6 +1379,12 @@ public final class RtComposite {
             }
             boolean rrPath = !offlineGroundTruth && renderSizeRrEnabled
                     && RtDlssRr.INSTANCE.isOperational() && worldDebugView == 0;
+            boolean diffusePathGuide = rrPath && CausticaConfig.Rt.DlssRr.DIFFUSE_PATH_GUIDE.value();
+            if (diffusePathGuideKnown && diffusePathGuide != lastDiffusePathGuide) {
+                RtDlssRr.INSTANCE.requestHistoryReset();
+            }
+            diffusePathGuideKnown = true;
+            lastDiffusePathGuide = diffusePathGuide;
             if (rrPath && !rrProducedPreviousFrame) {
                 RtDlssRr.INSTANCE.requestHistoryReset();
             }
@@ -1354,6 +1433,9 @@ public final class RtComposite {
             }
             if (rrPath) {
                 flags |= FRAME_FLAG_RR_GUIDES;
+                if (diffusePathGuide) {
+                    flags |= FRAME_FLAG_DIFFUSE_PATH_GUIDE;
+                }
             }
             if (renderSizeFgGuides && RtDlssFg.requested()) {
                 flags |= FRAME_FLAG_FG_GUIDES;
@@ -1517,8 +1599,18 @@ public final class RtComposite {
                         (int) frameCounter, sharcFrame.address()).write(sharcPush);
                 boolean sharcDiagnostics = CausticaConfig.Rt.Sharc.DETAILED_STATS.value()
                         || (worldDebugView >= 9 && worldDebugView <= 16);
+                boolean sharcPrimaryMode = CausticaConfig.Rt.Sharc.PRIMARY_DIFFUSE_REUSE.value()
+                        && sharcPrimaryQueryPipeline != null;
+                if (sharcPrimaryModeKnown && sharcPrimaryMode != lastSharcPrimaryMode) {
+                    RtDlssRr.INSTANCE.requestHistoryReset();
+                }
+                sharcPrimaryModeKnown = true;
+                lastSharcPrimaryMode = sharcPrimaryMode;
                 RtPipeline updatePipeline = sharcDiagnostics ? sharcDiagnosticUpdatePipeline : sharcUpdatePipeline;
-                RtPipeline queryPipeline = sharcDiagnostics ? sharcDiagnosticQueryPipeline
+                RtPipeline queryPipeline = sharcPrimaryMode
+                        ? sharcDiagnostics && sharcPrimaryDiagnosticQueryPipeline != null
+                                ? sharcPrimaryDiagnosticQueryPipeline : sharcPrimaryQueryPipeline
+                        : sharcDiagnostics ? sharcDiagnosticQueryPipeline
                         : CausticaConfig.Rt.Sharc.GLOSSY_QUERY.value()
                         || !CausticaConfig.Rt.Sharc.LIVE_SECONDARY_DIRECT.value()
                         ? sharcQueryPipeline : sharcDiffuseQueryPipeline;
@@ -1564,7 +1656,8 @@ public final class RtComposite {
                 try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "DLSS-RR evaluate");
                      RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.dlssRr")) {
                     rrDone = RtDlssRr.INSTANCE.evaluate(cmd.address(), output, gDepth, gMotion, gAlbedo,
-                            gSpecAlbedo, gNormal, gSpecMotion, gDisocclusion, gBiasCurrentColor, rrOutput,
+                            gSpecAlbedo, gNormal, gSpecMotion, gDisocclusion, gBiasCurrentColor,
+                            gDiffuseRayDirectionHitDistance, rrOutput,
                             renderW, renderH, displayW, displayH,
                             jitterX, jitterY, frameProjection, mvCurProjView,
                             fgPreviousViewProjectionValid ? fgPreviousViewProjection : mvCurProjView,
