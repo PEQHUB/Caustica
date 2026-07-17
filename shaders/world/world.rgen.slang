@@ -329,6 +329,10 @@ static const float GLASS_GUIDE_ROUGH = 0.04;
 // restart the ray past that neighbour and see through it; this lands the ray inside the gap so the
 // neighbour is still hit, while still clearing the glass surface to avoid self-intersection.
 static const float GLASS_TRANSMIT_BIAS = 1.0e-4;
+// Clear interfaces are delta events, not indirect-light scattering bounces. Keep a separate hard cap so
+// stacked water and glass do not consume the user-visible path-bounce budget, while malformed geometry
+// still cannot loop forever.
+static const int MAX_OPTICAL_INTERFACE_DEPTH = 16;
 
 // Ray-cone texture LOD: raygen tracks a one-pixel footprint along the path, and closest-hit converts it
 // to texture mip levels from the local UV/world-space scale. Diffuse/glossy bounces widen the cone so
@@ -1124,7 +1128,7 @@ void opticalGuideHit(float3 surfacePos, float3 transmittedDir, float3 surfaceNor
     // Water can cross several adjacent cells before reaching the visible opaque destination. A two-hit walk
     // incorrectly accepted the next water face as the destination and exported a neutral white silhouette.
     // Keep glass at a single required-exit contract, then walk a bounded chain of water interfaces.
-    for (uint crossing = 0u; crossing < 8u; crossing++) {
+    for (uint crossing = 0u; crossing < uint(MAX_OPTICAL_INTERFACE_DEPTH); crossing++) {
         payload.hitT = -1.0;
         payloadSetTraceState(false, rayConeWidth, rayConeSpread);
         traceGuide(RAY_FLAG_NONE, ro, RAY_TMIN, direction, 10000.0);
@@ -1203,6 +1207,8 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
     int maxBounces = int(pc.maxBounces);
     int maxMirrorDepth = int(clamp(pc.psrMaxMirrors, 1u, PSR_MAX_CONFIGURED_MIRRORS));
     int exactMirrorDepth = 0;
+    int scatteringDepth = 0;
+    int opticalInterfaceDepth = 0;
     int rrStart = maxBounces <= 3 ? 1 : 2;
     bool pbr = (pc.flags & 2u) != 0u; // GGX BRDF + material guides, else Lambertian fallback
     // Start submerged if the camera is in water so the first segment gets the right medium orientation
@@ -1217,8 +1223,9 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
     // diffuse-sampled continuation rays — those are already covered by the sun NEE, so the tiny disc
     // would be a double-counted firefly. Reset true on every specular/water bounce, false on a diffuse one.
     bool showCelestial = true;
-    for (int bounce = 0; bounce <= max(maxBounces, maxMirrorDepth); bounce++) {
-        beginBounce(sampler, uint(bounce));
+    int maxPathSegments = maxBounces + maxMirrorDepth + MAX_OPTICAL_INTERFACE_DEPTH + 1;
+    for (int segment = 0; segment < maxPathSegments; segment++) {
+        beginBounce(sampler, uint(segment));
         payload.hitT = -1.0;
         payloadSetTraceState(showCelestial, rayConeWidth, rayConeSpread);
         // Radiance SBT records run any-hit only for true alpha cutout. Translucent/water go straight to
@@ -1231,13 +1238,13 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
         // first-person-only primary mask from their first segment as well.
         traceRadiance(CULL_SECONDARY, ro, 0.0, rd, 10000.0);
 #else
-        traceRadiance(bounce == 0 ? CULL_PRIMARY : CULL_SECONDARY, ro, 0.0, rd, 10000.0);
+        traceRadiance(segment == 0 ? CULL_PRIMARY : CULL_SECONDARY, ro, 0.0, rd, 10000.0);
 #endif
 
         // The direction is captured when bounce 0 spawns its diffuse continuation. This invocation is
         // therefore that ray's first world-space hit; record its distance before any material branch can
         // terminate, replace, or continue the path. A miss keeps distance zero.
-        if (captureGuides && bounce == 1 && gv_diffuseGuidePending) {
+        if (captureGuides && segment == 1 && gv_diffuseGuidePending) {
             gv_diffuseRayDirectionHitDistance.w = max(payload.hitT, 0.0);
             gv_diffuseGuidePending = false;
         }
@@ -1246,7 +1253,7 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
             // world.rmiss writes sky radiance (gradient + sun/moon disc + stars) into payload.albedo. The
             // packed show-celestial flag decides whether this path segment may see the bright disc.
             float3 sky = payload.albedo;
-            if (captureGuides && bounce == 0) { // primary ray hit sky: guides describe "no surface"
+            if (captureGuides && segment == 0) { // primary ray hit sky: guides describe "no surface"
                 gv_normal = float3(0.0, 0.0, 0.0);
                 // Flat mid-grey albedo guide for sky (NOT the bright sky radiance): demodulating DLSS-RR
                 // by the huge sun-disc radiance rings/artifacts around the sun. A constant albedo keeps
@@ -1295,7 +1302,7 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
             sharcPathEligible = false;
 #endif
             float opacity = clamp(payloadSss(), 0.0, 1.0);
-            if (captureGuides && bounce == 0) {
+            if (captureGuides && segment == 0) {
                 gv_normal = n;
                 gv_rough = payloadRoughness();
                 gv_specAlb = pbr ? payload.f0 : float3(0.0, 0.0, 0.0);
@@ -1309,6 +1316,8 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
                 break;
             }
             if (opacity < 1.0 && rndf(sampler) >= opacity) {
+                if (opticalInterfaceDepth >= MAX_OPTICAL_INTERFACE_DEPTH) break;
+                ++opticalInterfaceDepth;
                 ro = hitPos - n * GLASS_TRANSMIT_BIAS;
                 continue;
             }
@@ -1327,7 +1336,7 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
 #if CAUSTICA_SHARC_QUERY
             sharcPathEligible = false;
 #endif
-            if (bounce >= maxBounces && !(captureGuides && bounce == 0)) {
+            if (opticalInterfaceDepth >= MAX_OPTICAL_INTERFACE_DEPTH) {
                 break;
             }
             float3 glassTint = payload.albedo;
@@ -1336,7 +1345,8 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
 
             // A pane model has an entry and exit shell. The entry is the effective sheet; a later exit is
             // crossed without a second tint/Fresnel event. Keep a primary exit for a camera starting inside.
-            if (thinPane && !entering && bounce > 0) {
+            if (thinPane && !entering && segment > 0) {
+                ++opticalInterfaceDepth;
                 ro = hitPos - n * GLASS_TRANSMIT_BIAS;
                 continue;
             }
@@ -1363,7 +1373,7 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
             if (!thinPane && !entering) {
                 throughput *= glassTint;
             }
-            if (captureGuides && bounce == 0) { // primary glass hit: feed RR a smooth dielectric specular surface
+            if (captureGuides && segment == 0) { // primary glass hit: feed RR a smooth dielectric specular surface
                 gv_normal = n;
                 gv_rough = opticalClass == OPTICAL_SOLID_ICE ? 0.12 : GLASS_GUIDE_ROUGH;
                 gv_specAlb = float3(F, F, F);
@@ -1380,7 +1390,7 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
                     gv_opticalExitEta = thinPane ? 1.0 : materialIor / outsideIor;
                 }
             }
-            if (primaryOnly || bounce >= maxBounces) {
+            if (primaryOnly) {
                 break;
             }
             if (rndf(sampler) < F) {
@@ -1393,14 +1403,8 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
                 rd = transmittedDir;
                 ro = hitPos - n * GLASS_TRANSMIT_BIAS; // cross to the far side without overshooting a close neighbour
             }
+            ++opticalInterfaceDepth;
             showCelestial = true;                  // specular interface: the continuation ray may see the disc
-            if (bounce >= rrStart) {
-                float q = clamp(max(throughput.r, max(throughput.g, throughput.b)), 0.02, 1.0);
-                if (rndf(sampler) > q) {
-                    break;
-                }
-                throughput /= q;
-            }
             continue;
         }
 
@@ -1449,19 +1453,20 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
                 }
             }
 
-            if (bounce >= maxBounces) {
+            if (scatteringDepth >= maxBounces) {
                 break;
             }
             throughput *= albedo;
             ro = hitPos + n * SURF_BIAS;
             rd = cosineDir(n, sampler);
-            if (captureGuides && bounce == 0
+            if (captureGuides && segment == 0
                     && (pc.flags & FRAME_FLAG_DIFFUSE_PATH_GUIDE) != 0u) {
                 gv_diffuseRayDirectionHitDistance = float4(rd, 0.0);
                 gv_diffuseGuidePending = true;
             }
             rayConeSpread = max(rayConeSpread, RAY_CONE_DIFFUSE_SPREAD);
             showCelestial = false; // diffuse receiver: direct sun/moon was handled by NEE above
+            ++scatteringDepth;
             continue;
         }
 
@@ -1479,7 +1484,7 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
 #if CAUSTICA_SHARC_QUERY
             sharcPathEligible = false;
 #endif
-            if (bounce >= maxBounces && !(captureGuides && bounce == 0)) {
+            if (opticalInterfaceDepth >= MAX_OPTICAL_INTERFACE_DEPTH) {
                 break;
             }
             // Guide probes reuse the module-level payload. Preserve this interface before a refracted
@@ -1512,7 +1517,7 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
             float etaT = inWater ? 1.0 : WATER_IOR;
             float F = fresnelDielectric(cosI, etaI, etaT);
             float3 transmittedDir = refract(rd, n, etaI / etaT);
-            if (captureGuides && bounce == 0) { // primary water hit: feed RR a smooth dielectric specular surface
+            if (captureGuides && segment == 0) { // primary water hit: feed RR a smooth dielectric specular surface
                 gv_normal = n;
                 gv_rough = WATER_GUIDE_ROUGH;
                 gv_albedo = float3(0.0, 0.0, 0.0);
@@ -1529,7 +1534,7 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
                 }
                 if (waterWaves) gv_animatedGuide = 1.0;
             }
-            if (primaryOnly || bounce >= maxBounces) {
+            if (primaryOnly) {
                 break;
             }
             waterExt = waterExtinction(surfaceWaterTint);
@@ -1543,16 +1548,10 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
                 // stray/missing face corrupting the medium for the rest of the path (see PAYLOAD_WATER_ENTERING).
                 inWater = surfaceWaterEntering;
             }
+            ++opticalInterfaceDepth;
             // Specular interface (mirror reflect / clear refract): the continuation ray should see the
             // sun/moon disc directly — no NEE happened here to double-count it.
             showCelestial = true;
-            if (bounce >= rrStart) {
-                float q = clamp(max(throughput.r, max(throughput.g, throughput.b)), 0.02, 1.0);
-                if (rndf(sampler) > q) {
-                    break;
-                }
-                throughput /= q;
-            }
             continue;
         }
 
@@ -1571,7 +1570,7 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
         // F0 comes from the chit: dielectric 0.04, a LabPBR custom/metal F0, or albedo for metals.
         float3 F0 = pbr ? payload.f0 : lerp(float3(0.04, 0.04, 0.04), albedo, metal);
 
-        if (captureGuides && bounce == 0) { // primary-visibility surface: capture the denoiser guide buffers
+        if (captureGuides && segment == 0) { // primary-visibility surface: capture the denoiser guide buffers
             gv_normal = n;
             gv_albedo = pbr ? diffAlb : albedo;  // RR diffuse-albedo demodulation target
             gv_rough = perceptualRough;
@@ -1606,7 +1605,7 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
             rd = reflect(rd, n);
             ++exactMirrorDepth;
             showCelestial = true;
-            if (bounce >= rrStart) {
+            if (scatteringDepth >= rrStart) {
                 float q = clamp(max(throughput.r, max(throughput.g, throughput.b)), 0.02, 1.0);
                 if (rndf(sampler) > q) break;
                 throughput /= q;
@@ -1629,7 +1628,7 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
 #if !CAUSTICA_SHARC_LIVE_SECONDARY_DIRECT
         if ((sharcFrame.queryFlags & 2u) == 0u) {
             float3 cachedRadiance;
-            if (causticaTrySharcQuery(bounce, hitPos, albedo, materialEmissive,
+            if (causticaTrySharcQuery(scatteringDepth, hitPos, albedo, materialEmissive,
                     sharcPathEligible, sharcPreviousLobeDiffuse, sharcPreviousGlossyAlpha,
                     false,
                     cachedRadiance)) {
@@ -1692,7 +1691,7 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
         // through them toward the light source). Shadow ray fires from the back face to avoid
         // self-occlusion. cosT = dot(lightDir, rd): rd tracks the ray toward the sun when the sun is
         // behind the slab, giving cosT ≈ 1 → forward-scatter peak.
-        if (sss > 0.0 && bounce <= MAX_SSS_BOUNCE) {
+        if (sss > 0.0 && scatteringDepth <= MAX_SSS_BOUNCE) {
             float backNdl = max(0.0, dot(-n, lightDir));
             if (backNdl > 0.0) {
                 float3 visB = visibility(hitPos - n * SURF_BIAS, lightDir, 10000.0);
@@ -1719,7 +1718,7 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
 #else
         if ((sharcFrame.queryFlags & 2u) != 0u
 #if CAUSTICA_SHARC_PRIMARY_DIFFUSE
-                || bounce == 0
+                || segment == 0
 #endif
         ) {
 #endif
@@ -1729,7 +1728,7 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
             // SSS and authored emission remain live, and misses fall through to the baseline continuation.
             bool primaryDiffuseEligible = metal <= 0.1 && perceptualRough >= 0.5
                     && luminance(diffAlb) > 1.0e-4;
-            if (causticaTrySharcQuery(bounce, hitPos, albedo, materialEmissive,
+            if (causticaTrySharcQuery(scatteringDepth, hitPos, albedo, materialEmissive,
                     sharcPathEligible, sharcPreviousLobeDiffuse, sharcPreviousGlossyAlpha,
                     primaryDiffuseEligible,
                     cachedRadiance)) {
@@ -1783,7 +1782,7 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
 
         // This vertex's emission and direct lighting are complete. At the depth limit there is no next
         // ray, so sampling a continuation lobe and running roulette cannot contribute to the result.
-        if (bounce >= maxBounces) {
+        if (scatteringDepth >= maxBounces) {
             break;
         }
 
@@ -1832,7 +1831,7 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
                         / max(diffusePdf * (1.0 - ps), 1.0e-7);
                 ro = p;
                 rd = l;
-                if (captureGuides && bounce == 0
+                if (captureGuides && segment == 0
                         && (pc.flags & FRAME_FLAG_DIFFUSE_PATH_GUIDE) != 0u) {
                     gv_diffuseRayDirectionHitDistance = float4(rd, 0.0);
                     gv_diffuseGuidePending = true;
@@ -1849,7 +1848,7 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
             showCelestial = false; // diffuse bounce: hide the disc (covered by NEE)
             ro = p;
             rd = cosineDir(n, sampler);
-            if (captureGuides && bounce == 0
+            if (captureGuides && segment == 0
                     && (pc.flags & FRAME_FLAG_DIFFUSE_PATH_GUIDE) != 0u) {
                 gv_diffuseRayDirectionHitDistance = float4(rd, 0.0);
                 gv_diffuseGuidePending = true;
@@ -1858,7 +1857,7 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
         }
 
         // Russian roulette on deeper bounces: survive with prob = max channel, rescale survivors.
-        if (bounce >= rrStart) {
+        if (scatteringDepth >= rrStart) {
             float q = clamp(max(throughput.r, max(throughput.g, throughput.b)), 0.02, 1.0);
             if (rndf(sampler) > q) {
                 break;
@@ -1871,6 +1870,7 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
 #if CAUSTICA_SHARC_QUERY
         if ((payload.flags & PAYLOAD_SHARC_DYNAMIC) != 0u) sharcPathEligible = false;
 #endif
+        ++scatteringDepth;
     }
     return L;
 }
