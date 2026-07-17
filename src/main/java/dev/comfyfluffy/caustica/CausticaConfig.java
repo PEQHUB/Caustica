@@ -565,7 +565,7 @@ public final class CausticaConfig {
         public static final class Omm {
             public static final BooleanSetting ENABLED = bool("caustica.rt.omm", "omm.enabled", true);
             public static final IntSetting SUBDIVISION =
-                    clampedInt("caustica.rt.ommSubdivision", "omm.subdivision", 4, 0, 12);
+                    clampedInt("caustica.rt.ommSubdivision", "omm.subdivision", 4, 0, 6);
             public static final BooleanSetting STATS = bool("caustica.rt.ommStats", "omm.stats", false);
 
             private Omm() {
