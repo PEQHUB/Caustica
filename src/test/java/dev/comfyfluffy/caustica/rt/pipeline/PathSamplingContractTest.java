@@ -26,7 +26,10 @@ final class PathSamplingContractTest {
         assertTrue(raygen.contains("owenScramble(value, dimensionSeed)"));
         assertTrue(raygen.contains("inline uint liveRandom(inout uint state)"));
         assertTrue(raygen.contains("state = value * 747796405u + 2891336453u"));
-        assertTrue(raygen.contains("sampler.state = seed"));
+        assertTrue(raygen.contains("(sampler.blueIndex << 3u) + (salt << 1u)"));
+        assertTrue(raygen.contains("sampler.sampleIndex * 32u + sampler.bounce"));
+        assertTrue(raygen.contains("float2 rnd2(inout PathSampler sampler, uint salt)"));
+        assertTrue(raygen.contains("float2 sampleUv = rnd2(sampler, 2u)"));
         assertTrue(build.contains("-DCAUSTICA_OFFLINE=0"));
         assertTrue(build.contains("-DCAUSTICA_OFFLINE=0\", \"-DCAUSTICA_SER=0"));
         assertTrue(build.contains("-DCAUSTICA_OFFLINE=1\", \"-DCAUSTICA_SER=1"));
@@ -41,6 +44,20 @@ final class PathSamplingContractTest {
         assertFalse(raygen.contains("[noinline]"));
         assertFalse(raygen.contains("[noRefInline]"));
         assertFalse(raygen.contains("sampleTerrainEmitter"));
+    }
+
+    @Test
+    void liveOwenSobolPairOccupiesEverySixteenBySixteenCell() {
+        for (int pair = 0; pair < RtBlueNoiseSequence.DIMENSIONS / 2; pair++) {
+            Set<Integer> cells = new HashSet<>();
+            for (int sampleIndex = 0; sampleIndex < 256; sampleIndex++) {
+                int x = RtBlueNoiseSequence.sampleBits(sampleIndex, pair * 2);
+                int y = RtBlueNoiseSequence.sampleBits(sampleIndex, pair * 2 + 1);
+                cells.add(((x >>> 28) << 4) | (y >>> 28));
+            }
+            assertEquals(256, cells.size(), "pair " + pair);
+        }
+        assertEquals(4096, RtBlueNoiseSequence.SAMPLE_COUNT);
     }
 
     @Test

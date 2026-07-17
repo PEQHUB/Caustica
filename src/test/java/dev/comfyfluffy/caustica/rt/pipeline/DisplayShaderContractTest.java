@@ -24,6 +24,17 @@ final class DisplayShaderContractTest {
     }
 
     @Test
+    void tonemapperComparisonHasNoCenterDivider() throws IOException {
+        String source = shader();
+        int comparison = source.indexOf("if (pc.debugView == DISPLAY_DEBUG_TONEMAP_COMPARISON)");
+        int comparisonEnd = source.indexOf("imageStore(outputImage", comparison);
+        String comparisonPath = source.substring(comparison, comparisonEnd);
+
+        assertTrue(comparisonPath.contains("ldr = pix.x < split ? selectedLdr : psychoV23Ldr;"));
+        assertFalse(comparisonPath.contains("pix.x == split"));
+    }
+
+    @Test
     void psychoV23ComparisonRemainsSelectableInVideoOptions() throws IOException {
         String source = Files.readString(Path.of(
                 "src/main/java/dev/comfyfluffy/caustica/client/RtVideoOptions.java"));

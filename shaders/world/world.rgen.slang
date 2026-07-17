@@ -531,11 +531,15 @@ struct PathSampler {
     uint dimension;
     uint randomBits[8];
 #else
+    uint blueIndex;
+    uint sampleIndex;
+    uint bounce;
     uint state;
 #endif
 };
 
 float rndf(inout PathSampler sampler);
+float2 rnd2(inout PathSampler sampler, uint salt);
 
 static const float EON_C1 = 0.5 - 2.0 / (3.0 * PI);
 static const float EON_C2 = 2.0 / 3.0 - 28.0 / (15.0 * PI);
@@ -614,8 +618,9 @@ float3 sampleEon(float3 n, float3 woWorld, float rough, inout PathSampler sample
     float3 b = normalize(cross(n, t));
     t = cross(b, n);
     float3 wo = float3(dot(woWorld, t), dot(woWorld, b), max(dot(woWorld, n), 0.0));
-    float u1 = rndf(sampler);
-    float u2 = rndf(sampler);
+    float2 u = rnd2(sampler, 0u);
+    float u1 = u.x;
+    float u2 = u.y;
     float pu = pow(clamp(rough, 0.0, 1.0), 0.1)
             * (0.162925 + (-0.372058 + (0.538233 - 0.290822 * wo.z) * wo.z) * wo.z);
     pu = clamp(pu, 0.0, 1.0);
@@ -761,11 +766,6 @@ inline uint sampleHash(uint x) {
 }
 
 #if CAUSTICA_OFFLINE
-// Driver-safe, bounce-scoped Owen-scrambled Sobol sampling belongs exclusively to the converged offline
-// renderer. The live shader uses the compact PCG state below and never fetches this sequence buffer.
-static const uint SAMPLE_SEQUENCE_DIMENSIONS = 8u;
-static const uint SAMPLE_SEQUENCE_MASK = 1048575u;
-
 inline uint owenScramble(uint x, uint seed) {
     x = reversebits(x);
     x ^= x * 0x3d20adeau;
@@ -775,6 +775,11 @@ inline uint owenScramble(uint x, uint seed) {
     x ^= x * 0x53a22864u;
     return reversebits(x);
 }
+
+// Driver-safe, bounce-scoped Owen-scrambled Sobol sampling for the converged offline renderer. Live mode
+// uses a compact precomputed two-dimensional Burley/Heitz sequence and does not fetch this large buffer.
+static const uint SAMPLE_SEQUENCE_DIMENSIONS = 8u;
+static const uint SAMPLE_SEQUENCE_MASK = 1048575u;
 
 inline void beginBounce(inout PathSampler sampler, uint bounce) {
     sampler.bounceHash = sampleHash(sampler.pixelHash ^ ((bounce + 1u) * 0x9e3779b9u));
@@ -795,9 +800,6 @@ inline float rndf(inout PathSampler sampler) {
     return float(value >> 8u) * (1.0 / 16777216.0);
 }
 #else
-// A one-register PCG sampler keeps the live shader independent of the offline Sobol table while retaining
-// strong per-draw output permutation. The xorshift alternative was runtime-neutral and is intentionally
-// not kept as another sampler variant.
 inline uint liveRandom(inout uint state) {
     uint value = state;
     state = value * 747796405u + 2891336453u;
@@ -806,13 +808,27 @@ inline uint liveRandom(inout uint state) {
 }
 
 inline void beginBounce(inout PathSampler sampler, uint bounce) {
-    // PCG advances on demand; it has no bounce-scoped table to populate.
+    sampler.bounce = bounce;
 }
 
 inline float rndf(inout PathSampler sampler) {
     return float(liveRandom(sampler.state) >> 8u) * (1.0 / 16777216.0);
 }
 #endif
+
+inline float2 rnd2(inout PathSampler sampler, uint salt) {
+#if CAUSTICA_OFFLINE
+    return float2(rndf(sampler), rndf(sampler));
+#else
+    ConstPtr<uint> sequence = ConstPtr<uint>(pc.sampleSequenceAddr);
+    uint sequenceBase = (sampler.blueIndex << 3u) + (salt << 1u);
+    float2 base = float2(sequence[sequenceBase] >> 8u, sequence[sequenceBase + 1u] >> 8u)
+            * (1.0 / 16777216.0);
+    uint shiftIndex = (sampler.sampleIndex * 32u + sampler.bounce) & 65535u;
+    float2 shift = float(shiftIndex) * float2(0.7548776662466927, 0.5698402909980532);
+    return frac(base + shift);
+#endif
+}
 
 float3 primaryRayDir(float2 ndc) {
     float4 nearH = mul(pc.invViewProj, float4(ndc.x, ndc.y, 1.0, 1.0));
@@ -833,8 +849,9 @@ float primaryRayConeSpread(float2 ndc, float2 size, float3 dir) {
 // importance-sampling match: BRDF*cos/pdf = (albedo/PI)*cos / (cos/PI) = albedo, so the continuation
 // throughput is just *= albedo with no PI/cos bookkeeping left over.
 float3 cosineDir(float3 n, inout PathSampler sampler) {
-    float u1 = rndf(sampler);
-    float u2 = rndf(sampler);
+    float2 u = rnd2(sampler, 1u);
+    float u1 = u.x;
+    float u2 = u.y;
     float r = sqrt(u1);
     float phi = 6.2831853 * u2;
     float3 t = normalize(abs(n.x) > 0.9 ? float3(0.0, 1.0, 0.0) : float3(1.0, 0.0, 0.0));
@@ -853,8 +870,9 @@ float3 sampleSquare(float3 axis, float halfAngle, inout PathSampler sampler) {
     float3 right = normalize(cross(axis, pc.celestial.xyz));
     float3 up = cross(right, axis);
     float t = tan(halfAngle);
-    float u = (rndf(sampler) * 2.0 - 1.0) * t;
-    float v = (rndf(sampler) * 2.0 - 1.0) * t;
+    float2 sampleUv = rnd2(sampler, 2u) * 2.0 - 1.0;
+    float u = sampleUv.x * t;
+    float v = sampleUv.y * t;
     return normalize(axis + u * right + v * up);
 }
 
@@ -871,8 +889,9 @@ float3 sampleGGXVNDF(float3 n, float3 ve, float rough, inout PathSampler sampler
     float lensq = Vh.x * Vh.x + Vh.y * Vh.y;
     float3 T1 = lensq > 0.0 ? float3(-Vh.y, Vh.x, 0.0) * rsqrt(lensq) : float3(1.0, 0.0, 0.0);
     float3 T2 = cross(Vh, T1);
-    float u1 = rndf(sampler);
-    float u2 = rndf(sampler);
+    float2 u = rnd2(sampler, 3u);
+    float u1 = u.x;
+    float u2 = u.y;
     float r = sqrt(u1);
     float phi = 6.2831853 * u2;
     float p1 = r * cos(phi);
@@ -1917,9 +1936,11 @@ void main() {
     float3 origin = nearP + pc.camOffset;
     float3 direction = normalize(farP - nearP);
     PathSampler sampler;
+    sampler.blueIndex = (uint(pix.x) & 63u) | ((uint(pix.y) & 63u) << 6u);
+    sampler.sampleIndex = sharcFrame.frameIndex;
+    sampler.bounce = 0u;
     sampler.state = sampleHash((uint(pix.x) * 1973u + uint(pix.y) * 9277u + 26699u)
             ^ (sharcFrame.frameIndex * 2654435761u)) | 1u;
-    liveRandom(sampler.state);
     pc.maxBounces = min(pc.maxBounces, sharcFrame.updateMaxBounces);
     tracePath(origin, direction, primaryRayConeSpread(ndc, size, direction),
             false, false, false, sampler);
@@ -2037,12 +2058,13 @@ void main() {
     gv_sharcEligibilityDebug = float3(0.02);
     gv_sharcNumericDebug = float3(0.0, 0.2, 0.0);
 #endif
-    uint seed = sampleHash((uint(pix.x) * 1973u + uint(pix.y) * 9277u + 26699u)
-            ^ (pc.frameIndex * 2654435761u)) | 1u;
     for (uint s = 0u; s < pathCount; s++) {
         PathSampler sampler;
-        seed = liveRandom(seed);
-        sampler.state = seed;
+        sampler.blueIndex = (uint(pix.x) & 63u) | ((uint(pix.y) & 63u) << 6u);
+        sampler.sampleIndex = pc.frameIndex * pathCount + s;
+        sampler.bounce = 0u;
+        sampler.state = sampleHash((uint(pix.x) * 1973u + uint(pix.y) * 9277u + 26699u)
+                ^ (pc.frameIndex * 2654435761u) ^ (s * 2246822519u)) | 1u;
         jndc = (uv + pc.jitter / size) * 2.0 - 1.0;
         float4 nearH = mul(pc.invViewProj, float4(jndc.x, jndc.y, 1.0, 1.0));
         float4 farH = mul(pc.invViewProj, float4(jndc.x, jndc.y, 0.0, 1.0));
@@ -2055,7 +2077,6 @@ void main() {
         float3 sampleRadiance = tracePath(origin, dir, rayConeSpread,
                 captureGuides && s == 0u,
                 captureRefractedGuides && s == 0u, primaryOnly, sampler);
-        seed = sampler.state;
         frameRadiance += sampleRadiance;
     }
     frameRadiance /= float(pathCount);

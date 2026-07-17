@@ -1104,11 +1104,7 @@ void main() {
     if (pc.debugView == DISPLAY_DEBUG_TONEMAP_COMPARISON) {
         vec3 psychoV23Ldr = linearToSrgb(tonemapSdrPsychoV23(max(rt.rgb * exposure, vec3(0.0))));
         int split = size.x / 2;
-        if (pix.x == split || pix.x == split - 1) {
-            ldr = vec3(1.0);
-        } else {
-            ldr = pix.x < split ? selectedLdr : psychoV23Ldr;
-        }
+        ldr = pix.x < split ? selectedLdr : psychoV23Ldr;
     }
     imageStore(outputImage, pix, vec4(ldr, 1.0));
 

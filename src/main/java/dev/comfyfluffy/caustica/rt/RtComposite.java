@@ -66,6 +66,7 @@ import dev.comfyfluffy.caustica.rt.pipeline.RtHdrCompositePipeline;
 import dev.comfyfluffy.caustica.rt.pipeline.RtSdrPresentPipeline;
 import dev.comfyfluffy.caustica.rt.pipeline.RtExposure;
 import dev.comfyfluffy.caustica.rt.pipeline.RtPathSampleSequence;
+import dev.comfyfluffy.caustica.rt.pipeline.RtBlueNoiseSequence;
 import dev.comfyfluffy.caustica.rt.pipeline.RtPipeline;
 import dev.comfyfluffy.caustica.rt.pipeline.RtSharcResolvePipeline;
 import dev.comfyfluffy.caustica.rt.terrain.RtTerrain;
@@ -263,6 +264,7 @@ public final class RtComposite {
     // One slot per in-flight frame, cycled per frame so an in-flight slot is never overwritten.
     private static final int PUSH_RING = 6;
     private RtBuffer[] pushRing;
+    private RtBlueNoiseSequence blueNoiseSequence;
     private RtPathSampleSequence pathSampleSequence;
     private int pushSlot;
     private RtDisplayPipeline displayPipeline;
@@ -694,6 +696,9 @@ public final class RtComposite {
                     pushRing[i] = ctx.createBuffer(WORLD_PUSH_SIZE,
                             VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true, "rt world push " + i);
                 }
+            }
+            if (blueNoiseSequence == null) {
+                blueNoiseSequence = RtBlueNoiseSequence.create(ctx);
             }
             if (output != null) {
                 worldPipeline.setStorageImage(output.view);
@@ -1519,7 +1524,8 @@ public final class RtComposite {
                     emissiveIntensity,
                     CausticaConfig.Rt.Composite.PSR_MAX_MIRRORS.value(),
                     breaking,
-                    offlineGroundTruth && pathSampleSequence != null ? pathSampleSequence.deviceAddress() : 0L
+                    offlineGroundTruth && pathSampleSequence != null
+                            ? pathSampleSequence.deviceAddress() : blueNoiseSequence.deviceAddress()
             ).write(push);
             // Upload any entity textures registered this frame into the bindless set before the trace.
             boolean buildOfflineSnapshot = offlineGroundTruth && offlineTlas == null;
@@ -2002,6 +2008,10 @@ public final class RtComposite {
                 }
             }
             pushRing = null;
+        }
+        if (blueNoiseSequence != null) {
+            blueNoiseSequence.destroy();
+            blueNoiseSequence = null;
         }
         if (traceGpuProfiler != null) {
             traceGpuProfiler.destroy();
