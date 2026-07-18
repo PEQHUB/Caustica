@@ -192,7 +192,7 @@ final class RtSectionTable {
     RtAccel.Instance instanceFor(SectionGeom geom, int rbx, int rby, int rbz) {
         float[] xform = {1, 0, 0, geom.sx - rbx, 0, 1, 0, geom.sy - rby,
                 0, 0, 1, geom.sz - rbz};
-        return new RtAccel.Instance(xform, geom.blas.deviceAddress, geom.slot);
+        return new RtAccel.Instance(xform, geom.blas, geom.slot);
     }
 
     /** GPU residency for one section: shader attributes + compacted BLAS + world section origin. */

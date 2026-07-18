@@ -916,13 +916,17 @@ public final class RtAccel {
      * the material bucket. Entities use {@link #SBT_ENTITY_OFFSET}; their fixed geometry index then selects
      * opaque or any-hit; the remaining two records in each four-record entity SBT block stay unused.
      */
-    public record Instance(float[] transform3x4, long blasDeviceAddress, int customIndex, int mask, int sbtRecordOffset) {
-        public Instance(float[] transform3x4, long blasDeviceAddress, int customIndex) {
-            this(transform3x4, blasDeviceAddress, customIndex, 0xFF, 0);
+    public record Instance(float[] transform3x4, RtAccel blas, int customIndex, int mask, int sbtRecordOffset) {
+        public Instance(float[] transform3x4, RtAccel blas, int customIndex) {
+            this(transform3x4, blas, customIndex, 0xFF, 0);
         }
 
-        public Instance(float[] transform3x4, long blasDeviceAddress, int customIndex, int mask) {
-            this(transform3x4, blasDeviceAddress, customIndex, mask, 0);
+        public Instance(float[] transform3x4, RtAccel blas, int customIndex, int mask) {
+            this(transform3x4, blas, customIndex, mask, 0);
+        }
+
+        public long blasDeviceAddress() {
+            return blas == null ? 0L : blas.deviceAddress;
         }
     }
 
@@ -1059,11 +1063,12 @@ public final class RtAccel {
         final int facingCullDisable = 0x00000001;
         for (int i = 0, count = instances.size(); i < count; i++) {
             Instance instance = instances.get(i);
-            if (instance.blasDeviceAddress() == 0L) {
+            RtAccel blas = instance.blas();
+            if (blas == null || instance.blasDeviceAddress() == 0L) {
                 throw new IllegalStateException("TLAS instance " + (firstInstance + i)
                         + " has a null BLAS device address");
             }
-            if (!LIVE_BY_ADDRESS.containsKey(instance.blasDeviceAddress())) {
+            if (blas.destroyed) {
                 throw new IllegalStateException("TLAS instance " + (firstInstance + i)
                         + " references a non-live BLAS address 0x"
                         + Long.toHexString(instance.blasDeviceAddress()));

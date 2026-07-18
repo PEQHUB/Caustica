@@ -23,6 +23,9 @@ final class TlasRingBuildContractTest {
         assertTrue(!accel.contains("updatesSinceBuild"));
         assertTrue(accel.contains("waitForGraphicsValue(slot.lastGraphicsUse)"));
         assertTrue(accel.contains("slot.lastGraphicsUse = graphicsUse"));
+        assertTrue(accel.contains("record Instance(float[] transform3x4, RtAccel blas"));
+        assertTrue(accel.contains("if (blas.destroyed)"));
+        assertTrue(!accel.contains("LIVE_BY_ADDRESS.containsKey(instance.blasDeviceAddress())"));
         assertTrue(executor.indexOf("latestGraphicsUseValue.accumulateAndGet(graphicsValue, Math::max)")
                 < executor.indexOf("public void endGraphicsTerrainUse"));
         assertTrue(composite.indexOf("beginGraphicsTerrainUse(encoder)")

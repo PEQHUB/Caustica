@@ -1378,7 +1378,7 @@ public final class RtEntities {
         writeTableEntry(build, e.primAddr, e.indexAddr, e.uvAddr, dispAddr, 0f, 0f, 0f, e.bucketTris);
         // Block-local mesh placed by a translate-only instance transform (blockPos − rebase), like terrain.
         float[] xform = {1, 0, 0, e.bx - rbx, 0, 1, 0, e.by - rby, 0, 0, 1, e.bz - rbz};
-        build.instances.add(new RtAccel.Instance(xform, e.accel.deviceAddress,
+        build.instances.add(new RtAccel.Instance(xform, e.accel,
                 ENTITY_BIT | (build.count & 0x7FFFFF), 0xFF, RtAccel.SBT_ENTITY_OFFSET));
         build.count++;
         build.lists.usedBlockEntities.add(e);
@@ -1524,7 +1524,7 @@ public final class RtEntities {
         writeTableEntry(build, ea.refPrimAddr, ea.refIndexAddr, ea.refUvAddr,
                 motion.dispAddr, motion.rigidX, motion.rigidY, motion.rigidZ, ea.refBucketTris);
         build.instances.add(new RtAccel.Instance(placeTransform(localTransform, placeX, placeY, placeZ),
-                ea.refAccel.deviceAddress,
+                ea.refAccel,
                 ENTITY_BIT | (build.count & 0x3FFFFF), mask, RtAccel.SBT_ENTITY_OFFSET));
         build.count++;
         RtFrameStats.FRAME.count("entityReuse", 1);
@@ -1678,7 +1678,7 @@ public final class RtEntities {
         writeTableEntry(build, primAddr, indexAddr, uvAddr, motion.dispAddr,
                 motion.rigidX, motion.rigidY, motion.rigidZ, packed.bucketTris());
 
-        build.instances.add(new RtAccel.Instance(instanceTransform, blas.accel.deviceAddress,
+        build.instances.add(new RtAccel.Instance(instanceTransform, blas.accel,
                 instanceBit | (build.count & 0x3FFFFF), mask, RtAccel.SBT_ENTITY_OFFSET));
         build.buffers.add(geometry);
         build.count++;
@@ -1770,7 +1770,7 @@ public final class RtEntities {
 
         writeTableEntry(build, primAddr, indexAddr, uvAddr, motion.dispAddr,
                 motion.rigidX, motion.rigidY, motion.rigidZ, packed.bucketTris());
-        build.instances.add(new RtAccel.Instance(instanceTransform, accel.deviceAddress,
+        build.instances.add(new RtAccel.Instance(instanceTransform, accel,
                 instanceBit | (build.count & 0x3FFFFF), mask, RtAccel.SBT_ENTITY_OFFSET));
 
         EntityAccel ea = slot.owner;
