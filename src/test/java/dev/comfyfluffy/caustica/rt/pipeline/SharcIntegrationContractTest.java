@@ -172,7 +172,7 @@ final class SharcIntegrationContractTest {
         assertTrue(raygen.contains("cachedRadiance + liveDirectLighting"));
         assertTrue(composite.contains("syncSharcPrimaryQueryPipeline"));
         assertTrue(composite.contains("sharcPrimaryQueryPipeline != null"));
-        assertTrue(composite.contains("RtDlssRr.INSTANCE.requestHistoryReset()"));
+        assertTrue(composite.contains("RtReconstruction.requestHistoryReset()"));
         assertTrue(bridge.contains("setBoolean(command, \"primaryDiffuseReuse\""));
         assertTrue(bridge.contains("state.setProperty(\"sharcPrimaryDiffuseActive\""));
         String lang = read("src/main/resources/assets/caustica/lang/en_us.json");

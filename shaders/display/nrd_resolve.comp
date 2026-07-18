@@ -1,0 +1,44 @@
+#version 460
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+layout(binding = 0, set = 0, rgba16f) uniform readonly image2D sh0Image;
+layout(binding = 1, set = 0, rgba16f) uniform readonly image2D sh1Image;
+layout(binding = 2, set = 0, rgba16f) uniform readonly image2D normalRoughnessImage;
+layout(binding = 3, set = 0, rgba16f) uniform writeonly image2D outputImage;
+
+layout(push_constant) uniform Push {
+    uint width;
+    uint height;
+    uint family; // 0 REBLUR, 1 RELAX
+    uint sphericalHarmonics;
+} pc;
+
+vec3 ycocgToLinear(vec3 value) {
+    float t = value.x - value.z;
+    return max(vec3(t + value.y, value.x + value.z, t - value.y), vec3(0.0));
+}
+vec3 correctedYCoCg(float y, float y0, vec2 cocg) {
+    y = max(y, 0.0);
+    cocg *= (y + 1.0e-6) / (y0 + 1.0e-6);
+    return ycocgToLinear(vec3(y, cocg));
+}
+
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    if (pixel.x >= int(pc.width) || pixel.y >= int(pc.height)) return;
+    vec4 sh0 = imageLoad(sh0Image, pixel);
+    vec3 color;
+    if (pc.sphericalHarmonics == 0u) {
+        color = pc.family == 0u ? ycocgToLinear(sh0.xyz) : max(sh0.xyz, vec3(0.0));
+    } else if (pc.family == 0u) {
+        vec3 c1 = imageLoad(sh1Image, pixel).xyz;
+        vec3 normal = normalize(imageLoad(normalRoughnessImage, pixel).xyz);
+        const float invPi = 0.3183098861837907;
+        float y = sh0.x * invPi + dot(c1, normal) * (3.0 * invPi);
+        color = correctedYCoCg(y, sh0.x, sh0.yz);
+    } else {
+        // RELAX SH0 retains linear RGB; SH1 still participates in NRD's directional temporal/spatial filters.
+        color = max(sh0.xyz, vec3(0.0));
+    }
+    imageStore(outputImage, pixel, vec4(color, 1.0));
+}

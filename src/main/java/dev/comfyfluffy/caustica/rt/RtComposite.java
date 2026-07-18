@@ -65,6 +65,9 @@ import dev.comfyfluffy.caustica.rt.pipeline.RtDlssFg;
 import dev.comfyfluffy.caustica.rt.pipeline.RtDlssdDisocclusionPipeline;
 import dev.comfyfluffy.caustica.rt.pipeline.RtFgUiAlphaPipeline;
 import dev.comfyfluffy.caustica.rt.pipeline.RtDlssRr;
+import dev.comfyfluffy.caustica.rt.pipeline.RtNrd;
+import dev.comfyfluffy.caustica.rt.pipeline.RtNrdResolvePipeline;
+import dev.comfyfluffy.caustica.rt.pipeline.RtReconstruction;
 import dev.comfyfluffy.caustica.rt.overlay.RtWorldOverlay;
 import dev.comfyfluffy.caustica.rt.pipeline.RtHdrCompositePipeline;
 import dev.comfyfluffy.caustica.rt.pipeline.RtSdrPresentPipeline;
@@ -172,7 +175,7 @@ public final class RtComposite {
     // Real inline push constants (fast constant-bank reads), separate from the WorldPush BDA ring above.
     // tableAddr/entityTableAddr/frameIndex are duplicated so hit shaders skip a global-memory dereference;
     // PushAddrData is generated from the same Slang module and owns this second ABI as well.
-    private static final int GUIDE_COUNT = 11; // RR guides, offline mean/pilots, animated mask, diffuse path guide
+    private static final int GUIDE_COUNT = 14; // shared reconstruction guides + NRD signal, SH1, and view-Z
     private static final int FRAME_FLAG_RR_GUIDES = 1 << 5;
     private static final int FRAME_FLAG_FG_GUIDES = 1 << 6;
     private static final int FRAME_FLAG_OFFLINE_GROUND_TRUTH = 1 << 7;
@@ -180,6 +183,8 @@ public final class RtComposite {
     private static final int FRAME_FLAG_DIFFUSE_PATH_GUIDE = 1 << 9;
     private static final int FRAME_FLAG_EARTH_ATMOSPHERE = 1 << 10;
     private static final int FRAME_FLAG_EXPOSURE_DEPTH = 1 << 11;
+    private static final int FRAME_FLAG_NRD = 1 << 12;
+    private static final int FRAME_FLAG_NRD_SH = 1 << 13;
     private static final double TEMPORAL_TELEPORT_DISTANCE_SQ = 64.0 * 64.0;
     private static final long TEMPORAL_GAP_NANOS = 500_000_000L;
     // Frames a retired per-frame TLAS must outlive before it's freed (> frames-in-flight); matches
@@ -335,6 +340,11 @@ public final class RtComposite {
     private RtImage offlinePilotB;
     private RtImage gAnimatedGuide;
     private RtImage gDiffuseRayDirectionHitDistance;
+    private RtImage gNrdSh1;
+    private RtImage gNrdViewZ;
+    private RtImage gNrdSignal;
+    private RtImage nrdRawOutput;
+    private RtImage nrdSh1Output;
     private RtImage gDepthHistoryA;
     private RtImage gDepthHistoryB;
     private RtImage gDisocclusion;
@@ -342,6 +352,7 @@ public final class RtComposite {
     private boolean diffusePathGuideKnown;
     private boolean lastDiffusePathGuide;
     private RtDlssdDisocclusionPipeline dlssdDisocclusionPipeline;
+    private RtNrdResolvePipeline nrdResolvePipeline;
     // Display-res RT image the display mapper reads: DLSS-RR writes it (render -> display denoise+upscale), or a
     // linear blit of `output` fills it when RR is off/unavailable (the no-RR reference / fallback).
     private RtImage rrOutput;
@@ -486,7 +497,7 @@ public final class RtComposite {
             failed = false;
             CausticaMod.LOGGER.info("RT failure latch cleared by render-state invalidation; retrying RT");
         }
-        RtDlssRr.INSTANCE.resetFailureLatch();
+        RtReconstruction.resetFailureLatches();
     }
 
     /** Reset every temporal consumer owned by the composite after a render-state discontinuity. */
@@ -521,7 +532,7 @@ public final class RtComposite {
             groundTruthWaterWaveTime = Float.NaN;
             OfflineGroundTruth.INSTANCE.onRendererReset();
         }
-        RtDlssRr.INSTANCE.requestHistoryReset();
+        RtReconstruction.requestHistoryReset();
         CausticaJitter.INSTANCE.reset();
     }
 
@@ -773,7 +784,8 @@ public final class RtComposite {
             }
             bindlessTextureCapacity = RtEntityTextures.maxTextures();
             worldPipeline = RtPipeline.create(ctx, RtDeviceBringup.worldRaygenShader(),
-                    new String[]{"world.rmiss.spv", "world_guide.rmiss.spv"}, "world.rchit.spv", "world.rahit.spv",
+                    new String[]{"world.rmiss.spv", "world_guide.rmiss.spv", "world_shadow.rmiss.spv"},
+                    "world.rchit.spv", "world_shadow.rchit.spv", "world.rahit.spv",
                     WorldPushConstantsData.BYTE_SIZE, true, GUIDE_COUNT, bindlessTextureCapacity, true, true);
             // Per-frame push data lives in this BDA ring; the pipeline only pushes its address.
             if (pushRing == null) {
@@ -803,7 +815,8 @@ public final class RtComposite {
         ensureWorld(ctx); // establishes shared push buffers, texture registry, and bindless capacity
         if (offlinePipeline == null) {
             offlinePipeline = RtPipeline.create(ctx, RtDeviceBringup.offlineWorldRaygenShader(),
-                    new String[]{"world.rmiss.spv", "world_guide.rmiss.spv"}, "world.rchit.spv", "world.rahit.spv",
+                    new String[]{"world.rmiss.spv", "world_guide.rmiss.spv", "world_shadow.rmiss.spv"},
+                    "world.rchit.spv", "world_shadow.rchit.spv", "world.rahit.spv",
                     WorldPushConstantsData.BYTE_SIZE, true, GUIDE_COUNT, bindlessTextureCapacity, true, true);
             pathSampleSequence = RtPathSampleSequence.create(ctx);
             if (output != null) {
@@ -850,16 +863,16 @@ public final class RtComposite {
         }
         try {
             sharcUpdatePipeline = RtPipeline.create(ctx, RtDeviceBringup.sharcUpdateRaygenShader(),
-                    new String[]{"world_sharc.rmiss.spv", "world_sharc_guide.rmiss.spv"},
-                    "world_sharc.rchit.spv", "world_sharc.rahit.spv", SharcPushAddrData.BYTE_SIZE,
+                    new String[]{"world_sharc.rmiss.spv", "world_sharc_guide.rmiss.spv", "world_shadow.rmiss.spv"},
+                    "world_sharc.rchit.spv", "world_shadow.rchit.spv", "world_sharc.rahit.spv", SharcPushAddrData.BYTE_SIZE,
                     true, GUIDE_COUNT, bindlessTextureCapacity, true, true);
             sharcQueryPipeline = RtPipeline.create(ctx, RtDeviceBringup.sharcQueryRaygenShader(),
-                    new String[]{"world_sharc.rmiss.spv", "world_sharc_guide.rmiss.spv"},
-                    "world_sharc.rchit.spv", "world_sharc.rahit.spv", SharcPushAddrData.BYTE_SIZE,
+                    new String[]{"world_sharc.rmiss.spv", "world_sharc_guide.rmiss.spv", "world_shadow.rmiss.spv"},
+                    "world_sharc.rchit.spv", "world_shadow.rchit.spv", "world_sharc.rahit.spv", SharcPushAddrData.BYTE_SIZE,
                     true, GUIDE_COUNT, bindlessTextureCapacity, true, true);
             sharcDiffuseQueryPipeline = RtPipeline.create(ctx, RtDeviceBringup.sharcDiffuseQueryRaygenShader(),
-                    new String[]{"world_sharc.rmiss.spv", "world_sharc_guide.rmiss.spv"},
-                    "world_sharc.rchit.spv", "world_sharc.rahit.spv", SharcPushAddrData.BYTE_SIZE,
+                    new String[]{"world_sharc.rmiss.spv", "world_sharc_guide.rmiss.spv", "world_shadow.rmiss.spv"},
+                    "world_sharc.rchit.spv", "world_shadow.rchit.spv", "world_sharc.rahit.spv", SharcPushAddrData.BYTE_SIZE,
                     true, GUIDE_COUNT, bindlessTextureCapacity, true, true);
             sharcResolvePipeline = RtSharcResolvePipeline.create(ctx);
             sharcCache = RtSharcCache.create(ctx, exponent);
@@ -879,7 +892,7 @@ public final class RtComposite {
         } catch (Throwable t) {
             destroySharcResources();
             RtSharcSupport.fail("pipeline setup failed: " + t.getClass().getSimpleName());
-            RtDlssRr.INSTANCE.requestHistoryReset();
+            RtReconstruction.requestHistoryReset();
             CausticaMod.LOGGER.error("SHaRC setup failed; using baseline tracer", t);
         }
     }
@@ -890,21 +903,21 @@ public final class RtComposite {
         if (!want || sharcPrimaryQueryPipeline != null) return;
         try {
             sharcPrimaryQueryPipeline = RtPipeline.create(ctx, RtDeviceBringup.sharcPrimaryQueryRaygenShader(),
-                    new String[]{"world_sharc.rmiss.spv", "world_sharc_guide.rmiss.spv"},
-                    "world_sharc.rchit.spv", "world_sharc.rahit.spv", SharcPushAddrData.BYTE_SIZE,
+                    new String[]{"world_sharc.rmiss.spv", "world_sharc_guide.rmiss.spv", "world_shadow.rmiss.spv"},
+                    "world_sharc.rchit.spv", "world_shadow.rchit.spv", "world_sharc.rahit.spv", SharcPushAddrData.BYTE_SIZE,
                     true, GUIDE_COUNT, bindlessTextureCapacity, true, true);
             if (output != null) {
                 sharcPrimaryQueryPipeline.setStorageImage(output.view);
                 bindGuideImages();
             }
             bindPipelineTextures(ctx, sharcPrimaryQueryPipeline);
-            RtDlssRr.INSTANCE.requestHistoryReset();
+            RtReconstruction.requestHistoryReset();
             CausticaMod.LOGGER.info("SHaRC primary-diffuse reuse pipeline ready");
         } catch (Throwable t) {
             if (sharcPrimaryQueryPipeline != null) sharcPrimaryQueryPipeline.destroy();
             sharcPrimaryQueryPipeline = null;
             CausticaConfig.Rt.Sharc.PRIMARY_DIFFUSE_REUSE.set(false);
-            RtDlssRr.INSTANCE.requestHistoryReset();
+            RtReconstruction.requestHistoryReset();
             CausticaMod.LOGGER.error("SHaRC primary-diffuse reuse setup failed; retaining secondary-only SHaRC", t);
         }
     }
@@ -929,22 +942,22 @@ public final class RtComposite {
         }
         if (sharcDiagnosticUpdatePipeline == null) {
             sharcDiagnosticUpdatePipeline = RtPipeline.create(ctx, RtDeviceBringup.sharcDiagnosticUpdateRaygenShader(),
-                    new String[]{"world_sharc.rmiss.spv", "world_sharc_guide.rmiss.spv"},
-                    "world_sharc.rchit.spv", "world_sharc.rahit.spv", SharcPushAddrData.BYTE_SIZE,
+                    new String[]{"world_sharc.rmiss.spv", "world_sharc_guide.rmiss.spv", "world_shadow.rmiss.spv"},
+                    "world_sharc.rchit.spv", "world_shadow.rchit.spv", "world_sharc.rahit.spv", SharcPushAddrData.BYTE_SIZE,
                     true, GUIDE_COUNT, bindlessTextureCapacity, true, true);
         }
         if (sharcDiagnosticQueryPipeline == null) {
             sharcDiagnosticQueryPipeline = RtPipeline.create(ctx, RtDeviceBringup.sharcDiagnosticQueryRaygenShader(),
-                    new String[]{"world_sharc.rmiss.spv", "world_sharc_guide.rmiss.spv"},
-                    "world_sharc.rchit.spv", "world_sharc.rahit.spv", SharcPushAddrData.BYTE_SIZE,
+                    new String[]{"world_sharc.rmiss.spv", "world_sharc_guide.rmiss.spv", "world_shadow.rmiss.spv"},
+                    "world_sharc.rchit.spv", "world_shadow.rchit.spv", "world_sharc.rahit.spv", SharcPushAddrData.BYTE_SIZE,
                     true, GUIDE_COUNT, bindlessTextureCapacity, true, true);
         }
         if (CausticaConfig.Rt.Sharc.PRIMARY_DIFFUSE_REUSE.value()
                 && sharcPrimaryDiagnosticQueryPipeline == null) {
             sharcPrimaryDiagnosticQueryPipeline = RtPipeline.create(ctx,
                     RtDeviceBringup.sharcPrimaryDiagnosticQueryRaygenShader(),
-                    new String[]{"world_sharc.rmiss.spv", "world_sharc_guide.rmiss.spv"},
-                    "world_sharc.rchit.spv", "world_sharc.rahit.spv", SharcPushAddrData.BYTE_SIZE,
+                    new String[]{"world_sharc.rmiss.spv", "world_sharc_guide.rmiss.spv", "world_shadow.rmiss.spv"},
+                    "world_sharc.rchit.spv", "world_shadow.rchit.spv", "world_sharc.rahit.spv", SharcPushAddrData.BYTE_SIZE,
                     true, GUIDE_COUNT, bindlessTextureCapacity, true, true);
         }
         if (output != null) {
@@ -983,7 +996,7 @@ public final class RtComposite {
                 if (sharcCache != null) {
                     destroySharcResources();
                     RtSharcSupport.fail("GPU timestamp setup failed: " + t.getClass().getSimpleName());
-                    RtDlssRr.INSTANCE.requestHistoryReset();
+                    RtReconstruction.requestHistoryReset();
                     CausticaMod.LOGGER.error("SHaRC GPU timing setup failed; using baseline tracer", t);
                 } else {
                     CausticaMod.LOGGER.warn("RT GPU timestamps unavailable; frame rendering continues", t);
@@ -1163,6 +1176,9 @@ public final class RtComposite {
                 pipeline.setExtraStorageImage(5, gSpecMotion.view);
                 pipeline.setExtraStorageImage(7, gAnimatedGuide.view);
                 pipeline.setExtraStorageImage(10, gDiffuseRayDirectionHitDistance.view);
+                pipeline.setExtraStorageImage(11, gNrdSh1.view);
+                pipeline.setExtraStorageImage(12, gNrdViewZ.view);
+                pipeline.setExtraStorageImage(13, gNrdSignal.view);
             }
         }
         if (offlinePipeline != null && groundTruthAccum != null
@@ -1210,6 +1226,30 @@ public final class RtComposite {
             gDiffuseRayDirectionHitDistance.destroy();
             gDiffuseRayDirectionHitDistance = null;
         }
+        if (gNrdSh1 != null) {
+            gNrdSh1.destroy();
+            gNrdSh1 = null;
+        }
+        if (gNrdViewZ != null) {
+            gNrdViewZ.destroy();
+            gNrdViewZ = null;
+        }
+        if (gNrdSignal != null) {
+            gNrdSignal.destroy();
+            gNrdSignal = null;
+        }
+        if (nrdRawOutput != null) {
+            nrdRawOutput.destroy();
+            nrdRawOutput = null;
+        }
+        if (nrdSh1Output != null) {
+            nrdSh1Output.destroy();
+            nrdSh1Output = null;
+        }
+        if (nrdResolvePipeline != null) {
+            nrdResolvePipeline.destroy();
+            nrdResolvePipeline = null;
+        }
         if (gDepthHistoryA != null) {
             gDepthHistoryA.destroy();
             gDepthHistoryA = null;
@@ -1251,8 +1291,8 @@ public final class RtComposite {
             OfflineGroundTruth.INSTANCE.abort("Offline renderer stopped: resolution changed");
             offlineGroundTruth = false;
         }
-        boolean rrOperational = !offlineGroundTruth && RtDlssRr.INSTANCE.isOperational();
-        int rrQuality = rrOperational ? RtDlssRr.quality() : Integer.MIN_VALUE;
+        boolean rrOperational = !offlineGroundTruth && RtReconstruction.enabled();
+        int rrQuality = rrOperational ? RtReconstruction.resourceIdentity() : Integer.MIN_VALUE;
         boolean fgGuidesRequired = !offlineGroundTruth && RtDlssFg.requested();
         boolean autoExposure = !offlineGroundTruth
                 && "auto".equalsIgnoreCase(CausticaConfig.Rt.Exposure.MODE.get());
@@ -1280,7 +1320,7 @@ public final class RtComposite {
         // Release Streamline's viewport before any tagged input/output image is destroyed or resized.
         // This also promptly frees RR when the setting is switched off instead of retaining its feature
         // allocation until device shutdown.
-        RtDlssRr.INSTANCE.destroy();
+        RtReconstruction.destroy();
         if (displayImage != null) {
             displayImage.destroy();
         }
@@ -1300,9 +1340,9 @@ public final class RtComposite {
         // With RR on, ask the Streamline RR plugin what render resolution its chosen quality mode expects
         // than assuming a fixed ratio: different quality modes (and driver versions) use different
         // ratios, and DLSSD's own optimal-settings query is the source of truth for what it will accept.
-        int[] optimal = rrOperational ? RtDlssRr.INSTANCE.queryOptimalRenderSize(width, height) : null;
+        int[] optimal = rrOperational ? RtReconstruction.queryRenderSize(width, height) : null;
         rrOperational = optimal != null;
-        rrQuality = rrOperational ? RtDlssRr.quality() : Integer.MIN_VALUE;
+        rrQuality = rrOperational ? RtReconstruction.resourceIdentity() : Integer.MIN_VALUE;
         exposureDepthRequired = exposureDepthRequired(autoExposure, rrOperational, fgGuidesRequired);
         renderW = optimal != null ? optimal[0] : width;
         renderH = optimal != null ? optimal[1] : height;
@@ -1347,6 +1387,7 @@ public final class RtComposite {
         boolean motionGuidesRequired = rrOperational || fgGuidesRequired;
         int rrGuideW = rrOperational ? renderW : 1;
         int rrGuideH = rrOperational ? renderH : 1;
+        boolean nrdOperational = rrOperational && RtReconstruction.usesNrd();
         int motionGuideW = motionGuidesRequired ? renderW : 1;
         int motionGuideH = motionGuidesRequired ? renderH : 1;
         int depthGuideW = (motionGuidesRequired || exposureDepthRequired) ? renderW : 1;
@@ -1371,6 +1412,12 @@ public final class RtComposite {
                 "DLSSD animated-surface responsivity");
         gDiffuseRayDirectionHitDistance = ctx.createStorageImage(rrGuideW, rrGuideH,
                 VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "DLSSD diffuse ray direction + hit distance");
+        gNrdSh1 = ctx.createStorageImage(nrdOperational ? renderW : 1, nrdOperational ? renderH : 1,
+                VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "NRD directional SH1 signal");
+        gNrdViewZ = ctx.createStorageImage(nrdOperational ? renderW : 1, nrdOperational ? renderH : 1,
+                VK10.VK_FORMAT_R32_SFLOAT, "NRD linear view depth");
+        gNrdSignal = ctx.createStorageImage(nrdOperational ? renderW : 1, nrdOperational ? renderH : 1,
+                VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "NRD packed input signal");
         gDepthHistoryA = ctx.createStorageImage(rrGuideW, rrGuideH, VK10.VK_FORMAT_R32_SFLOAT,
                 "DLSSD depth history A");
         gDepthHistoryB = ctx.createStorageImage(rrGuideW, rrGuideH, VK10.VK_FORMAT_R32_SFLOAT,
@@ -1379,7 +1426,7 @@ public final class RtComposite {
                 "DLSSD disocclusion mask");
         gBiasCurrentColor = ctx.createStorageImage(rrGuideW, rrGuideH, VK10.VK_FORMAT_R16_SFLOAT,
                 "DLSSD current color bias");
-        if (rrOperational) {
+        if (rrOperational && RtReconstruction.usesDlss()) {
             dlssdDisocclusionPipeline = RtDlssdDisocclusionPipeline.create(ctx);
             dlssdDisocclusionPipeline.setImages(gDepth.view, gMotion.view,
                     gDepthHistoryA.view, gDepthHistoryB.view, gDisocclusion.view, gBiasCurrentColor.view,
@@ -1391,6 +1438,14 @@ public final class RtComposite {
                 ? ctx.createStorageImage(width, height, VK10.VK_FORMAT_R16G16B16A16_SFLOAT,
                         "DLSS-RR output " + width + "x" + height)
                 : null;
+        if (nrdOperational) {
+            nrdRawOutput = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R16G16B16A16_SFLOAT,
+                    "NRD packed output");
+            nrdSh1Output = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R16G16B16A16_SFLOAT,
+                    "NRD SH1 output");
+            nrdResolvePipeline = RtNrdResolvePipeline.create(ctx);
+            nrdResolvePipeline.setImages(nrdRawOutput.view, nrdSh1Output.view, gNormal.view, rrOutput.view);
+        }
         exposure.ensureResources(ctx);
         exposure.resetAutoHistory(); // tile coordinates and trusted-history identity changed with these images
 
@@ -1494,7 +1549,7 @@ public final class RtComposite {
                 // radiance scale, which made live intensity edits appear ineffective or respond slowly.
                 fgReset = true;
                 rrProducedPreviousFrame = false;
-                RtDlssRr.INSTANCE.requestHistoryReset();
+                RtReconstruction.requestHistoryReset();
                 requestSharcReset("emissive radiance changed");
                 exposure.resetAutoHistory();
             }
@@ -1502,7 +1557,7 @@ public final class RtComposite {
             if (lastDebugView != Integer.MIN_VALUE && debugView != lastDebugView) {
                 fgReset = true;
                 rrProducedPreviousFrame = false;
-                RtDlssRr.INSTANCE.requestHistoryReset();
+                RtReconstruction.requestHistoryReset();
             }
             lastDebugView = debugView;
             int settingsSignature = groundTruthSettingsSignature();
@@ -1521,22 +1576,24 @@ public final class RtComposite {
                 VulkanCommandEncoder.memoryBarrier(cmd, stack);
             }
             boolean rrPath = !offlineGroundTruth && renderSizeRrEnabled
-                    && RtDlssRr.INSTANCE.isOperational() && worldDebugView == 0;
-            boolean diffusePathGuide = rrPath && CausticaConfig.Rt.DlssRr.DIFFUSE_PATH_GUIDE.value();
+                    && RtReconstruction.enabled() && worldDebugView == 0;
+            boolean diffusePathGuide = rrPath && RtReconstruction.usesDlss()
+                    && CausticaConfig.Rt.DlssRr.DIFFUSE_PATH_GUIDE.value();
             if (diffusePathGuideKnown && diffusePathGuide != lastDiffusePathGuide) {
-                RtDlssRr.INSTANCE.requestHistoryReset();
+                RtReconstruction.requestHistoryReset();
             }
             diffusePathGuideKnown = true;
             lastDiffusePathGuide = diffusePathGuide;
             if (rrPath && !rrProducedPreviousFrame) {
-                RtDlssRr.INSTANCE.requestHistoryReset();
+                RtReconstruction.requestHistoryReset();
             }
             rrProducedPreviousFrame = false;
             if (rrPath) {
                 // Validate/create the feature before choosing jitter so setup failure produces an unjittered
                 // fallback frame; the next frame will resize the trace path to native resolution.
-                rrPath = RtDlssRr.INSTANCE.ensureFeature(
-                        cmd.address(), renderW, renderH, displayW, displayH);
+                rrPath = RtReconstruction.usesDlss()
+                        ? RtDlssRr.INSTANCE.ensureFeature(cmd.address(), renderW, renderH, displayW, displayH)
+                        : RtNrd.INSTANCE.ensureFeature(ctx, renderW, renderH);
             }
             float jitterX = 0f;
             float jitterY = 0f;
@@ -1579,7 +1636,13 @@ public final class RtComposite {
             }
             if (rrPath) {
                 flags |= FRAME_FLAG_RR_GUIDES;
-                if (diffusePathGuide) {
+                if (RtReconstruction.usesNrd()) {
+                    flags |= FRAME_FLAG_NRD;
+                    if (CausticaConfig.Rt.Nrd.SPHERICAL_HARMONICS.value()) flags |= FRAME_FLAG_NRD_SH;
+                }
+                // NRD needs the first diffuse continuation direction and hit distance for its
+                // normalized hit-distance and optional SH inputs, regardless of the DLSS guide toggle.
+                if (diffusePathGuide || (rrPath && RtReconstruction.usesNrd())) {
                     flags |= FRAME_FLAG_DIFFUSE_PATH_GUIDE;
                 }
             }
@@ -1689,7 +1752,11 @@ public final class RtComposite {
                     sky.borderFogParams(),
                     new Float4(RtTerrain.fadeClockSeconds(),
                             Minecraft.getInstance().options.chunkSectionFadeInTime().get().floatValue(),
-                            0.0f, 0.0f)
+                            0.0f, 0.0f),
+                    new Float4(CausticaConfig.Rt.Nrd.HIT_DISTANCE_A.value(),
+                            CausticaConfig.Rt.Nrd.HIT_DISTANCE_B.value(),
+                            CausticaConfig.Rt.Nrd.HIT_DISTANCE_C.value(),
+                            "relax".equals(CausticaConfig.Rt.Nrd.DENOISER.get()) ? 1.0f : 0.0f)
             ).write(push);
             if (skyViewPipeline != null && skyViewLut != null) {
                 if (!skyTransmittanceReady) {
@@ -1804,7 +1871,7 @@ public final class RtComposite {
                 boolean sharcPrimaryMode = CausticaConfig.Rt.Sharc.PRIMARY_DIFFUSE_REUSE.value()
                         && sharcPrimaryQueryPipeline != null;
                 if (sharcPrimaryModeKnown && sharcPrimaryMode != lastSharcPrimaryMode) {
-                    RtDlssRr.INSTANCE.requestHistoryReset();
+                    RtReconstruction.requestHistoryReset();
                 }
                 sharcPrimaryModeKnown = true;
                 lastSharcPrimaryMode = sharcPrimaryMode;
@@ -1852,25 +1919,54 @@ public final class RtComposite {
             // RR reads them and writes the display-res denoised result straight into rrOutput.
             if (rrPath) {
                 boolean resetTemporal = !fgPreviousViewProjectionValid || emissiveIntensityChanged;
-                dlssdDisocclusionPipeline.dispatch(cmd, renderW, renderH, resetTemporal, frameCounter);
-                VulkanCommandEncoder.memoryBarrier(cmd, stack);
+                if (RtReconstruction.usesDlss()) {
+                    dlssdDisocclusionPipeline.dispatch(cmd, renderW, renderH, resetTemporal, frameCounter);
+                    VulkanCommandEncoder.memoryBarrier(cmd, stack);
+                }
                 if (traceGpuProfiler != null) traceGpuProfiler.disocclusionEnd(cmd);
-                try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "DLSS-RR evaluate");
-                     RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.dlssRr")) {
-                    rrDone = RtDlssRr.INSTANCE.evaluate(cmd.address(), output, gDepth, gMotion, gAlbedo,
-                            gSpecAlbedo, gNormal, gSpecMotion, gDisocclusion, gBiasCurrentColor,
-                            gDiffuseRayDirectionHitDistance, rrOutput,
-                            renderW, renderH, displayW, displayH,
-                            jitterX, jitterY, frameProjection, mvCurProjView,
-                            fgPreviousViewProjectionValid ? fgPreviousViewProjection : mvCurProjView,
-                            frameViewRotation, camX, camY, camZ,
-                            mvCamDeltaX, mvCamDeltaY, mvCamDeltaZ,
-                            resetTemporal);
+                String reconstructionLabel = RtReconstruction.usesDlss() ? "DLSS-RR evaluate" : "NRD evaluate";
+                try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, reconstructionLabel);
+                     RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage(
+                             RtReconstruction.usesDlss() ? "frame.dlssRr" : "frame.nrd")) {
+                    if (RtReconstruction.usesDlss()) {
+                        rrDone = RtDlssRr.INSTANCE.evaluate(cmd.address(), output, gDepth, gMotion, gAlbedo,
+                                gSpecAlbedo, gNormal, gSpecMotion, gDisocclusion, gBiasCurrentColor,
+                                gDiffuseRayDirectionHitDistance, rrOutput,
+                                renderW, renderH, displayW, displayH,
+                                jitterX, jitterY, frameProjection, mvCurProjView,
+                                fgPreviousViewProjectionValid ? fgPreviousViewProjection : mvCurProjView,
+                                frameViewRotation, camX, camY, camZ,
+                                mvCamDeltaX, mvCamDeltaY, mvCamDeltaZ,
+                                resetTemporal);
+                    } else {
+                        rrDone = RtNrd.INSTANCE.evaluate(ctx, cmd.address(), gMotion, gNormal, gNrdViewZ,
+                                gNrdSignal, gNrdSh1, nrdRawOutput, nrdSh1Output,
+                                frameProjection, mvCurProjView,
+                                fgPreviousViewProjectionValid ? fgPreviousViewProjection : mvCurProjView,
+                                mvCamDeltaX, mvCamDeltaY, mvCamDeltaZ,
+                                jitterX, jitterY, (int) frameCounter, resetTemporal);
+                        if (rrDone) {
+                            VulkanCommandEncoder.memoryBarrier(cmd, stack);
+                            nrdResolvePipeline.setImages(nrdRawOutput.view, nrdSh1Output.view,
+                                    gNormal.view, rrOutput.view);
+                            nrdResolvePipeline.dispatch(cmd, renderW, renderH,
+                                    "relax".equals(CausticaConfig.Rt.Nrd.DENOISER.get()) ? 1 : 0,
+                                    CausticaConfig.Rt.Nrd.SPHERICAL_HARMONICS.value());
+                        }
+                    }
+                }
+                if (!rrDone && RtReconstruction.usesNrd()) {
+                    VulkanCommandEncoder.memoryBarrier(cmd, stack);
+                    nrdResolvePipeline.setImages(gNrdSignal.view, gNrdSh1.view, gNormal.view, rrOutput.view);
+                    nrdResolvePipeline.dispatch(cmd, renderW, renderH,
+                            "relax".equals(CausticaConfig.Rt.Nrd.DENOISER.get()) ? 1 : 0,
+                            CausticaConfig.Rt.Nrd.SPHERICAL_HARMONICS.value());
+                    rrDone = true; // decoded noisy fallback remains a valid current display frame
                 }
             } else if (traceGpuProfiler != null) {
                 traceGpuProfiler.disocclusionEnd(cmd);
             }
-            RtDlssRr.INSTANCE.recordFallback(rrPath, rrDone);
+            if (RtReconstruction.usesDlss()) RtDlssRr.INSTANCE.recordFallback(rrPath, rrDone);
 
             // RR-sized resources retain a display-resolution fallback target. Native-resolution RT feeds the
             // display mapper directly, avoiding an otherwise redundant full-frame FP16 copy.
@@ -2156,7 +2252,7 @@ public final class RtComposite {
                     : (samplingChanged ? "celestial sampling radius changed" : "ambient light changed"));
             fgReset = true;
             rrProducedPreviousFrame = false;
-            RtDlssRr.INSTANCE.requestHistoryReset();
+            RtReconstruction.requestHistoryReset();
             requestSharcReset(reason);
             exposure.resetAutoHistory();
         }
@@ -2402,7 +2498,7 @@ public final class RtComposite {
         // longer in flight and can be freed immediately.
         tlasRing.destroy();
         // Release the Streamline RR viewport even if the setting was changed after resources were created.
-        RtDlssRr.INSTANCE.destroy();
+        RtReconstruction.destroy();
         if (displayImage != null) {
             displayImage.destroy();
             displayImage = null;

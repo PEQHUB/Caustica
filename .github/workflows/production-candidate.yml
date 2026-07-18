@@ -8,13 +8,58 @@ permissions:
 
 env:
   VULKAN_SDK_VERSION: 1.4.350.0
+  VULKAN_SDK_LINUX_SHA256: b65f068ab36263559da49d7cacd7e7b9df23824ca8b68ccc522a2b06f5725df2
   SLANG_VERSION: "2026.13"
   SLANG_SHA256: 6bae110faa3b51ea00316e0a1dd4f40b11eb196a2e3a135074300bf2d5d4c777
+  SLANG_LINUX_SHA256: fd86d236b31e38577eb14a040aacb8179cbd9b3289f09ca7aca483886c50f589
 
 jobs:
+  linux-nrd:
+    name: Build Linux x64 NRD payload
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Install Vulkan SDK and pinned Slang
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdk_archive="vulkansdk-linux-x86_64-${VULKAN_SDK_VERSION}.tar.xz"
+          curl --fail --location --retry 3 --output "${sdk_archive}" \
+            "https://sdk.lunarg.com/sdk/download/${VULKAN_SDK_VERSION}/linux/${sdk_archive}"
+          echo "${VULKAN_SDK_LINUX_SHA256}  ${sdk_archive}" | sha256sum --check
+          sdk_parent="${RUNNER_TEMP}/vulkan-sdk"
+          mkdir -p "${sdk_parent}"
+          tar -xf "${sdk_archive}" -C "${sdk_parent}"
+          sdk_root="${sdk_parent}/${VULKAN_SDK_VERSION}/x86_64"
+          echo "VULKAN_SDK=${sdk_root}" >> "${GITHUB_ENV}"
+          echo "${sdk_root}/bin" >> "${GITHUB_PATH}"
+          slang_archive="slang-${SLANG_VERSION}-linux-x86_64-glibc-2.27.tar.gz"
+          curl --fail --location --retry 3 --output "${slang_archive}" \
+            "https://github.com/shader-slang/slang/releases/download/v${SLANG_VERSION}/${slang_archive}"
+          echo "${SLANG_LINUX_SHA256}  ${slang_archive}" | sha256sum --check
+          slang_root="${RUNNER_TEMP}/slang-${SLANG_VERSION}"
+          mkdir -p "${slang_root}"
+          tar -xf "${slang_archive}" -C "${slang_root}"
+          slangc="$(find "${slang_root}" -type f -name slangc -perm -u+x | head -n 1)"
+          echo "CAUSTICA_SLANGC=${slangc}" >> "${GITHUB_ENV}"
+      - name: Build Linux NRD bridge
+        run: ./gradlew buildNrdBridge --stacktrace
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nrd-linux-x64
+          path: build/native/nrd_bridge/release/libnrdbridge.so
+          if-no-files-found: error
+
   build:
-    name: Build Windows Streamline candidate
+    name: Build global reconstruction candidate
     runs-on: windows-2022
+    needs: linux-nrd
 
     steps:
       - name: Checkout Caustica
@@ -74,6 +119,20 @@ jobs:
           if (-not $interposer) { throw "Streamline production bin/x64 directory was not found" }
           $sdk = Split-Path (Split-Path (Split-Path $interposer.FullName -Parent) -Parent) -Parent
           "STREAMLINE_SDK=$sdk" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Download Linux NRD payload
+        uses: actions/download-artifact@v4
+        with:
+          name: nrd-linux-x64
+          path: ${{ runner.temp }}/nrd-linux-x64
+
+      - name: Select Linux NRD payload for the global JAR
+        shell: pwsh
+        run: |
+          $payload = Get-ChildItem "$env:RUNNER_TEMP\nrd-linux-x64" -Recurse -Filter libnrdbridge.so |
+            Select-Object -First 1
+          if (-not $payload) { throw "Linux NRD payload was not downloaded" }
+          "NRD_LINUX_X64=$($payload.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Build and test exact production candidate
         shell: pwsh

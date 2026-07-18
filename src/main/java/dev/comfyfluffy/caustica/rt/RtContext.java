@@ -152,6 +152,10 @@ public final class RtContext {
         return gpuExecutor;
     }
 
+    public int graphicsQueueFamilyIndex() {
+        return graphicsQueue.queueFamilyIndex();
+    }
+
     VulkanQueue computeQueue() {
         return computeQueue;
     }

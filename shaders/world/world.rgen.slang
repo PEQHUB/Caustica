@@ -74,6 +74,9 @@ static SharcRWPtr<uint> sharcStats;
 [[vk::binding(8, 0)]] [format("rg16f")]   RWTexture2D<float2> gSpecMotion; // reflection MVs for RR
 [[vk::binding(10, 0)]] [format("r16f")] RWTexture2D<float> gAnimatedGuide; // temporal responsivity source
 [[vk::binding(13, 0)]] [format("rgba16f")] RWTexture2D<float4> gDiffuseRayDirectionHitDistance;
+[[vk::binding(14, 0)]] [format("rgba16f")] RWTexture2D<float4> gNrdSh1;
+[[vk::binding(15, 0)]] [format("r32f")] RWTexture2D<float> gNrdViewZ;
+[[vk::binding(16, 0)]] [format("rgba16f")] RWTexture2D<float4> gNrdSignal;
 #else
 [[vk::binding(9, 0)]] [format("rgba32f")] RWTexture2D<float4> groundTruthAccum; // RGB mean + sample count
 [[vk::binding(11, 0)]] [format("rgba32f")] RWTexture2D<float4> offlinePilotRead;
@@ -283,6 +286,8 @@ static const uint FRAME_FLAG_OFFLINE_GROUND_TRUTH = 1u << 7u;
 static const uint FRAME_FLAG_OFFLINE_CALIBRATING = 1u << 8u;
 static const uint FRAME_FLAG_DIFFUSE_PATH_GUIDE = 1u << 9u;
 static const uint FRAME_FLAG_EXPOSURE_DEPTH = 1u << 11u;
+static const uint FRAME_FLAG_NRD = 1u << 12u;
+static const uint FRAME_FLAG_NRD_SH = 1u << 13u;
 
 uint payloadMaterial() { return payload.flags & PAYLOAD_MATERIAL_MASK; }
 uint payloadOpticalClass() {
@@ -933,6 +938,7 @@ static const uint SBT_SHADOW = TERRAIN_BUCKETS;
 static const uint SBT_STRIDE_BUCKET = 1u;
 static const uint MISS_RADIANCE = 0u;
 static const uint MISS_GUIDE = 1u;
+static const uint MISS_SHADOW = 2u;
 
 RayDesc makeRay(float3 origin, float tmin, float3 dir, float tmax) {
     RayDesc r;
@@ -943,39 +949,44 @@ RayDesc makeRay(float3 origin, float tmin, float3 dir, float tmax) {
     return r;
 }
 
-// Live and offline binaries share hit-object tracing but specialize invocation reordering independently.
+// Live and offline binaries share transport but specialize invocation reordering independently.
 // Reorder is disabled in the latency-sensitive live shaders after fixed-scene OMM-off and OMM-on A/Bs both
 // showed that its scheduling overhead exceeds the coherence benefit. Offline remains independently tuned.
 void traceRadiance(uint cullMask, float3 ro, float tmin, float3 rd, float tmax) {
+#if CAUSTICA_SER
     HitObject hObj = HitObject::TraceRay(topLevelAS, RAY_FLAG_NONE, cullMask,
             SBT_RADIANCE, SBT_STRIDE_BUCKET, MISS_RADIANCE, makeRay(ro, tmin, rd, tmax), payload);
-#if CAUSTICA_SER
     ReorderThread(hObj);
-#endif
     HitObject::Invoke(topLevelAS, hObj, payload);
+#else
+    TraceRay(topLevelAS, RAY_FLAG_NONE, cullMask, SBT_RADIANCE, SBT_STRIDE_BUCKET,
+            MISS_RADIANCE, makeRay(ro, tmin, rd, tmax), payload);
+#endif
 }
 
 // Guide probes need closest-hit material/motion data but consume no sky radiance. A dedicated miss record
 // avoids running the nested atmosphere march when a reflection/refraction guide escapes the scene.
 void traceGuide(uint rayFlags, float3 ro, float tmin, float3 rd, float tmax) {
+#if CAUSTICA_SER
     HitObject hObj = HitObject::TraceRay(topLevelAS, rayFlags, CULL_SECONDARY,
             SBT_RADIANCE, SBT_STRIDE_BUCKET, MISS_GUIDE, makeRay(ro, tmin, rd, tmax), payload);
-#if CAUSTICA_SER
     ReorderThread(hObj);
-#endif
     HitObject::Invoke(topLevelAS, hObj, payload);
+#else
+    TraceRay(topLevelAS, rayFlags, CULL_SECONDARY, SBT_RADIANCE, SBT_STRIDE_BUCKET,
+            MISS_GUIDE, makeRay(ro, tmin, rd, tmax), payload);
+#endif
 }
 
 float3 visibility(float3 origin, float3 dir, float tmax) {
     shadowVis = float4(1.0, 1.0, 1.0, -1.0); // a = water-crossing sentinel, filled by the water any-hit
     // Shadow SBT records run any-hit only for cutout/translucent/water. Cutout alpha-tests; translucent
-    // and water tint shadowVis.rgb and pass through. Solid blocks terminate traversal. There is no closest
-    // or miss shader worth executing, so use a hit object only as the traversal result.
-    HitObject hObj = HitObject::TraceRay(topLevelAS,
-            RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER,
-            CULL_SECONDARY, SBT_SHADOW, SBT_STRIDE_BUCKET, 0u,
+    // and water tint shadowVis.rgb and pass through. The tiny shadow closest-hit marks an opaque
+    // blocker in alpha; the dedicated miss leaves the initial sentinel untouched.
+    TraceRay(topLevelAS, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, CULL_SECONDARY,
+            SBT_SHADOW, SBT_STRIDE_BUCKET, MISS_SHADOW,
             makeRay(origin, RAY_TMIN, dir, tmax), shadowVis);
-    return hObj.IsMiss() ? shadowVis.rgb : float3(0.0, 0.0, 0.0);
+    return shadowVis.a == -2.0 ? float3(0.0, 0.0, 0.0) : shadowVis.rgb;
 }
 
 float2 projectPrevNdc(float3 worldPos) {
@@ -2125,6 +2136,7 @@ void main() {
     bool primaryOnly = pc.debugView != 0u;
 #endif
     bool writeRrGuides = (pc.flags & FRAME_FLAG_RR_GUIDES) != 0u;
+    bool writeNrdGuides = (pc.flags & FRAME_FLAG_NRD) != 0u;
     bool writeMotionGuides = writeRrGuides || (pc.flags & FRAME_FLAG_FG_GUIDES) != 0u;
     bool writeExposureDepth = (pc.flags & FRAME_FLAG_EXPOSURE_DEPTH) != 0u;
     bool captureGuides = writeMotionGuides || writeExposureDepth || primaryOnly;
@@ -2243,8 +2255,10 @@ void main() {
     // temporal surface. Reflection continues to use the separately preserved physical-interface guides.
     bool debugDepth = pc.debugView == 3u;
     bool debugMotion = pc.debugView == 5u;
-    if (writeMotionGuides || writeExposureDepth || debugDepth) {
+    float nrdViewZ = max(length(gv_hitCamRel), 1.0e-4);
+    if (writeMotionGuides || writeExposureDepth || debugDepth || writeNrdGuides) {
         float4 curClip = mul(pc.curViewProj, float4(gv_hitCamRel, 1.0));
+        nrdViewZ = max(abs(curClip.w), 1.0e-4);
         gv_depth = curClip.w > 0.0 ? curClip.z / curClip.w : 0.0;
     }
 
@@ -2271,6 +2285,9 @@ void main() {
         gAnimatedGuide[pix] = gv_animatedGuide;
         if ((pc.flags & FRAME_FLAG_DIFFUSE_PATH_GUIDE) != 0u) {
             gDiffuseRayDirectionHitDistance[pix] = gv_diffuseRayDirectionHitDistance;
+        }
+        if (writeNrdGuides) {
+            gNrdViewZ[pix] = nrdViewZ;
         }
     } else if (writeMotionGuides) {
         gDepth[pix] = gv_depth;
@@ -2325,6 +2342,39 @@ void main() {
     // Single noisy estimate; the denoiser (DLSS-RR) handles temporal convergence.
     // Calibrated scene-linear radiance is the stable DLSS-D contract. Camera exposure is applied only
     // after reconstruction by the display pipeline.
+    if ((pc.flags & FRAME_FLAG_NRD) != 0u) {
+        float hitDistance = max(gv_diffuseRayDirectionHitDistance.w, 1.0e-6);
+        float3 rawDirection = gv_diffuseRayDirectionHitDistance.xyz;
+        float3 direction = dot(rawDirection, rawDirection) > 1.0e-8
+                ? normalize(rawDirection) : gv_normal;
+        bool reblur = pc.nrdSettings.w < 0.5;
+        float packedHitDistance = hitDistance;
+        if (reblur) {
+            float roughnessCurve = (1.0 - exp2(-200.0 * gv_rough * gv_rough))
+                    * pow(clamp(gv_rough, 0.0, 1.0), 0.5);
+            float normalization = (pc.nrdSettings.x + nrdViewZ * pc.nrdSettings.y)
+                    * lerp(pc.nrdSettings.z, 1.0, roughnessCurve);
+            packedHitDistance = max(clamp(hitDistance / max(normalization, 1.0e-6), 0.0, 1.0), 1.0e-6);
+        }
+        if ((pc.flags & FRAME_FLAG_NRD_SH) != 0u) {
+            if (reblur) {
+                float y = dot(frameRadiance, float3(0.25, 0.5, 0.25));
+                float2 cocg = float2(dot(frameRadiance, float3(0.5, 0.0, -0.5)),
+                        dot(frameRadiance, float3(-0.25, 0.5, -0.25)));
+                gNrdSignal[pix] = float4(y, cocg, packedHitDistance);
+                gNrdSh1[pix] = float4(direction * y, 0.0);
+            } else {
+                gNrdSignal[pix] = float4(frameRadiance, packedHitDistance);
+                gNrdSh1[pix] = float4(direction * dot(frameRadiance, float3(0.2126, 0.7152, 0.0722)), 0.0);
+            }
+        } else if (reblur) {
+            gNrdSignal[pix] = float4(dot(frameRadiance, float3(0.25, 0.5, 0.25)),
+                    dot(frameRadiance, float3(0.5, 0.0, -0.5)),
+                    dot(frameRadiance, float3(-0.25, 0.5, -0.25)), packedHitDistance);
+        } else {
+            gNrdSignal[pix] = float4(frameRadiance, packedHitDistance);
+        }
+    }
     outImage[pix] = float4(frameRadiance, 1.0);
 #endif // CAUSTICA_OFFLINE
 #endif

@@ -78,10 +78,10 @@ public final class RtDeviceBringup {
      * The device extensions RT needs (BDA/descriptor-indexing/SPIR-V 1.4 are core on 1.4).
      * {@code ray_tracing_position_fetch} lets the closest-hit read hit triangle vertex positions
      * ({@code gl_HitTriangleVertexPositionsEXT}) for the normal-map TBN, avoiding a positions buffer
-     * plumbed through the geometry tables. Supported on all RTX GPUs (the project's target).
+     * plumbed through the geometry tables. This remains part of Caustica's cross-vendor RT support floor.
      * {@code ray_query} lets fragment shaders (the world-overlay pass, e.g. block outline) issue inline
      * {@code rayQueryEXT} occlusion tests against the same TLAS the ray-tracing pipeline traces, without a
-     * dedicated raygen dispatch. Same RTX-GPU support floor as the rest of this list.
+     * dedicated raygen dispatch.
      */
     public static final List<String> RT_EXTENSIONS = List.of(
             VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME,
@@ -90,11 +90,7 @@ public final class RtDeviceBringup {
             VK_KHR_RAY_TRACING_POSITION_FETCH_EXTENSION_NAME,
             VK_KHR_RAY_QUERY_EXTENSION_NAME);
 
-    /**
-     * Shader Execution Reordering is still required by Caustica's current world raygen, but the SPIR-V
-     * extension differs between the original NVIDIA path and the ratified EXT path. Prefer NV when present
-     * for older NVIDIA drivers, otherwise use EXT.
-     */
+    /** Optional Shader Execution Reordering capability. The normal live path never requires it. */
     public static final List<String> SER_EXTENSIONS = List.of(
             VK_NV_RAY_TRACING_INVOCATION_REORDER_EXTENSION_NAME,
             VK_EXT_RAY_TRACING_INVOCATION_REORDER_EXTENSION_NAME);
@@ -123,7 +119,7 @@ public final class RtDeviceBringup {
     private static boolean loggedUnavailable;
 
     private enum SerBackend {
-        NONE("none", null, "world.rgen.spv"),
+        NONE("none", null, "world_base.rgen.spv"),
         NV("NV", VK_NV_RAY_TRACING_INVOCATION_REORDER_EXTENSION_NAME, "world_nv.rgen.spv"),
         EXT("EXT", VK_EXT_RAY_TRACING_INVOCATION_REORDER_EXTENSION_NAME, "world.rgen.spv");
 
@@ -151,39 +147,53 @@ public final class RtDeviceBringup {
     }
 
     public static String offlineWorldRaygenShader() {
-        return serBackend == SerBackend.NV ? "world_offline_nv.rgen.spv" : "world_offline.rgen.spv";
+        return switch (serBackend) {
+            case NV -> "world_offline_nv.rgen.spv";
+            case EXT -> "world_offline.rgen.spv";
+            case NONE -> "world_offline_base.rgen.spv";
+        };
     }
 
     public static String sharcQueryRaygenShader() {
-        return serBackend == SerBackend.NV ? "world_sharc_nv.rgen.spv" : "world_sharc.rgen.spv";
+        return backendShader("world_sharc.rgen.spv", "world_sharc_nv.rgen.spv", "world_sharc_base.rgen.spv");
     }
 
     public static String sharcDiffuseQueryRaygenShader() {
-        return serBackend == SerBackend.NV ? "world_sharc_diffuse_nv.rgen.spv"
-                : "world_sharc_diffuse.rgen.spv";
+        return backendShader("world_sharc_diffuse.rgen.spv", "world_sharc_diffuse_nv.rgen.spv",
+                "world_sharc_diffuse_base.rgen.spv");
     }
 
     public static String sharcPrimaryQueryRaygenShader() {
-        return serBackend == SerBackend.NV ? "world_sharc_primary_nv.rgen.spv"
-                : "world_sharc_primary.rgen.spv";
+        return backendShader("world_sharc_primary.rgen.spv", "world_sharc_primary_nv.rgen.spv",
+                "world_sharc_primary_base.rgen.spv");
     }
 
     public static String sharcUpdateRaygenShader() {
-        return serBackend == SerBackend.NV ? "world_sharc_update_nv.rgen.spv" : "world_sharc_update.rgen.spv";
+        return backendShader("world_sharc_update.rgen.spv", "world_sharc_update_nv.rgen.spv",
+                "world_sharc_update_base.rgen.spv");
     }
 
     public static String sharcDiagnosticQueryRaygenShader() {
-        return serBackend == SerBackend.NV ? "world_sharc_diagnostic_nv.rgen.spv" : "world_sharc_diagnostic.rgen.spv";
+        return backendShader("world_sharc_diagnostic.rgen.spv", "world_sharc_diagnostic_nv.rgen.spv",
+                "world_sharc_diagnostic_base.rgen.spv");
     }
 
     public static String sharcPrimaryDiagnosticQueryRaygenShader() {
-        return serBackend == SerBackend.NV ? "world_sharc_primary_diagnostic_nv.rgen.spv"
-                : "world_sharc_primary_diagnostic.rgen.spv";
+        return backendShader("world_sharc_primary_diagnostic.rgen.spv",
+                "world_sharc_primary_diagnostic_nv.rgen.spv", "world_sharc_primary_diagnostic_base.rgen.spv");
     }
 
     public static String sharcDiagnosticUpdateRaygenShader() {
-        return serBackend == SerBackend.NV ? "world_sharc_update_diagnostic_nv.rgen.spv"
-                : "world_sharc_update_diagnostic.rgen.spv";
+        return backendShader("world_sharc_update_diagnostic.rgen.spv",
+                "world_sharc_update_diagnostic_nv.rgen.spv", "world_sharc_update_diagnostic_base.rgen.spv");
+    }
+
+    private static String backendShader(String ext, String nv, String base) {
+        return switch (serBackend) {
+            case EXT -> ext;
+            case NV -> nv;
+            case NONE -> base;
+        };
     }
 
     public static boolean sharcInt64AtomicsEnabled() {
@@ -374,10 +384,6 @@ public final class RtDeviceBringup {
                 return ext;
             }
         }
-        if (selectSerBackend(physicalDevice) == SerBackend.NONE) {
-            return VK_NV_RAY_TRACING_INVOCATION_REORDER_EXTENSION_NAME + " or "
-                    + VK_EXT_RAY_TRACING_INVOCATION_REORDER_EXTENSION_NAME;
-        }
         return null;
     }
 
@@ -392,7 +398,7 @@ public final class RtDeviceBringup {
             }
         }
         String serExtension = selectSerBackend(physicalDevice).extensionName;
-        if (!augmentedExtensions.contains(serExtension)) {
+        if (serExtension != null && !augmentedExtensions.contains(serExtension)) {
             augmentedExtensions.add(serExtension);
         }
         for (String ext : supportedOptionalExtensions(physicalDevice)) {
@@ -433,13 +439,6 @@ public final class RtDeviceBringup {
                 VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR,
                 VkPhysicalDeviceRayQueryFeaturesKHR.SIZEOF);
         SerBackend selectedSerBackend = selectSerBackend(physicalDevice);
-        VulkanPNextStruct serStruct = selectedSerBackend == SerBackend.NV
-                ? new VulkanPNextStruct(
-                        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_INVOCATION_REORDER_FEATURES_NV,
-                        VkPhysicalDeviceRayTracingInvocationReorderFeaturesNV.SIZEOF)
-                : new VulkanPNextStruct(
-                        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_INVOCATION_REORDER_FEATURES_EXT,
-                        VkPhysicalDeviceRayTracingInvocationReorderFeaturesEXT.SIZEOF);
         // bufferDeviceAddress merges into vanilla's existing Vulkan12Features struct.
         features.add(new VulkanFeature(VulkanBackend.VK12_FEATURES_STRUCT, "bufferDeviceAddress",
                 VkPhysicalDeviceVulkan12Features.BUFFERDEVICEADDRESS));
@@ -472,10 +471,19 @@ public final class RtDeviceBringup {
                 VkPhysicalDeviceRayTracingPositionFetchFeaturesKHR.RAYTRACINGPOSITIONFETCH));
         features.add(new VulkanFeature(rayQueryStruct, "rayQuery",
                 VkPhysicalDeviceRayQueryFeaturesKHR.RAYQUERY));
-        features.add(new VulkanFeature(serStruct, "rayTracingInvocationReorder",
-                selectedSerBackend == SerBackend.NV
-                        ? VkPhysicalDeviceRayTracingInvocationReorderFeaturesNV.RAYTRACINGINVOCATIONREORDER
-                        : VkPhysicalDeviceRayTracingInvocationReorderFeaturesEXT.RAYTRACINGINVOCATIONREORDER));
+        if (selectedSerBackend != SerBackend.NONE) {
+            VulkanPNextStruct serStruct = selectedSerBackend == SerBackend.NV
+                    ? new VulkanPNextStruct(
+                            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_INVOCATION_REORDER_FEATURES_NV,
+                            VkPhysicalDeviceRayTracingInvocationReorderFeaturesNV.SIZEOF)
+                    : new VulkanPNextStruct(
+                            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_INVOCATION_REORDER_FEATURES_EXT,
+                            VkPhysicalDeviceRayTracingInvocationReorderFeaturesEXT.SIZEOF);
+            features.add(new VulkanFeature(serStruct, "rayTracingInvocationReorder",
+                    selectedSerBackend == SerBackend.NV
+                            ? VkPhysicalDeviceRayTracingInvocationReorderFeaturesNV.RAYTRACINGINVOCATIONREORDER
+                            : VkPhysicalDeviceRayTracingInvocationReorderFeaturesEXT.RAYTRACINGINVOCATIONREORDER));
+        }
 
         // Optional: wideLines (core VK10 feature, no extension). Lets the world-overlay pass (block
         // outline) draw a real thick native line via a raster pipeline's lineWidth / VK_DYNAMIC_STATE_LINE
@@ -517,12 +525,13 @@ public final class RtDeviceBringup {
         rtRequested = true;
         serBackend = selectedSerBackend;
         CausticaMod.LOGGER.info(
-                "Ray tracing: enabling {} + {}{} + features [bufferDeviceAddress, accelerationStructure, rayTracingPipeline, rayQuery, rayTracingInvocationReorderCapability({}), liveReorder=off, offlineReorder=on"
+                "Ray tracing: enabling {}{}{} + features [bufferDeviceAddress, accelerationStructure, rayTracingPipeline, rayQuery, optionalInvocationReorder({}), liveReorder=off, offlineReorder={}"
                         + (wideLinesEnabled ? ", wideLines(max=" + maxLineWidth + ")" : "")
                         + (sharcInt64AtomicsEnabled ? ", shaderBufferInt64Atomics(SHaRC)" : "")
                         + (ommEnabled ? ", opacityMicromap" : "") + "] + overlayMsaa=" + overlayMsaaSamples + "x on [{}]",
-                RT_EXTENSIONS, serBackend.extensionName, ommEnabled ? " + " + OPTIONAL_RT_EXTENSIONS : "",
-                serBackend.label, physicalDevice.deviceName());
+                RT_EXTENSIONS, serBackend.extensionName == null ? "" : " + " + serBackend.extensionName,
+                ommEnabled ? " + " + OPTIONAL_RT_EXTENSIONS : "", serBackend.label,
+                serBackend != SerBackend.NONE ? "on" : "off", physicalDevice.deviceName());
     }
 
     /**

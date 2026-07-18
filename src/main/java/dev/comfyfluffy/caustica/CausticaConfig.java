@@ -77,7 +77,10 @@ public final class CausticaConfig {
             Rt.ENABLED, Rt.Composite.SPP, Rt.Composite.MAX_BOUNCES, Rt.Terrain.ASYNC_DISPATCH_PER_PASS, Rt.Omm.ENABLED,
             Rt.Entities.ENABLED, Rt.Entities.GLOW_ENABLED, Rt.FirstPerson.ENABLED,
             Rt.FirstPerson.DISABLE_VANILLA_MODEL, Rt.EntityTextures.MAX_TEXTURES,
-            Rt.DlssRr.ENABLED, Rt.DlssRr.DIFFUSE_PATH_GUIDE,
+            Rt.Reconstruction.BACKEND, Rt.DlssRr.ENABLED, Rt.DlssRr.DIFFUSE_PATH_GUIDE,
+            Rt.Nrd.DENOISER, Rt.Nrd.SPHERICAL_HARMONICS, Rt.Nrd.MAX_ACCUMULATED_FRAMES,
+            Rt.Nrd.MAX_FAST_ACCUMULATED_FRAMES, Rt.Nrd.HISTORY_FIX_FRAMES,
+            Rt.Nrd.PREPASS_BLUR_RADIUS, Rt.Nrd.MAX_BLUR_RADIUS, Rt.Nrd.ANTI_FIREFLY,
             Rt.Fg.ENABLED, Rt.Fg.MODE, Rt.Fg.MULTI_FRAME_COUNT, Rt.Fg.DYNAMIC_TARGET_FPS,
             Rt.Reflex.ENABLED, Rt.Exposure.MODE, Rt.FrameStats.ENABLED,
             Rt.Sharc.ENABLED, Rt.Sharc.PRIMARY_DIFFUSE_REUSE, Rt.Sharc.CACHE_EXPONENT, Rt.Sharc.UPDATE_TILE_SIZE,
@@ -146,6 +149,13 @@ public final class CausticaConfig {
                         + " Dynamic MFG is D3D12-only and is migrated to fixed because Caustica uses Vulkan.\n"
                         + " With VSync requested, Vulkan DLSS-G uses MAILBOX presentation. With VSync off,\n"
                         + " it uses IMMEDIATE presentation. DLSS-G itself is never frame-limited by Reflex.");
+        FILE.setComment("reconstruction",
+                " Global reconstruction backend: auto, nrd, dlss-rr, or off. Auto prefers NRD on Linux/AMD/Intel\n"
+                        + " and DLSS-RR on supported Windows NVIDIA systems, with NRD as the support-failure fallback.");
+        FILE.setComment("nrd",
+                " Live NVIDIA Real-time Denoisers settings for the vendor-neutral Vulkan backend.\n"
+                        + " REBLUR is the default; RELAX and directional SH/SG are explicit opt-ins.\n"
+                        + " Backend, denoiser, and SH changes recreate resources and reset temporal history.");
         FILE.setComment("reflex",
                 " Streamline Reflex Low Latency. DLSS-G forces effective On while generation is active.\n"
                         + " minimum-interval-us applies only while DLSS-G is off; DLSS-G always submits 0 (unlimited).\n"
@@ -894,6 +904,69 @@ public final class CausticaConfig {
             public static final IntSetting QUALITY = intValue("caustica.rt.dlssRr.quality", "dlss-rr.quality", 0);
 
             private DlssRr() {
+            }
+        }
+
+        /** Global reconstruction policy. Auto is vendor/OS aware but never prevents an explicit choice. */
+        public static final class Reconstruction {
+            public static final StringSetting BACKEND = string(
+                    "caustica.rt.reconstruction.backend", "reconstruction.backend", "auto",
+                    value -> switch (value == null ? "" : value.trim().toLowerCase(java.util.Locale.ROOT)) {
+                        case "nrd", "dlss-rr", "off" -> value.trim().toLowerCase(java.util.Locale.ROOT);
+                        default -> "auto";
+                    });
+
+            private Reconstruction() {
+            }
+        }
+
+        /** NVIDIA NRD 4.17.x controls. All fields below are copied into the active denoiser every frame. */
+        public static final class Nrd {
+            public static final StringSetting DENOISER = string(
+                    "caustica.rt.nrd.denoiser", "nrd.denoiser", "reblur",
+                    value -> "relax".equalsIgnoreCase(value) ? "relax" : "reblur");
+            public static final BooleanSetting SPHERICAL_HARMONICS = bool(
+                    "caustica.rt.nrd.sphericalHarmonics", "nrd.spherical-harmonics", false);
+            public static final IntSetting MAX_ACCUMULATED_FRAMES = clampedInt(
+                    "caustica.rt.nrd.maxAccumulatedFrames", "nrd.max-accumulated-frames", 30, 0, 255);
+            public static final IntSetting MAX_FAST_ACCUMULATED_FRAMES = clampedInt(
+                    "caustica.rt.nrd.maxFastAccumulatedFrames", "nrd.max-fast-accumulated-frames", 6, 0, 63);
+            public static final IntSetting HISTORY_FIX_FRAMES = clampedInt(
+                    "caustica.rt.nrd.historyFixFrames", "nrd.history-fix-frames", 3, 0, 3);
+            public static final IntSetting HISTORY_FIX_STRIDE = clampedInt(
+                    "caustica.rt.nrd.historyFixStride", "nrd.history-fix-stride", 14, 1, 32);
+            public static final FloatSetting PREPASS_BLUR_RADIUS = clampedFloat(
+                    "caustica.rt.nrd.prepassBlurRadius", "nrd.prepass-blur-radius", 30.0f, 0.0f, 100.0f);
+            public static final FloatSetting MIN_BLUR_RADIUS = clampedFloat(
+                    "caustica.rt.nrd.minBlurRadius", "nrd.min-blur-radius", 1.0f, 0.0f, 10.0f);
+            public static final FloatSetting MAX_BLUR_RADIUS = clampedFloat(
+                    "caustica.rt.nrd.maxBlurRadius", "nrd.max-blur-radius", 30.0f, 0.0f, 100.0f);
+            public static final FloatSetting LOBE_ANGLE_FRACTION = clampedFloat(
+                    "caustica.rt.nrd.lobeAngleFraction", "nrd.lobe-angle-fraction", 0.15f, 0.0f, 1.0f);
+            public static final FloatSetting ROUGHNESS_FRACTION = clampedFloat(
+                    "caustica.rt.nrd.roughnessFraction", "nrd.roughness-fraction", 0.15f, 0.0f, 1.0f);
+            public static final FloatSetting PLANE_DISTANCE_SENSITIVITY = clampedFloat(
+                    "caustica.rt.nrd.planeDistanceSensitivity", "nrd.plane-distance-sensitivity", 0.02f, 0.001f, 0.2f);
+            public static final FloatSetting DISOCCLUSION_THRESHOLD = clampedFloat(
+                    "caustica.rt.nrd.disocclusionThreshold", "nrd.disocclusion-threshold", 0.01f, 0.001f, 0.2f);
+            public static final FloatSetting SPLIT_SCREEN = clampedFloat(
+                    "caustica.rt.nrd.splitScreen", "nrd.split-screen", 0.0f, 0.0f, 1.0f);
+            public static final FloatSetting HIT_DISTANCE_A = clampedFloat(
+                    "caustica.rt.nrd.hitDistanceA", "nrd.hit-distance-a", 3.0f, 0.01f, 100.0f);
+            public static final FloatSetting HIT_DISTANCE_B = clampedFloat(
+                    "caustica.rt.nrd.hitDistanceB", "nrd.hit-distance-b", 0.1f, 0.001f, 10.0f);
+            public static final FloatSetting HIT_DISTANCE_C = clampedFloat(
+                    "caustica.rt.nrd.hitDistanceC", "nrd.hit-distance-c", 20.0f, 1.0f, 100.0f);
+            public static final BooleanSetting ANTI_FIREFLY = bool(
+                    "caustica.rt.nrd.antiFirefly", "nrd.anti-firefly", true);
+            public static final BooleanSetting ANTILAG = bool(
+                    "caustica.rt.nrd.antilag", "nrd.antilag", false);
+            public static final FloatSetting ANTILAG_SIGMA = clampedFloat(
+                    "caustica.rt.nrd.antilagSigma", "nrd.antilag-sigma", 2.0f, 0.1f, 10.0f);
+            public static final IntSetting RELAX_ATROUS_ITERATIONS = clampedInt(
+                    "caustica.rt.nrd.relaxAtrousIterations", "nrd.relax-atrous-iterations", 5, 2, 8);
+
+            private Nrd() {
             }
         }
 

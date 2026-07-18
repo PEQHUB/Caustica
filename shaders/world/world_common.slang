@@ -102,6 +102,7 @@ public struct WorldPush {
     [vk::offset(624)] public float4 borderFogColor;
     [vk::offset(640)] public float4 borderFogParams; // start distance, end distance, reserved, reserved
     [vk::offset(656)] public float4 chunkFade; // clock seconds, vanilla fade duration, reserved, reserved
+    [vk::offset(672)] public float4 nrdSettings; // hit distance A/B/C, denoiser family (0 REBLUR, 1 RELAX)
 };
 
 // Radiance-ray payload (location 0). Member order and types are a cross-stage ABI.

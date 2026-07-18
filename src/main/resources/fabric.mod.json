@@ -3,7 +3,7 @@
 	"id": "caustica",
 	"version": "${version}",
 	"name": "Caustica",
-	"description": "Path-traced Vulkan renderer with DLSS Ray Reconstruction, Frame Generation, Multi Frame Generation, and HDR.",
+	"description": "Global path-traced Vulkan renderer with NRD on Linux/AMD, optional DLSS Ray Reconstruction and Frame Generation, and HDR.",
 	"authors": [
 		"i"
 	],

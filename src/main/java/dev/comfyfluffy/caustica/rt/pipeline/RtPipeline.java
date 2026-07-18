@@ -129,7 +129,8 @@ public final class RtPipeline {
      * adds that many raygen-visible storage images at bindings 3.. (the DLSS-RR guide buffers);
      * write them with {@link #setExtraStorageImage}.
      */
-    public static RtPipeline create(RtContext ctx, String rgen, String[] rmiss, String rchit, String rahit,
+    public static RtPipeline create(RtContext ctx, String rgen, String[] rmiss, String rchit, String shadowRchit,
+                                    String rahit,
                                     int pushConstantSize, boolean withBlockAlbedoAtlas, int extraStorageImages,
                                     int bindlessTextures, boolean blockMaterialAtlases, boolean skyAtlas) {
         VkDevice vk = ctx.vk();
@@ -262,8 +263,9 @@ public final class RtPipeline {
             int groupCount = 1 + missCount + hitGroupCount;
             int hitGroupIdx = 1 + missCount;
             int chitStage = 1 + missCount;
-            int ahitStage = chitStage + 1;
-            int stageCount = 1 + missCount + 1 + (hasAhit ? 1 : 0);
+            int shadowChitStage = chitStage + 1;
+            int ahitStage = shadowChitStage + 1;
+            int stageCount = 1 + missCount + 2 + (hasAhit ? 1 : 0);
             long mGen = loadModule(vk, stack, rgen);
             RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_SHADER_MODULE, mGen, label + " " + rgen);
             long[] mMiss = new long[missCount];
@@ -273,6 +275,8 @@ public final class RtPipeline {
             }
             long mHit = loadModule(vk, stack, rchit);
             RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_SHADER_MODULE, mHit, label + " " + rchit);
+            long mShadowHit = loadModule(vk, stack, shadowRchit);
+            RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_SHADER_MODULE, mShadowHit, label + " " + shadowRchit);
             long mAhit = hasAhit ? loadModule(vk, stack, rahit) : 0L;
             if (hasAhit) {
                 RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_SHADER_MODULE, mAhit, label + " " + rahit);
@@ -284,6 +288,8 @@ public final class RtPipeline {
                 stages.get(1 + m).sType$Default().stage(VK_SHADER_STAGE_MISS_BIT_KHR).module(mMiss[m]).pName(entry);
             }
             stages.get(chitStage).sType$Default().stage(VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR).module(mHit).pName(entry);
+            stages.get(shadowChitStage).sType$Default().stage(VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR)
+                    .module(mShadowHit).pName(entry);
             if (hasAhit) {
                 stages.get(ahitStage).sType$Default().stage(VK_SHADER_STAGE_ANY_HIT_BIT_KHR).module(mAhit).pName(entry);
             }
@@ -297,7 +303,8 @@ public final class RtPipeline {
             }
             for (int h = 0; h < hitGroupCount; h++) {
                 groups.get(hitGroupIdx + h).sType$Default().type(VK_RAY_TRACING_SHADER_GROUP_TYPE_TRIANGLES_HIT_GROUP_KHR)
-                        .generalShader(VK_SHADER_UNUSED_KHR).closestHitShader(chitStage)
+                        .generalShader(VK_SHADER_UNUSED_KHR)
+                        .closestHitShader(hitGroupUsesShadowClosestHit(h) ? shadowChitStage : chitStage)
                         .anyHitShader(hasAhit && hitGroupUsesAnyHit(h) ? ahitStage : VK_SHADER_UNUSED_KHR)
                         .intersectionShader(VK_SHADER_UNUSED_KHR);
             }
@@ -320,6 +327,7 @@ public final class RtPipeline {
                 VK10.vkDestroyShaderModule(vk, mMiss[m], null);
             }
             VK10.vkDestroyShaderModule(vk, mHit, null);
+            VK10.vkDestroyShaderModule(vk, mShadowHit, null);
             if (hasAhit) {
                 VK10.vkDestroyShaderModule(vk, mAhit, null);
             }
@@ -350,6 +358,13 @@ public final class RtPipeline {
         }
         int entityBucket = (relativeHitGroup - RtAccel.SBT_ENTITY_OFFSET) % RtAccel.TERRAIN_BUCKETS;
         return entityBucket == RtAccel.ENTITY_BUCKET_ANY_HIT;
+    }
+
+    private static boolean hitGroupUsesShadowClosestHit(int relativeHitGroup) {
+        int rayType = relativeHitGroup < RtAccel.SBT_ENTITY_OFFSET
+                ? relativeHitGroup / RtAccel.TERRAIN_BUCKETS
+                : (relativeHitGroup - RtAccel.SBT_ENTITY_OFFSET) / RtAccel.TERRAIN_BUCKETS;
+        return rayType == RtAccel.SBT_RAY_SHADOW;
     }
 
     /**

@@ -36,7 +36,7 @@ final class NightRenderingContractTest {
         String body = composite.substring(handler, Math.min(composite.length(), handler + 2200));
         assertTrue(body.contains("timeJump"));
         assertTrue(body.contains("requestSharcReset(reason)"));
-        assertTrue(body.contains("RtDlssRr.INSTANCE.requestHistoryReset()"));
+        assertTrue(body.contains("RtReconstruction.requestHistoryReset()"));
         assertTrue(body.contains("exposure.resetAutoHistory()"));
         String packetMixin = Files.readString(Path.of(
                 "src/main/java/dev/comfyfluffy/caustica/mixin/ClientPacketListenerMixin.java"));

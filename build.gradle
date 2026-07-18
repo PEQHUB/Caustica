@@ -245,10 +245,14 @@ abstract class CompileShaders extends DefaultTask {
 						? ["-DCAUSTICA_OFFLINE=0", "-DCAUSTICA_SER=0", "-O2", "-fp-mode", "precise",
 						   "-capability", "spvShaderInvocationReorderEXT"] : [])
 				if (base == "world.rgen") {
+					compileOneSlang(src, new File(scratchDir, "world_base.rgen.spv"),
+							["-DCAUSTICA_OFFLINE=0", "-DCAUSTICA_SER=0", "-O2", "-fp-mode", "precise"])
 					compileOneSlang(src, new File(scratchDir, "world_nv.rgen.spv"),
 							["-DCAUSTICA_OFFLINE=0", "-DCAUSTICA_SER=0", "-O2", "-fp-mode", "precise",
 							 "-capability", "spvShaderInvocationReorderNV"])
 					// Offline uses the same transport/material source but a separate entrypoint binary and sampler.
+					compileOneSlang(src, new File(scratchDir, "world_offline_base.rgen.spv"),
+							["-DCAUSTICA_OFFLINE=1", "-DCAUSTICA_SER=0", "-O2", "-fp-mode", "precise"])
 					compileOneSlang(src, new File(scratchDir, "world_offline.rgen.spv"),
 							["-DCAUSTICA_OFFLINE=1", "-DCAUSTICA_SER=1", "-O2", "-fp-mode", "precise",
 							 "-capability", "spvShaderInvocationReorderEXT"])
@@ -287,30 +291,44 @@ abstract class CompileShaders extends DefaultTask {
 			def sharc = new File(srcDir.get().asFile, "sharc")
 			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc.rgen.spv"),
 					queryDefines + sharcInclude + ["-capability", "spvShaderInvocationReorderEXT"])
+			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_base.rgen.spv"),
+					queryDefines + sharcInclude)
 			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_nv.rgen.spv"),
 					queryDefines + sharcInclude + ["-capability", "spvShaderInvocationReorderNV"])
 			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_diffuse.rgen.spv"),
 					diffuseQueryDefines + sharcInclude + ["-capability", "spvShaderInvocationReorderEXT"])
+			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_diffuse_base.rgen.spv"),
+					diffuseQueryDefines + sharcInclude)
 			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_diffuse_nv.rgen.spv"),
 					diffuseQueryDefines + sharcInclude + ["-capability", "spvShaderInvocationReorderNV"])
 			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_primary.rgen.spv"),
 					primaryQueryDefines + sharcInclude + ["-capability", "spvShaderInvocationReorderEXT"])
+			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_primary_base.rgen.spv"),
+					primaryQueryDefines + sharcInclude)
 			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_primary_nv.rgen.spv"),
 					primaryQueryDefines + sharcInclude + ["-capability", "spvShaderInvocationReorderNV"])
 			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_update.rgen.spv"),
 					updateDefines + sharcInclude + ["-capability", "spvShaderInvocationReorderEXT"])
+			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_update_base.rgen.spv"),
+					updateDefines + sharcInclude)
 			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_update_nv.rgen.spv"),
 					updateDefines + sharcInclude + ["-capability", "spvShaderInvocationReorderNV"])
 			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_diagnostic.rgen.spv"),
 					diagnosticQueryDefines + sharcInclude + ["-capability", "spvShaderInvocationReorderEXT"])
+			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_diagnostic_base.rgen.spv"),
+					diagnosticQueryDefines + sharcInclude)
 			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_diagnostic_nv.rgen.spv"),
 					diagnosticQueryDefines + sharcInclude + ["-capability", "spvShaderInvocationReorderNV"])
 			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_primary_diagnostic.rgen.spv"),
 					primaryDiagnosticQueryDefines + sharcInclude + ["-capability", "spvShaderInvocationReorderEXT"])
+			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_primary_diagnostic_base.rgen.spv"),
+					primaryDiagnosticQueryDefines + sharcInclude)
 			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_primary_diagnostic_nv.rgen.spv"),
 					primaryDiagnosticQueryDefines + sharcInclude + ["-capability", "spvShaderInvocationReorderNV"])
 			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_update_diagnostic.rgen.spv"),
 					diagnosticUpdateDefines + sharcInclude + ["-capability", "spvShaderInvocationReorderEXT"])
+			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_update_diagnostic_base.rgen.spv"),
+					diagnosticUpdateDefines + sharcInclude)
 			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_update_diagnostic_nv.rgen.spv"),
 					diagnosticUpdateDefines + sharcInclude + ["-capability", "spvShaderInvocationReorderNV"])
 			[
@@ -352,7 +370,7 @@ abstract class CompileShaders extends DefaultTask {
 		// The live raygen owns the camera-only physical atmosphere boundary and vanilla-controlled section
 		// reveal. Keep that intentional presentation path inside a tight 128 KB ceiling; transport variants
 		// still share the same visibility traversal and sampler-inlining checks below.
-		["world.rgen.spv", "world_nv.rgen.spv"].each { name ->
+		["world_base.rgen.spv", "world.rgen.spv", "world_nv.rgen.spv"].each { name ->
 			def raygen = new File(scratchDir, name)
 			if (!raygen.isFile() || raygen.length() > 128_000L) {
 				throw new GradleException("Glass-only world raygen complexity budget exceeded: ${name} is "
@@ -375,7 +393,7 @@ abstract class CompileShaders extends DefaultTask {
 				}
 			}
 		}
-		["world_offline.rgen.spv", "world_offline_nv.rgen.spv"].each { name ->
+		["world_offline_base.rgen.spv", "world_offline.rgen.spv", "world_offline_nv.rgen.spv"].each { name ->
 			def raygen = new File(scratchDir, name)
 			if (!raygen.isFile() || raygen.length() > 124_000L) {
 				throw new GradleException("Offline world raygen complexity budget exceeded: ${name} is "
@@ -385,8 +403,11 @@ abstract class CompileShaders extends DefaultTask {
 			execOps.exec {
 				commandLine spirvDis.get(), "--raw-id", raygen.absolutePath, "-o", disassembly.absolutePath
 			}
-			if (!(disassembly.getText("UTF-8") =~ /OpReorderThreadWithHitObject(?:EXT|NV)/).find()) {
-				throw new GradleException("Offline world raygen is missing its independent invocation reorder: ${name}")
+			def hasReorder = (disassembly.getText("UTF-8") =~ /OpReorderThreadWithHitObject(?:EXT|NV)/).find()
+			if (name == "world_offline_base.rgen.spv" ? hasReorder : !hasReorder) {
+				throw new GradleException(name == "world_offline_base.rgen.spv"
+						? "Baseline offline world raygen unexpectedly contains invocation reorder"
+						: "Offline world raygen is missing its independent invocation reorder: ${name}")
 			}
 		}
 		scratchDir.listFiles().findAll { it.name.startsWith("world_sharc") && it.name.endsWith(".rgen.spv") }
@@ -693,6 +714,79 @@ def bundleStreamlineNatives = tasks.register("bundleStreamlineNatives") {
 
 sourceSets.main.resources.srcDir(files(streamlineNativeGenRoot).builtBy(bundleStreamlineNatives))
 
+// NRD is the cross-platform Vulkan reconstruction backend. Unlike Streamline it is built from a pinned
+// public source revision and contains no vendor runtime DLL. CI builds this target once on Windows and
+// once on Linux, then the release assembly can provide both payloads through NRD_WINDOWS_X64/NRD_LINUX_X64.
+def nrdNativeGenRoot = layout.buildDirectory.dir("generated/nrd-natives")
+def nrdBridgeSourceDir = file("native/nrd_bridge")
+def nrdBridgeBuildDir = file("native/nrd_bridge/build-gradle")
+def nrdOs = org.gradle.internal.os.OperatingSystem.current()
+def nrdArch = System.getProperty("os.arch", "").toLowerCase(java.util.Locale.ROOT)
+def nrdPlatform = (nrdArch == "x86_64" || nrdArch == "amd64")
+		? (nrdOs.windows ? "windows-x64" : nrdOs.linux ? "linux-x64" : null) : null
+def nrdFilename = nrdOs.windows ? "nrdbridge.dll" : "libnrdbridge.so"
+def nrdLocalOutput = new File(layout.buildDirectory.get().asFile,
+		"native/nrd_bridge/release/${nrdFilename}")
+
+def configureNrdBridge = tasks.register("configureNrdBridge", Exec) {
+	group = "build"
+	description = "Configures the pinned cross-platform NRD 4.17.3 Vulkan bridge."
+	onlyIf { nrdPlatform != null }
+	inputs.files(fileTree(nrdBridgeSourceDir) { include "CMakeLists.txt", "*.cpp", "*.h" })
+	outputs.file(new File(nrdBridgeBuildDir, "CMakeCache.txt"))
+	doFirst {
+		def arguments = ["cmake", "-S", nrdBridgeSourceDir.absolutePath,
+				"-B", nrdBridgeBuildDir.absolutePath, "-DCMAKE_BUILD_TYPE=Release"]
+		if (nrdOs.windows) arguments.addAll(["-A", "x64"])
+		commandLine arguments
+	}
+}
+
+def buildNrdBridge = tasks.register("buildNrdBridge", Exec) {
+	group = "build"
+	description = "Builds NRD/NRI and Caustica's Vulkan bridge for the host platform."
+	onlyIf { nrdPlatform != null }
+	dependsOn(configureNrdBridge)
+	inputs.files(fileTree(nrdBridgeSourceDir) { include "CMakeLists.txt", "*.cpp", "*.h" })
+	outputs.file(nrdLocalOutput)
+	commandLine "cmake", "--build", nrdBridgeBuildDir.absolutePath,
+			"--config", "Release", "--target", "nrdbridge", "--parallel"
+}
+
+def bundleNrdNatives = tasks.register("bundleNrdNatives") {
+	group = "build"
+	description = "Bundles host NRD plus optional cross-platform release payloads."
+	dependsOn(buildNrdBridge)
+	outputs.dir(nrdNativeGenRoot)
+	outputs.upToDateWhen { false }
+	doLast {
+		delete(nrdNativeGenRoot)
+		def candidates = [
+				"windows-x64": providers.environmentVariable("NRD_WINDOWS_X64").orNull,
+				"linux-x64": providers.environmentVariable("NRD_LINUX_X64").orNull
+		]
+		if (nrdPlatform != null && nrdLocalOutput.isFile()) candidates[nrdPlatform] = nrdLocalOutput.absolutePath
+		candidates.each { platform, candidatePath ->
+			if (!candidatePath) return
+			def candidate = file(candidatePath)
+			if (!candidate.isFile()) throw new GradleException("Missing NRD ${platform} payload: ${candidate}")
+			copy {
+				from(candidate)
+				into(new File(nrdNativeGenRoot.get().asFile, "caustica/natives/${platform}"))
+			}
+		}
+		def license = new File(nrdBridgeBuildDir, "_deps/nrd-src/LICENSE.txt")
+		if (license.isFile()) {
+			copy {
+				from(license) { rename { "NVIDIA-NRD.txt" } }
+				into(new File(nrdNativeGenRoot.get().asFile, "META-INF/licenses/nvidia"))
+			}
+		}
+	}
+}
+
+sourceSets.main.resources.srcDir(files(nrdNativeGenRoot).builtBy(bundleNrdNatives))
+
 tasks.withType(Test).configureEach {
 	useJUnitPlatform()
 }
@@ -737,10 +831,16 @@ def verifyProductionArtifact = tasks.register("verifyProductionArtifact") {
 		def sourceJar = tasks.named("sourcesJar", Jar).get().archiveFile.get().asFile
 		def required = [
 			"fabric.mod.json",
+			"caustica/rt/world_base.rgen.spv",
+			"caustica/rt/world_offline_base.rgen.spv",
 			"caustica/rt/world_offline.rgen.spv",
 			"caustica/rt/world_offline_nv.rgen.spv",
+			"caustica/rt/world_shadow.rchit.spv",
+			"caustica/rt/world_shadow.rmiss.spv",
+			"caustica/rt/nrd_resolve.comp.spv",
 			"caustica/streamline.properties",
 			"caustica/sharc.properties",
+			"caustica/natives/windows-x64/nrdbridge.dll",
 			"caustica/natives/windows-x64/streamlinebridge.dll",
 			"caustica/natives/windows-x64/sl.interposer.dll",
 			"caustica/natives/windows-x64/sl.dlss_d.dll",
@@ -752,24 +852,35 @@ def verifyProductionArtifact = tasks.register("verifyProductionArtifact") {
 			"META-INF/licenses/nvidia/STREAMLINE-SDK-MIT.txt",
 			"META-INF/licenses/nvidia/STREAMLINE-THIRD-PARTY.md",
 			"META-INF/licenses/nvidia/NVIDIA-RTX-SDKS.txt",
-			"META-INF/licenses/nvidia/NVIDIA-REFLEX-SDK.txt"
+			"META-INF/licenses/nvidia/NVIDIA-REFLEX-SDK.txt",
+			"META-INF/licenses/nvidia/NVIDIA-NRD.txt"
 		]
+		if (providers.environmentVariable("NRD_LINUX_X64").isPresent()) {
+			required.add("caustica/natives/linux-x64/libnrdbridge.so")
+		}
 		if (!configuredSharcSdk.isBlank()) {
 				required.addAll([
+				"caustica/rt/world_sharc_base.rgen.spv",
 				"caustica/rt/world_sharc.rgen.spv",
 				"caustica/rt/world_sharc_nv.rgen.spv",
 				"caustica/rt/world_sharc_diffuse.rgen.spv",
 				"caustica/rt/world_sharc_diffuse_nv.rgen.spv",
+				"caustica/rt/world_sharc_diffuse_base.rgen.spv",
 				"caustica/rt/world_sharc_primary.rgen.spv",
 				"caustica/rt/world_sharc_primary_nv.rgen.spv",
+				"caustica/rt/world_sharc_primary_base.rgen.spv",
 				"caustica/rt/world_sharc_update.rgen.spv",
 				"caustica/rt/world_sharc_update_nv.rgen.spv",
+				"caustica/rt/world_sharc_update_base.rgen.spv",
 				"caustica/rt/world_sharc_diagnostic.rgen.spv",
 				"caustica/rt/world_sharc_diagnostic_nv.rgen.spv",
+				"caustica/rt/world_sharc_diagnostic_base.rgen.spv",
 				"caustica/rt/world_sharc_primary_diagnostic.rgen.spv",
 				"caustica/rt/world_sharc_primary_diagnostic_nv.rgen.spv",
+				"caustica/rt/world_sharc_primary_diagnostic_base.rgen.spv",
 				"caustica/rt/world_sharc_update_diagnostic.rgen.spv",
 				"caustica/rt/world_sharc_update_diagnostic_nv.rgen.spv",
+				"caustica/rt/world_sharc_update_diagnostic_base.rgen.spv",
 				"caustica/rt/world_sharc.rchit.spv",
 				"caustica/rt/world_sharc.rahit.spv",
 				"caustica/rt/world_sharc.rmiss.spv",

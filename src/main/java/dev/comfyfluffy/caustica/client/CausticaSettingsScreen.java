@@ -426,21 +426,110 @@ public class CausticaSettingsScreen extends Screen {
     }
 
     private void addReconstruction() {
-        addHeader("Reconstruction", "DLSS Ray Reconstruction and its scene-linear guide inputs");
+        addHeader("Reconstruction", "Global DLSS Ray Reconstruction / NRD selection and live denoiser tuning");
         List<AbstractWidget> controls = new ArrayList<>();
+        controls.add(new Dropdown<>(180, Component.translatable("caustica.options.rt.reconstructionBackend"),
+                List.of("auto", "nrd", "dlss-rr", "off"),
+                CausticaConfig.Rt.Reconstruction.BACKEND::configuredValue,
+                CausticaConfig.Rt.Reconstruction.BACKEND::set,
+                value -> Component.translatable("caustica.options.rt.reconstructionBackend." + value), null));
         controls.add(toggle(Component.translatable("caustica.options.rt.dlssRr"), CausticaConfig.Rt.DlssRr.ENABLED));
         controls.add(toggle(Component.translatable("caustica.options.rt.dlssDiffusePathGuide"),
                 CausticaConfig.Rt.DlssRr.DIFFUSE_PATH_GUIDE)
                 .tooltip(Component.translatable("caustica.options.rt.dlssDiffusePathGuide.tooltip"))
-                .activeWhen(CausticaConfig.Rt.DlssRr.ENABLED::configuredValue));
+                .activeWhen(this::dlssControlsActive));
         controls.add(new Dropdown<>(180, Component.translatable("caustica.options.rt.dlssQuality"), DLSS_QUALITY_ORDER,
                 CausticaConfig.Rt.DlssRr.QUALITY::configuredValue, CausticaConfig.Rt.DlssRr.QUALITY::set,
                 value -> Component.translatable("caustica.options.rt.dlssQuality." + value), null)
-                .activeWhen(CausticaConfig.Rt.DlssRr.ENABLED::configuredValue));
-        addBundle("Ray reconstruction", "Enablement and output quality");
-        addGrid(List.of(controls.get(0), controls.get(2)));
-        addBundle("Guide inputs", "Scene-linear signals that stabilize reconstructed lighting");
-        addGrid(List.of(controls.get(1)));
+                .activeWhen(this::dlssControlsActive));
+        addBundle("Global backend", "Auto selects NRD on AMD/Linux and DLSS-RR on supported Windows NVIDIA systems");
+        addGrid(List.of(controls.get(0)));
+        addBundle("DLSS Ray Reconstruction", "NVIDIA Streamline enablement, upscale quality, and guide inputs");
+        addGrid(List.of(controls.get(1), controls.get(3), controls.get(2)));
+
+        List<AbstractWidget> nrd = new ArrayList<>();
+        nrd.add(new Dropdown<>(180, Component.translatable("caustica.options.rt.nrd.denoiser"),
+                List.of("reblur", "relax"), CausticaConfig.Rt.Nrd.DENOISER::configuredValue,
+                CausticaConfig.Rt.Nrd.DENOISER::set,
+                value -> Component.translatable("caustica.options.rt.nrd.denoiser." + value), null)
+                .activeWhen(this::nrdControlsActive));
+        nrd.add(toggle(Component.translatable("caustica.options.rt.nrd.sh"),
+                CausticaConfig.Rt.Nrd.SPHERICAL_HARMONICS).activeWhen(this::nrdControlsActive));
+        nrd.add(toggle(Component.translatable("caustica.options.rt.nrd.antiFirefly"),
+                CausticaConfig.Rt.Nrd.ANTI_FIREFLY).activeWhen(this::nrdControlsActive));
+        nrd.add(toggle(Component.translatable("caustica.options.rt.nrd.antilag"),
+                CausticaConfig.Rt.Nrd.ANTILAG).activeWhen(this::nrdControlsActive));
+        nrd.add(intSlider(Component.translatable("caustica.options.rt.nrd.maxHistory"),
+                CausticaConfig.Rt.Nrd.MAX_ACCUMULATED_FRAMES, 0, 255, value -> String.format("%.0f frames", value))
+                .activeWhen(this::nrdControlsActive));
+        nrd.add(intSlider(Component.translatable("caustica.options.rt.nrd.fastHistory"),
+                CausticaConfig.Rt.Nrd.MAX_FAST_ACCUMULATED_FRAMES, 0, 63, value -> String.format("%.0f frames", value))
+                .activeWhen(this::nrdControlsActive));
+        nrd.add(intSlider(Component.translatable("caustica.options.rt.nrd.historyFix"),
+                CausticaConfig.Rt.Nrd.HISTORY_FIX_FRAMES, 0, 3, value -> String.format("%.0f frames", value))
+                .activeWhen(this::nrdControlsActive));
+        nrd.add(intSlider(Component.translatable("caustica.options.rt.nrd.historyStride"),
+                CausticaConfig.Rt.Nrd.HISTORY_FIX_STRIDE, 1, 32, value -> String.format("%.0f px", value))
+                .activeWhen(this::nrdControlsActive));
+        nrd.add(floatSlider(Component.translatable("caustica.options.rt.nrd.prepassRadius"),
+                CausticaConfig.Rt.Nrd.PREPASS_BLUR_RADIUS, 0.0, 100.0, value -> String.format("%.1f px", value))
+                .activeWhen(this::nrdControlsActive));
+        nrd.add(floatSlider(Component.translatable("caustica.options.rt.nrd.minRadius"),
+                CausticaConfig.Rt.Nrd.MIN_BLUR_RADIUS, 0.0, 10.0, value -> String.format("%.1f px", value))
+                .activeWhen(this::nrdControlsActive));
+        nrd.add(floatSlider(Component.translatable("caustica.options.rt.nrd.maxRadius"),
+                CausticaConfig.Rt.Nrd.MAX_BLUR_RADIUS, 0.0, 100.0, value -> String.format("%.1f px", value))
+                .activeWhen(this::nrdControlsActive));
+        nrd.add(floatSlider(Component.translatable("caustica.options.rt.nrd.lobeFraction"),
+                CausticaConfig.Rt.Nrd.LOBE_ANGLE_FRACTION, 0.0, 1.0, value -> String.format("%.3f", value))
+                .activeWhen(this::nrdControlsActive));
+        nrd.add(floatSlider(Component.translatable("caustica.options.rt.nrd.roughnessFraction"),
+                CausticaConfig.Rt.Nrd.ROUGHNESS_FRACTION, 0.0, 1.0, value -> String.format("%.3f", value))
+                .activeWhen(this::nrdControlsActive));
+        nrd.add(floatSlider(Component.translatable("caustica.options.rt.nrd.planeSensitivity"),
+                CausticaConfig.Rt.Nrd.PLANE_DISTANCE_SENSITIVITY, 0.001, 0.2, value -> String.format("%.4f", value))
+                .activeWhen(this::nrdControlsActive));
+        nrd.add(floatSlider(Component.translatable("caustica.options.rt.nrd.disocclusion"),
+                CausticaConfig.Rt.Nrd.DISOCCLUSION_THRESHOLD, 0.001, 0.2, value -> String.format("%.4f", value))
+                .activeWhen(this::nrdControlsActive));
+        nrd.add(floatSlider(Component.translatable("caustica.options.rt.nrd.hitA"),
+                CausticaConfig.Rt.Nrd.HIT_DISTANCE_A, 0.01, 100.0, value -> String.format("%.2f", value))
+                .activeWhen(this::nrdControlsActive));
+        nrd.add(floatSlider(Component.translatable("caustica.options.rt.nrd.hitB"),
+                CausticaConfig.Rt.Nrd.HIT_DISTANCE_B, 0.001, 10.0, value -> String.format("%.3f", value))
+                .activeWhen(this::nrdControlsActive));
+        nrd.add(floatSlider(Component.translatable("caustica.options.rt.nrd.hitC"),
+                CausticaConfig.Rt.Nrd.HIT_DISTANCE_C, 1.0, 100.0, value -> String.format("%.1f", value))
+                .activeWhen(this::nrdControlsActive));
+        nrd.add(floatSlider(Component.translatable("caustica.options.rt.nrd.antilagSigma"),
+                CausticaConfig.Rt.Nrd.ANTILAG_SIGMA, 0.1, 10.0, value -> String.format("%.2f", value))
+                .activeWhen(() -> nrdControlsActive() && CausticaConfig.Rt.Nrd.ANTILAG.configuredValue()));
+        nrd.add(intSlider(Component.translatable("caustica.options.rt.nrd.atrous"),
+                CausticaConfig.Rt.Nrd.RELAX_ATROUS_ITERATIONS, 2, 8, value -> String.format("%.0f passes", value))
+                .activeWhen(() -> nrdControlsActive()
+                        && "relax".equals(CausticaConfig.Rt.Nrd.DENOISER.configuredValue())));
+        nrd.add(floatSlider(Component.translatable("caustica.options.rt.nrd.splitScreen"),
+                CausticaConfig.Rt.Nrd.SPLIT_SCREEN, 0.0, 1.0, value -> String.format("%.0f%% noisy", value * 100.0))
+                .activeWhen(this::nrdControlsActive));
+        addBundle("NRD mode", "Vendor-neutral Vulkan denoising; SH stores directional radiance at a higher memory cost");
+        addGrid(nrd.subList(0, 4));
+        addBundle("NRD temporal history", "Accumulation length and post-disocclusion reconstruction");
+        addGrid(nrd.subList(4, 8));
+        addBundle("NRD spatial filtering", "Prepass, blur footprint, surface rejection, and RELAX wavelets");
+        addGrid(nrd.subList(8, 15));
+        addBundle("NRD hit distance & diagnostics", "REBLUR normalization, antilag response, and live A/B split");
+        addGrid(nrd.subList(15, nrd.size()));
+    }
+
+    private boolean dlssControlsActive() {
+        String backend = CausticaConfig.Rt.Reconstruction.BACKEND.configuredValue();
+        return CausticaConfig.Rt.DlssRr.ENABLED.configuredValue()
+                && ("auto".equals(backend) || "dlss-rr".equals(backend));
+    }
+
+    private boolean nrdControlsActive() {
+        String backend = CausticaConfig.Rt.Reconstruction.BACKEND.configuredValue();
+        return "auto".equals(backend) || "nrd".equals(backend);
     }
 
     private void addLighting() {
