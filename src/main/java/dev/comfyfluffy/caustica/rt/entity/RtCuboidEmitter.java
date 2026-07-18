@@ -64,7 +64,7 @@ final class RtCuboidEmitter {
             templates.remove(model);
             structurallyRejectedRoots.put(model, root);
             RtFrameStats.FRAME.count("entityDirectRejectTopology", 1);
-            logFallbackOnce(loggedTopologyRejects, model, "nonstandard cube topology");
+            logFallbackOnce(loggedTopologyRejects, model, "nonstandard cube topology: " + describeRejection(root));
             return null;
         }
         structurallyRejectedRoots.remove(model);
@@ -87,6 +87,38 @@ final class RtCuboidEmitter {
         var codeSource = type.getProtectionDomain() != null ? type.getProtectionDomain().getCodeSource() : null;
         CausticaMod.LOGGER.info("Entity direct capture fallback: reason={}, modelClass={}, codeSource={}",
                 reason, type.getName(), codeSource != null ? codeSource.getLocation() : "unknown");
+    }
+
+    private static String describeRejection(ModelPart part) {
+        ModelPartAccessor access = (ModelPartAccessor) (Object) part;
+        for (ModelPart.Cube cube : access.caustica$cubes()) {
+            if (cube.getClass() != ModelPart.Cube.class) {
+                return "cube subclass " + cube.getClass().getName();
+            }
+            for (ModelPart.Polygon polygon : cube.polygons) {
+                if (polygon == null) {
+                    return "null polygon";
+                }
+                if (polygon.normal() == null) {
+                    return "null polygon normal";
+                }
+                if (polygon.vertices().length != 4) {
+                    return "polygon vertex count " + polygon.vertices().length;
+                }
+                for (ModelPart.Vertex vertex : polygon.vertices()) {
+                    if (vertex == null) {
+                        return "null polygon vertex";
+                    }
+                }
+            }
+        }
+        for (ModelPart child : access.caustica$children().values()) {
+            String childReason = describeRejection(child);
+            if (!"unknown".equals(childReason)) {
+                return childReason;
+            }
+        }
+        return "unknown";
     }
 
     /** Return packed actual cube counts: specialized in the high 32 bits, generic in the low 32 bits. */
