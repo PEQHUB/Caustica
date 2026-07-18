@@ -901,9 +901,9 @@ public final class CausticaConfig {
             public static final BooleanSetting ENABLED = bool("caustica.rt.dlssRr", "dlss-rr.enabled", true);
             public static final BooleanSetting DIFFUSE_PATH_GUIDE = bool(
                     "caustica.rt.dlssRr.diffusePathGuide", "dlss-rr.diffuse-path-guide", false);
-            public static final BooleanSetting HIGH_QUALITY_TRANSPARENCY = bool(
-                    "caustica.rt.dlssRr.highQualityTransparency",
-                    "dlss-rr.high-quality-transparency", false);
+            /** Compatibility alias for the setting's original DLSS-only owner. */
+            public static final BooleanSetting HIGH_QUALITY_TRANSPARENCY =
+                    Reconstruction.ADVANCED_OPTICAL_TRANSPORT;
             public static final BooleanSetting PARTICLE_TEMPORAL_HISTORY = bool(
                     "caustica.rt.dlssRr.particleTemporalHistory",
                     "dlss-rr.particle-temporal-history", false);
@@ -922,6 +922,9 @@ public final class CausticaConfig {
                         case "nrd", "dlss-rr", "off" -> value.trim().toLowerCase(java.util.Locale.ROOT);
                         default -> "auto";
                     });
+            public static final BooleanSetting ADVANCED_OPTICAL_TRANSPORT = bool(
+                    "caustica.rt.advancedOpticalTransport",
+                    "dlss-rr.high-quality-transparency", false);
 
             private Reconstruction() {
             }
@@ -944,8 +947,14 @@ public final class CausticaConfig {
             public static final FloatSetting CUSTOM_RENDER_SCALE = clampedFloat(
                     "caustica.rt.nrd.customRenderScale", "nrd.custom-render-scale", 0.67f, 0.25f, 1.0f);
             public static final StringSetting UPSCALE_FILTER = string(
-                    "caustica.rt.nrd.upscaleFilter", "nrd.upscale-filter", "linear",
-                    value -> "nearest".equalsIgnoreCase(value) ? "nearest" : "linear");
+                    "caustica.rt.nrd.upscaleFilter", "nrd.upscale-filter", "edge-adaptive",
+                    value -> switch (value == null ? "" : value.trim().toLowerCase(java.util.Locale.ROOT)) {
+                        case "nearest", "linear", "edge-adaptive" ->
+                                value.trim().toLowerCase(java.util.Locale.ROOT);
+                        default -> "edge-adaptive";
+                    });
+            public static final FloatSetting UPSCALE_SHARPNESS = clampedFloat(
+                    "caustica.rt.nrd.upscaleSharpness", "nrd.upscale-sharpness", 0.35f, 0.0f, 1.0f);
             public static final IntSetting MAX_ACCUMULATED_FRAMES = clampedInt(
                     "caustica.rt.nrd.maxAccumulatedFrames", "nrd.max-accumulated-frames", 30, 0, 255);
             public static final IntSetting MAX_FAST_ACCUMULATED_FRAMES = clampedInt(

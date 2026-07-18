@@ -1,0 +1,70 @@
+#version 460
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+layout(binding = 0, set = 0, rgba16f) uniform readonly image2D inputImage;
+layout(binding = 1, set = 0, rgba16f) uniform writeonly image2D outputImage;
+
+layout(push_constant) uniform Push {
+    uint inputWidth;
+    uint inputHeight;
+    uint outputWidth;
+    uint outputHeight;
+    float sharpness;
+} pc;
+
+vec4 cubicWeights(float t) {
+    float t2 = t * t;
+    float t3 = t2 * t;
+    return vec4(-0.5 * t + t2 - 0.5 * t3,
+            1.0 - 2.5 * t2 + 1.5 * t3,
+            0.5 * t + 2.0 * t2 - 1.5 * t3,
+            -0.5 * t2 + 0.5 * t3);
+}
+
+vec3 loadClamped(ivec2 pixel) {
+    ivec2 limit = ivec2(int(pc.inputWidth) - 1, int(pc.inputHeight) - 1);
+    return imageLoad(inputImage, clamp(pixel, ivec2(0), limit)).rgb;
+}
+
+void main() {
+    ivec2 outputPixel = ivec2(gl_GlobalInvocationID.xy);
+    if (outputPixel.x >= int(pc.outputWidth) || outputPixel.y >= int(pc.outputHeight)) return;
+
+    vec2 source = (vec2(outputPixel) + 0.5)
+            * (vec2(pc.inputWidth, pc.inputHeight) / vec2(pc.outputWidth, pc.outputHeight)) - 0.5;
+    ivec2 base = ivec2(floor(source));
+    vec2 fraction = fract(source);
+    vec4 wx = cubicWeights(fraction.x);
+    vec4 wy = cubicWeights(fraction.y);
+
+    vec3 cubic = vec3(0.0);
+    vec3 c00 = vec3(0.0);
+    vec3 c10 = vec3(0.0);
+    vec3 c01 = vec3(0.0);
+    vec3 c11 = vec3(0.0);
+    for (int y = 0; y < 4; ++y) {
+        for (int x = 0; x < 4; ++x) {
+            vec3 sampleColor = loadClamped(base + ivec2(x - 1, y - 1));
+            cubic += sampleColor * wx[x] * wy[y];
+            if (x == 1 && y == 1) c00 = sampleColor;
+            if (x == 2 && y == 1) c10 = sampleColor;
+            if (x == 1 && y == 2) c01 = sampleColor;
+            if (x == 2 && y == 2) c11 = sampleColor;
+        }
+    }
+
+    vec3 localMin = min(min(c00, c10), min(c01, c11));
+    vec3 localMax = max(max(c00, c10), max(c01, c11));
+    vec3 bilinear = mix(mix(c00, c10, fraction.x), mix(c01, c11, fraction.x), fraction.y);
+
+    // Reject cubic overshoot first, then add only detail that fits the local HDR range. The adaptive
+    // limiter suppresses sharpening at hard luminance transitions where halos would be most visible.
+    cubic = clamp(cubic, localMin, localMax);
+    const vec3 lumaWeights = vec3(0.2126, 0.7152, 0.0722);
+    float lumaMin = dot(localMin, lumaWeights);
+    float lumaMax = dot(localMax, lumaWeights);
+    float contrast = (lumaMax - lumaMin) / max(lumaMax + lumaMin, 1.0e-4);
+    float adaptiveSharpness = clamp(pc.sharpness, 0.0, 1.0) * (1.0 - smoothstep(0.20, 0.85, contrast));
+    vec3 result = clamp(cubic + (cubic - bilinear) * adaptiveSharpness, localMin, localMax);
+    imageStore(outputImage, outputPixel, vec4(max(result, vec3(0.0)), 1.0));
+}

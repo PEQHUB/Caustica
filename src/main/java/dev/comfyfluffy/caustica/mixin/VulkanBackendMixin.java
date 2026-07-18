@@ -11,12 +11,15 @@ import com.mojang.blaze3d.systems.GpuDevice;
 import com.mojang.blaze3d.vulkan.VulkanBackend;
 import com.mojang.blaze3d.vulkan.VulkanPhysicalDevice;
 import com.mojang.blaze3d.vulkan.init.VulkanFeature;
+import com.mojang.blaze3d.vulkan.init.VulkanPNextStruct;
 import dev.comfyfluffy.caustica.CausticaMod;
+import dev.comfyfluffy.caustica.nrd.NrdRuntime;
 import dev.comfyfluffy.caustica.rt.RtDeviceBringup;
 import dev.comfyfluffy.caustica.rt.VulkanDiagnostics;
 import dev.comfyfluffy.caustica.streamline.StreamlineRuntime;
 import org.lwjgl.PointerBuffer;
 import org.lwjgl.system.MemoryStack;
+import org.lwjgl.vulkan.EXTExtendedDynamicState;
 import org.lwjgl.vulkan.VK12;
 import org.lwjgl.vulkan.VkDevice;
 import org.lwjgl.vulkan.VkAllocationCallbacks;
@@ -25,6 +28,7 @@ import org.lwjgl.vulkan.VkInstance;
 import org.lwjgl.vulkan.VkPhysicalDevice;
 import org.lwjgl.vulkan.VkPhysicalDeviceFeatures;
 import org.lwjgl.vulkan.VkPhysicalDeviceFeatures2;
+import org.lwjgl.vulkan.VkPhysicalDeviceExtendedDynamicStateFeaturesEXT;
 import org.lwjgl.vulkan.VkPhysicalDeviceVulkan12Features;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
@@ -54,6 +58,7 @@ import java.util.Set;
  */
 @Mixin(VulkanBackend.class)
 public abstract class VulkanBackendMixin {
+	private static final String NRD_EXTENDED_DYNAMIC_STATE = "VK_EXT_extended_dynamic_state";
 	private static final VulkanFeature STORAGE_IMAGE_WRITE_WITHOUT_FORMAT =
 			new VulkanFeature(VulkanBackend.VK10_FEATURES_STRUCT, "shaderStorageImageWriteWithoutFormat",
 					VkPhysicalDeviceFeatures.SHADERSTORAGEIMAGEWRITEWITHOUTFORMAT);
@@ -71,7 +76,9 @@ public abstract class VulkanBackendMixin {
 			// DLSS relies on it being core/enabled at instance level.)
 			"VK_NVX_binary_import",
 			"VK_NVX_image_view_handle",
-			"VK_KHR_push_descriptor");
+			"VK_KHR_push_descriptor",
+			// NRD's NRI wrapper requires this explicitly because Minecraft creates a Vulkan 1.2 device.
+			NRD_EXTENDED_DYNAMIC_STATE);
 
 	private static final Set<String> loggedMissingSdkFeatures = new HashSet<>();
 
@@ -167,6 +174,7 @@ public abstract class VulkanBackendMixin {
 		VulkanDiagnostics.addDeviceFaultFeature(args);
 		RtDeviceBringup.addFeatures(args, physicalDevice);
 		VulkanDiagnostics.logEnabledExtensions(augmented);
+		NrdRuntime.recordEnabledDeviceExtensions(augmented);
 	}
 
 	@SuppressWarnings("unchecked")
@@ -185,6 +193,23 @@ public abstract class VulkanBackendMixin {
 			if (features.add(feature)) {
 				changed = true;
 				CausticaMod.LOGGER.info("Enabling Vulkan feature {} for FSR/DLSS SDK shaders", feature.name());
+			}
+		}
+
+		if (physicalDevice.hasDeviceExtension(NRD_EXTENDED_DYNAMIC_STATE)) {
+			VulkanPNextStruct extendedDynamicStateStruct = new VulkanPNextStruct(
+					EXTExtendedDynamicState.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_FEATURES_EXT,
+					VkPhysicalDeviceExtendedDynamicStateFeaturesEXT.SIZEOF);
+			VulkanFeature extendedDynamicState = new VulkanFeature(extendedDynamicStateStruct, "extendedDynamicState",
+					VkPhysicalDeviceExtendedDynamicStateFeaturesEXT.EXTENDEDDYNAMICSTATE);
+			if (caustica$supportsFeature(physicalDevice, extendedDynamicState)) {
+				if (features.add(extendedDynamicState)) {
+					changed = true;
+					CausticaMod.LOGGER.info("Enabling Vulkan feature extendedDynamicState for NRD/NRI");
+				}
+			} else if (loggedMissingSdkFeatures.add(extendedDynamicState.name())) {
+				CausticaMod.LOGGER.warn("Device [{}] lacks extendedDynamicState; NRD will be unavailable",
+						physicalDevice.deviceName());
 			}
 		}
 		if (changed) {

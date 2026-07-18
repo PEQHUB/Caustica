@@ -67,6 +67,7 @@ import dev.comfyfluffy.caustica.rt.pipeline.RtFgUiAlphaPipeline;
 import dev.comfyfluffy.caustica.rt.pipeline.RtDlssRr;
 import dev.comfyfluffy.caustica.rt.pipeline.RtNrd;
 import dev.comfyfluffy.caustica.rt.pipeline.RtNrdResolvePipeline;
+import dev.comfyfluffy.caustica.rt.pipeline.RtNrdSpatialUpscalePipeline;
 import dev.comfyfluffy.caustica.rt.pipeline.RtReconstruction;
 import dev.comfyfluffy.caustica.rt.overlay.RtWorldOverlay;
 import dev.comfyfluffy.caustica.rt.pipeline.RtHdrCompositePipeline;
@@ -338,6 +339,9 @@ public final class RtComposite {
     private RtImage gMotion;
     private RtImage gSpecAlbedo;
     private RtImage gSpecMotion;
+    private RtImage gTransparencyLayer;
+    private RtImage gTransparencyOpacity;
+    private RtImage gColorBeforeTransparency;
     private RtImage groundTruthAccum;
     private RtImage offlinePilotA;
     private RtImage offlinePilotB;
@@ -364,6 +368,7 @@ public final class RtComposite {
     private boolean lastDiffusePathGuide;
     private RtDlssdDisocclusionPipeline dlssdDisocclusionPipeline;
     private RtNrdResolvePipeline nrdResolvePipeline;
+    private RtNrdSpatialUpscalePipeline nrdSpatialUpscalePipeline;
     // Display-res RT image the display mapper reads: DLSS-RR writes it (render -> display denoise+upscale), or a
     // linear blit of `output` fills it when RR is off/unavailable (the no-RR reference / fallback).
     private RtImage rrOutput;
@@ -821,7 +826,8 @@ public final class RtComposite {
             worldPipelineNrd = nrdPipeline;
             highQualityTransparencyPipeline = highQualityTransparencyEnabled();
             CausticaMod.LOGGER.info("RT transparency quality active: {} (raygen={})",
-                    highQualityTransparencyPipeline ? "high / two-ray" : "standard / one-ray", raygenShader);
+                    highQualityTransparencyPipeline ? "layered / deterministic split" : "standard / one-ray",
+                    raygenShader);
             // Per-frame push data lives in this BDA ring; the pipeline only pushes its address.
             if (pushRing == null) {
                 pushRing = new RtBuffer[PUSH_RING];
@@ -1268,6 +1274,15 @@ public final class RtComposite {
                 pipeline.setExtraStorageImage(3, gMotion.view);
                 pipeline.setExtraStorageImage(4, gSpecAlbedo.view);
                 pipeline.setExtraStorageImage(5, gSpecMotion.view);
+                if (gTransparencyLayer != null && gTransparencyOpacity != null
+                        && gColorBeforeTransparency != null) {
+                    // Layered DLSS-RR reuses bindings 9/11/12 (extra slots 6/8/9), which are offline-only in
+                    // the mutually exclusive ground-truth shader variant. Standard mode allocates and
+                    // binds neither image.
+                    pipeline.setExtraStorageImage(6, gTransparencyLayer.view);
+                    pipeline.setExtraStorageImage(8, gTransparencyOpacity.view);
+                    pipeline.setExtraStorageImage(9, gColorBeforeTransparency.view);
+                }
                 pipeline.setExtraStorageImage(7, gAnimatedGuide.view);
                 pipeline.setExtraStorageImage(10, gDiffuseRayDirectionHitDistance.view);
             }
@@ -1316,6 +1331,18 @@ public final class RtComposite {
         if (gSpecMotion != null) {
             gSpecMotion.destroy();
             gSpecMotion = null;
+        }
+        if (gTransparencyLayer != null) {
+            gTransparencyLayer.destroy();
+            gTransparencyLayer = null;
+        }
+        if (gTransparencyOpacity != null) {
+            gTransparencyOpacity.destroy();
+            gTransparencyOpacity = null;
+        }
+        if (gColorBeforeTransparency != null) {
+            gColorBeforeTransparency.destroy();
+            gColorBeforeTransparency = null;
         }
         if (gAnimatedGuide != null) {
             gAnimatedGuide.destroy();
@@ -1372,6 +1399,10 @@ public final class RtComposite {
         if (nrdResolvePipeline != null) {
             nrdResolvePipeline.destroy();
             nrdResolvePipeline = null;
+        }
+        if (nrdSpatialUpscalePipeline != null) {
+            nrdSpatialUpscalePipeline.destroy();
+            nrdSpatialUpscalePipeline = null;
         }
         if (gDepthHistoryA != null) {
             gDepthHistoryA.destroy();
@@ -1516,6 +1547,7 @@ public final class RtComposite {
         // Descriptors must remain valid even when their consumer is off. Allocate full-sized guide images
         // only for RR, or depth/motion for FG; the shader skips writes to the 1x1 inactive bindings.
         boolean motionGuidesRequired = rrOperational || fgGuidesRequired;
+        boolean dlssOperational = rrOperational && RtReconstruction.usesDlss();
         int rrGuideW = rrOperational ? renderW : 1;
         int rrGuideH = rrOperational ? renderH : 1;
         boolean nrdOperational = rrOperational && RtReconstruction.usesNrd();
@@ -1530,6 +1562,15 @@ public final class RtComposite {
         gMotion = ctx.createStorageImage(motionGuideW, motionGuideH, VK10.VK_FORMAT_R16G16_SFLOAT, "guide motion");
         gSpecAlbedo = ctx.createStorageImage(rrGuideW, rrGuideH, VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "guide specular albedo");
         gSpecMotion = ctx.createStorageImage(rrGuideW, rrGuideH, VK10.VK_FORMAT_R16G16_SFLOAT, "guide specular motion");
+        boolean layeredDlss = dlssOperational && highQualityTransparencyEnabled();
+        if (layeredDlss) {
+            gTransparencyLayer = ctx.createStorageImage(renderW, renderH,
+                    VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "DLSSD premultiplied optical reflection layer");
+            gTransparencyOpacity = ctx.createStorageImage(renderW, renderH,
+                    VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "DLSSD optical Fresnel opacity");
+            gColorBeforeTransparency = ctx.createStorageImage(renderW, renderH,
+                    VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "DLSSD color before transparency");
+        }
         if (offlineGroundTruth) {
             groundTruthAccum = ctx.createStorageImage(width, height, VK10.VK_FORMAT_R32G32B32A32_SFLOAT,
                     "offline ground-truth FP32 radiance mean " + width + "x" + height);
@@ -1540,7 +1581,6 @@ public final class RtComposite {
             offlinePilotB = ctx.createStorageImage(pilotW, pilotH, VK10.VK_FORMAT_R32G32B32A32_SFLOAT,
                     "offline adaptive pilot B " + pilotW + "x" + pilotH);
         }
-        boolean dlssOperational = rrOperational && RtReconstruction.usesDlss();
         int dlssGuideW = dlssOperational ? renderW : 1;
         int dlssGuideH = dlssOperational ? renderH : 1;
         gAnimatedGuide = ctx.createStorageImage(dlssGuideW, dlssGuideH, VK10.VK_FORMAT_R16_SFLOAT,
@@ -1607,6 +1647,11 @@ public final class RtComposite {
             nrdResolvePipeline.setImages(nrdRawOutput.view, nrdSh1Output.view,
                     nrdSpecRawOutput.view, nrdSpecSh1Output.view, gNormal.view,
                     gAlbedo.view, gSpecAlbedo.view, gNrdViewDirection.view, nrdResolvedOutput.view);
+            if (nrdResolvedOutput != rrOutput
+                    && "edge-adaptive".equals(CausticaConfig.Rt.Nrd.UPSCALE_FILTER.get())) {
+                nrdSpatialUpscalePipeline = RtNrdSpatialUpscalePipeline.create(ctx);
+                nrdSpatialUpscalePipeline.setImages(nrdResolvedOutput.view, rrOutput.view);
+            }
         }
         exposure.ensureResources(ctx);
         exposure.resetAutoHistory(); // tile coordinates and trusted-history identity changed with these images
@@ -2093,7 +2138,8 @@ public final class RtComposite {
                     if (RtReconstruction.usesDlss()) {
                         rrDone = RtDlssRr.INSTANCE.evaluate(cmd.address(), output, gDepth, gMotion, gAlbedo,
                                 gSpecAlbedo, gNormal, gSpecMotion, gDisocclusion, gBiasCurrentColor,
-                                gDiffuseRayDirectionHitDistance, rrOutput,
+                                gDiffuseRayDirectionHitDistance, gColorBeforeTransparency,
+                                gTransparencyLayer, gTransparencyOpacity, rrOutput,
                                 renderW, renderH, displayW, displayH,
                                 jitterX, jitterY, frameProjection, mvCurProjView,
                                 fgPreviousViewProjectionValid ? fgPreviousViewProjection : mvCurProjView,
@@ -2119,9 +2165,14 @@ public final class RtComposite {
                                     CausticaConfig.Rt.Nrd.SPHERICAL_HARMONICS.value());
                             if (nrdResolvedOutput != rrOutput) {
                                 VulkanCommandEncoder.memoryBarrier(cmd, stack);
-                                blitUpscale(cmd, stack, nrdResolvedOutput, rrOutput,
-                                        "nearest".equals(CausticaConfig.Rt.Nrd.UPSCALE_FILTER.get())
-                                                ? VK10.VK_FILTER_NEAREST : VK10.VK_FILTER_LINEAR);
+                                if (nrdSpatialUpscalePipeline != null) {
+                                    nrdSpatialUpscalePipeline.dispatch(cmd, renderW, renderH, displayW, displayH,
+                                            CausticaConfig.Rt.Nrd.UPSCALE_SHARPNESS.value());
+                                } else {
+                                    blitUpscale(cmd, stack, nrdResolvedOutput, rrOutput,
+                                            "nearest".equals(CausticaConfig.Rt.Nrd.UPSCALE_FILTER.get())
+                                                    ? VK10.VK_FILTER_NEAREST : VK10.VK_FILTER_LINEAR);
+                                }
                             }
                         }
                     }
@@ -2137,9 +2188,14 @@ public final class RtComposite {
                             CausticaConfig.Rt.Nrd.SPHERICAL_HARMONICS.value());
                     if (nrdResolvedOutput != rrOutput) {
                         VulkanCommandEncoder.memoryBarrier(cmd, stack);
-                        blitUpscale(cmd, stack, nrdResolvedOutput, rrOutput,
-                                "nearest".equals(CausticaConfig.Rt.Nrd.UPSCALE_FILTER.get())
-                                        ? VK10.VK_FILTER_NEAREST : VK10.VK_FILTER_LINEAR);
+                        if (nrdSpatialUpscalePipeline != null) {
+                            nrdSpatialUpscalePipeline.dispatch(cmd, renderW, renderH, displayW, displayH,
+                                    CausticaConfig.Rt.Nrd.UPSCALE_SHARPNESS.value());
+                        } else {
+                            blitUpscale(cmd, stack, nrdResolvedOutput, rrOutput,
+                                    "nearest".equals(CausticaConfig.Rt.Nrd.UPSCALE_FILTER.get())
+                                            ? VK10.VK_FILTER_NEAREST : VK10.VK_FILTER_LINEAR);
+                        }
                     }
                     rrDone = true; // decoded noisy fallback remains a valid current display frame
                 }
@@ -2234,12 +2290,13 @@ public final class RtComposite {
         highQualityTransparencyPipeline = desired;
         requestTemporalReset();
         CausticaMod.LOGGER.info("RT transparency quality changed: {}; rebuilding ray pipelines",
-                desired ? "high / two-ray" : "standard / one-ray");
+                desired ? "layered / deterministic split" : "standard / one-ray");
     }
 
     private static boolean highQualityTransparencyEnabled() {
-        return RtReconstruction.usesDlss() && RtDlssRr.INSTANCE.isOperational()
-                && CausticaConfig.Rt.DlssRr.HIGH_QUALITY_TRANSPARENCY.value();
+        if (!CausticaConfig.Rt.Reconstruction.ADVANCED_OPTICAL_TRANSPORT.value()) return false;
+        return (RtReconstruction.usesDlss() && RtDlssRr.INSTANCE.isOperational())
+                || (RtReconstruction.usesNrd() && RtNrd.INSTANCE.isOperational());
     }
 
     private void clearOfflineAccumulation(VkCommandBuffer cmd, MemoryStack stack) {

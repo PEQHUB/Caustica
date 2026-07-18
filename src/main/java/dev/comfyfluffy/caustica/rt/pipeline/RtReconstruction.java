@@ -75,16 +75,20 @@ public final class RtReconstruction {
 
     public static int resourceIdentity() {
         int identity = backend().ordinal();
+        identity = 31 * identity + Boolean.hashCode(
+                CausticaConfig.Rt.Reconstruction.ADVANCED_OPTICAL_TRANSPORT.value());
         if (usesDlss()) {
             identity = 31 * identity + RtDlssRr.quality();
-            return 31 * identity + Boolean.hashCode(
+            identity = 31 * identity + Boolean.hashCode(
                     CausticaConfig.Rt.DlssRr.PARTICLE_TEMPORAL_HISTORY.value());
+            return identity;
         }
         if (usesNrd()) {
             identity = 31 * identity + CausticaConfig.Rt.Nrd.DENOISER.get().hashCode();
             identity = 31 * identity + Boolean.hashCode(CausticaConfig.Rt.Nrd.SPHERICAL_HARMONICS.value());
             identity = 31 * identity + CausticaConfig.Rt.Nrd.UPSCALE_MODE.get().hashCode();
             identity = 31 * identity + Float.floatToIntBits(CausticaConfig.Rt.Nrd.CUSTOM_RENDER_SCALE.value());
+            identity = 31 * identity + CausticaConfig.Rt.Nrd.UPSCALE_FILTER.get().hashCode();
         }
         return identity;
     }

@@ -13,9 +13,34 @@ inline bool isCompleteDlssdVulkanTexture(const slbridge_resource_desc& descripto
             && descriptor.height != 0;
 }
 
-/** Ten core tags, plus at most the optional combined diffuse direction/hit-distance guide. */
+/** Ten core tags, plus the optional diffuse guide and/or the atomic three-tag transparency layer. */
 inline bool isSupportedDlssdResourceCount(uint32_t resourceCount) noexcept {
-    return resourceCount == 10 || resourceCount == 11;
+    return resourceCount == 10 || resourceCount == 11
+            || resourceCount == 13 || resourceCount == 14;
+}
+
+inline bool dlssdResourceCountRequiresDiffusePath(uint32_t resourceCount) noexcept {
+    return resourceCount == 11 || resourceCount == 14;
+}
+
+inline bool dlssdResourceCountRequiresTransparencyLayer(uint32_t resourceCount) noexcept {
+    return resourceCount == 13 || resourceCount == 14;
+}
+
+inline bool hasExpectedDlssdOptionalResources(uint32_t resourceCount, bool hasDiffusePath,
+        bool hasColorBeforeTransparency, bool hasTransparencyLayer,
+        bool hasTransparencyLayerOpacity) noexcept {
+    if (!isSupportedDlssdResourceCount(resourceCount)) {
+        return false;
+    }
+    const bool hasAnyTransparencyLayer = hasColorBeforeTransparency
+            || hasTransparencyLayer || hasTransparencyLayerOpacity;
+    const bool hasCompleteTransparencyLayer = hasColorBeforeTransparency
+            && hasTransparencyLayer && hasTransparencyLayerOpacity;
+    const bool requiresTransparencyLayer = dlssdResourceCountRequiresTransparencyLayer(resourceCount);
+    return hasDiffusePath == dlssdResourceCountRequiresDiffusePath(resourceCount)
+            && hasAnyTransparencyLayer == requiresTransparencyLayer
+            && (!requiresTransparencyLayer || hasCompleteTransparencyLayer);
 }
 
 } // namespace slbridge::detail

@@ -26,7 +26,7 @@ final class GlassOnlyIntegrationContractTest {
     }
 
     @Test
-    void glassIsCompactAndWaterKeepsTheCoreTransport() throws IOException {
+    void standardGlassStaysCompactAndLayeredModeTracksNestedMedia() throws IOException {
         String raygen = source("shaders/world/world.rgen.slang");
         String closestHit = source("shaders/world/world.rchit.slang");
         String common = source("shaders/world/world_common.slang");
@@ -57,6 +57,11 @@ final class GlassOnlyIntegrationContractTest {
 
         assertFalse(raygen.contains("MAX_MEDIUM_DEPTH"));
         assertFalse(raygen.contains("pathMedia"));
+        assertTrue(raygen.contains("#if CAUSTICA_NESTED_MEDIA\n    // The advanced transport variant tracks nested media"));
+        assertTrue(raygen.contains("float4 mediumIorStack = float4(1.0)"));
+        assertTrue(raygen.contains("float4 mediumExtStackR = float4(0.0)"));
+        assertTrue(raygen.contains("if (mediumStackDepth >= MAX_MEDIUM_STACK_DEPTH) break"));
+        assertTrue(raygen.contains("solidDielectricExtinction(glassTint) * payload.hitT"));
         assertTrue(raygen.contains("void opticalGuideHit"));
         assertTrue(raygen.contains("crossing < uint(MAX_OPTICAL_INTERFACE_DEPTH)"));
         assertTrue(raygen.contains("bool crossGlassExit = glassExitPending && interfaceMaterial == MATERIAL_GLASS"));
@@ -75,8 +80,9 @@ final class GlassOnlyIntegrationContractTest {
         int destination = raygen.indexOf("if (destinationValid) {");
         int failure = raygen.indexOf("} else {", destination);
         String validPath = raygen.substring(destination, failure);
-        assertFalse(validPath.contains("gv_normal = destinationNormal"));
-        assertFalse(validPath.contains("gv_rough = destinationRoughness"));
+        assertTrue(validPath.contains("#if CAUSTICA_LAYERED_OPTICS"));
+        assertTrue(validPath.contains("gv_normal = destinationNormal"));
+        assertTrue(validPath.contains("gv_rough = destinationRoughness"));
         assertTrue(raygen.contains("gv_albedo = destinationDiffuseAlbedo"));
         assertTrue(raygen.contains("float3 specSurfaceCamRel = gv_hitCamRel"));
         assertTrue(raygen.contains("specSurfaceAlbedo, dir, jndc, size"));

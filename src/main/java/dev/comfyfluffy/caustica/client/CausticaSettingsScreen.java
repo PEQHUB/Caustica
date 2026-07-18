@@ -444,17 +444,17 @@ public class CausticaSettingsScreen extends Screen {
                 value -> Component.translatable("caustica.options.rt.dlssQuality." + value), null)
                 .activeWhen(this::dlssControlsActive));
         controls.add(toggle(Component.translatable("caustica.options.rt.highQualityTransparency"),
-                CausticaConfig.Rt.DlssRr.HIGH_QUALITY_TRANSPARENCY)
+                CausticaConfig.Rt.Reconstruction.ADVANCED_OPTICAL_TRANSPORT)
                 .tooltip(Component.translatable("caustica.options.rt.highQualityTransparency.tooltip"))
-                .activeWhen(this::dlssControlsActive));
+                .activeWhen(this::opticalTransportControlsActive));
         controls.add(toggle(Component.translatable("caustica.options.rt.particleTemporalHistory"),
                 CausticaConfig.Rt.DlssRr.PARTICLE_TEMPORAL_HISTORY)
                 .tooltip(Component.translatable("caustica.options.rt.particleTemporalHistory.tooltip"))
                 .activeWhen(this::dlssControlsActive));
         addBundle("Global backend", "Auto selects NRD on AMD/Linux and DLSS-RR on supported Windows NVIDIA systems");
-        addGrid(List.of(controls.get(0)));
+        addGrid(List.of(controls.get(0), controls.get(4)));
         addBundle("DLSS Ray Reconstruction", "NVIDIA Streamline enablement, upscale quality, and guide inputs");
-        addGrid(List.of(controls.get(1), controls.get(3), controls.get(2), controls.get(4), controls.get(5)));
+        addGrid(List.of(controls.get(1), controls.get(3), controls.get(2), controls.get(5)));
 
         List<AbstractWidget> nrd = new ArrayList<>();
         nrd.add(new Dropdown<>(180, Component.translatable("caustica.options.rt.nrd.denoiser"),
@@ -476,11 +476,18 @@ public class CausticaSettingsScreen extends Screen {
                 .activeWhen(() -> nrdControlsActive()
                         && "custom".equals(CausticaConfig.Rt.Nrd.UPSCALE_MODE.configuredValue())));
         nrd.add(new Dropdown<>(180, Component.translatable("caustica.options.rt.nrd.upscaleFilter"),
-                List.of("linear", "nearest"), CausticaConfig.Rt.Nrd.UPSCALE_FILTER::configuredValue,
+                List.of("edge-adaptive", "linear", "nearest"),
+                CausticaConfig.Rt.Nrd.UPSCALE_FILTER::configuredValue,
                 CausticaConfig.Rt.Nrd.UPSCALE_FILTER::set,
                 value -> Component.translatable("caustica.options.rt.nrd.upscaleFilter." + value), null)
                 .activeWhen(() -> nrdControlsActive()
                         && !"native".equals(CausticaConfig.Rt.Nrd.UPSCALE_MODE.configuredValue())));
+        nrd.add(floatSlider(Component.translatable("caustica.options.rt.nrd.upscaleSharpness"),
+                CausticaConfig.Rt.Nrd.UPSCALE_SHARPNESS, 0.0, 1.0,
+                value -> String.format("%.2f", value))
+                .activeWhen(() -> nrdControlsActive()
+                        && !"native".equals(CausticaConfig.Rt.Nrd.UPSCALE_MODE.configuredValue())
+                        && "edge-adaptive".equals(CausticaConfig.Rt.Nrd.UPSCALE_FILTER.configuredValue())));
         nrd.add(toggle(Component.translatable("caustica.options.rt.nrd.antiFirefly"),
                 CausticaConfig.Rt.Nrd.ANTI_FIREFLY).activeWhen(this::nrdControlsActive));
         nrd.add(toggle(Component.translatable("caustica.options.rt.nrd.antilag"),
@@ -619,6 +626,10 @@ public class CausticaSettingsScreen extends Screen {
         String backend = CausticaConfig.Rt.Reconstruction.BACKEND.configuredValue();
         return "nrd".equals(backend)
                 || ("auto".equals(backend) && RtReconstruction.usesNrd());
+    }
+
+    private boolean opticalTransportControlsActive() {
+        return !"off".equals(CausticaConfig.Rt.Reconstruction.BACKEND.configuredValue());
     }
 
     private void addLighting() {

@@ -5,7 +5,8 @@ Branch: `codex/nrd-linux-amd`
 Base: `f7a1ff9` (`perf: restore bounded terrain build throughput`)
 
 This candidate adds NVIDIA Real-time Denoisers (NRD) 4.17.3 as a vendor-neutral Vulkan reconstruction
-backend. It does not deploy or modify a launcher instance.
+backend. The current Windows review artifact is copied to the configured Prism instance after each successful
+production build; that local deployment is verification convenience, not Linux or AMD runtime proof.
 
 ## Runtime contract
 
@@ -36,15 +37,27 @@ NRD output is resolved back to Caustica's scene-linear RGB contract before expos
 HDR mapping, or presentation. REBLUR YCoCg and SH output are decoded in `nrd_resolve.comp`; RELAX retains
 linear RGB. A bridge failure decodes the current noisy input instead of presenting packed YCoCg.
 
+Sub-native NRD modes can use a feature-gated HDR bicubic/contrast-adaptive compute upscaler with live
+sharpness, or explicit linear/nearest alternatives. Native mode creates and dispatches no upscale pipeline.
+
+Advanced Optical Transport is reconstruction-global. Its separate shader variant tracks a bounded nested
+water/glass/ice medium stack and distance-based solid absorption on NRD as well as DLSS-RR. DLSS-RR adds an
+exact deterministic first-interface split and submits final color, color-before-transparency, premultiplied
+reflection, and opacity through the official Streamline tags. Disabled mode selects the compact shader and
+allocates no layer images. Animated water continues to reject history because the renderer does not yet have
+an exact previous-time refracted correspondence.
+
 ## Live menu surface
 
-The Reconstruction tab exposes backend, REBLUR/RELAX, directional SH/SG, anti-firefly, antilag,
-main/fast history, history-fix frames/stride, prepass and blur radii, lobe/roughness/plane rejection,
-disocclusion threshold, REBLUR hit-distance A/B/C, RELAX A-Trous iterations, and noisy/denoised split.
+The Reconstruction tab exposes backend, Advanced Optical Transport, REBLUR/RELAX, directional SH/SG,
+native/quality/balanced/performance/custom render scales, edge-adaptive/linear/nearest upscale filters,
+upscale sharpness, anti-firefly, antilag, main/fast history, history-fix frames/stride, prepass and blur
+radii, lobe/roughness/plane rejection, disocclusion threshold, REBLUR hit-distance A/B/C, RELAX A-Trous
+iterations, and noisy/denoised split.
 
-Backend, denoiser-family, and SH changes recreate correctly-sized images and reset history. All other NRD
-settings are copied to `CommonSettings`, `ReblurSettings`, or `RelaxSettings` every frame and therefore
-take effect live.
+Backend, denoiser-family, SH, render scale, and upscale-filter changes recreate correctly-sized resources
+and reset history. Upscale sharpness is a push constant and does not recreate resources. All NRD tuning
+settings are copied to `CommonSettings`, `ReblurSettings`, or `RelaxSettings` every frame.
 
 ## Build and packaging
 

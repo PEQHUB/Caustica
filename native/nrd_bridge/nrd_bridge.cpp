@@ -113,6 +113,18 @@ void setError(const char* operation, const char* detail = nullptr) {
     }
 }
 
+void NRI_CALL nriMessageCallback(nri::Message messageType, const char* file, uint32_t line,
+        const char* message, void*) {
+    std::fprintf(stderr, "NRI (%s:%u) - %s\n", file ? file : "unknown", line, message ? message : "");
+    if (messageType == nri::Message::ERROR)
+        setError("NRI", message);
+}
+
+// NRI's default Windows callback calls DebugBreak on errors. A native breakpoint cannot safely cross
+// Java's FFM downcall boundary, so let RecreateVK return its failure code and report it through g_error.
+void NRI_CALL nriAbortExecution(void*) {
+}
+
 nrd::Denoiser selectDenoiser(int32_t family, bool sh) {
     if (family == 1)
         return sh ? nrd::Denoiser::RELAX_DIFFUSE_SPECULAR_SH : nrd::Denoiser::RELAX_DIFFUSE_SPECULAR;
@@ -154,7 +166,8 @@ NRDBRIDGE_API const char* nrdbridge_last_error() {
 }
 
 NRDBRIDGE_API int32_t nrdbridge_create(uint64_t instance, uint64_t physicalDevice, uint64_t device,
-        uint32_t graphicsQueueFamily, uint32_t width, uint32_t height, int32_t family, int32_t sh) {
+        uint32_t graphicsQueueFamily, uint32_t width, uint32_t height, int32_t family, int32_t sh,
+        const char* const* enabledDeviceExtensions, uint32_t enabledDeviceExtensionNum) {
     try {
         g_error.clear();
         if (!instance || !physicalDevice || !device || width == 0 || height == 0 || width > 65535 || height > 65535) {
@@ -175,6 +188,8 @@ NRDBRIDGE_API int32_t nrdbridge_create(uint64_t instance, uint64_t physicalDevic
         queueFamily.familyIndex = graphicsQueueFamily;
 
         nri::DeviceCreationVKDesc deviceDesc = {};
+        deviceDesc.callbackInterface.MessageCallback = nriMessageCallback;
+        deviceDesc.callbackInterface.AbortExecution = nriAbortExecution;
         deviceDesc.vkBindingOffsets.sRegister = libraryDesc.spirvBindingOffsets.samplerOffset;
         deviceDesc.vkBindingOffsets.tRegister = libraryDesc.spirvBindingOffsets.textureOffset;
         deviceDesc.vkBindingOffsets.bRegister = libraryDesc.spirvBindingOffsets.constantBufferOffset;
@@ -185,6 +200,8 @@ NRDBRIDGE_API int32_t nrdbridge_create(uint64_t instance, uint64_t physicalDevic
         deviceDesc.queueFamilies = &queueFamily;
         deviceDesc.queueFamilyNum = 1;
         deviceDesc.minorVersion = 2;
+        deviceDesc.vkExtensions.deviceExtensions = enabledDeviceExtensions;
+        deviceDesc.vkExtensions.deviceExtensionNum = enabledDeviceExtensionNum;
 
         nrd::DenoiserDesc denoiserDesc = {kDenoiserId, state->denoiser};
         nrd::InstanceCreationDesc instanceDesc = {};
@@ -200,7 +217,8 @@ NRDBRIDGE_API int32_t nrdbridge_create(uint64_t instance, uint64_t physicalDevic
         integrationDesc.enableWholeLifetimeDescriptorCaching = true;
 
         if (state->integration.RecreateVK(integrationDesc, instanceDesc, deviceDesc) != nrd::Result::SUCCESS) {
-            setError("NRD Integration::RecreateVK failed");
+            if (g_error.empty())
+                setError("NRD Integration::RecreateVK failed");
             return -2;
         }
         g_state = std::move(state);

@@ -9,7 +9,7 @@ import org.joml.Matrix4fc;
 
 /** Versioned Caustica-owned C ABI shared with {@code streamlinebridge.dll}. */
 public final class StreamlineAbi {
-    public static final int VERSION = 9;
+    public static final int VERSION = 10;
     public static final int RESOURCE_DESC_SIZE = 72;
     public static final int CONSTANTS_SIZE = 444;
     public static final int DLSSD_OPTIONS_SIZE = 144;

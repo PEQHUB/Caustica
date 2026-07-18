@@ -2,6 +2,7 @@ package dev.comfyfluffy.caustica.rt.pipeline;
 
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -46,7 +47,7 @@ final class DlssdWaterGuideContractTest {
     }
 
     @Test
-    void refractedWaterKeepsInterfaceIdentityAndDestinationColorGuides() throws IOException {
+    void layeredRefractionMovesTheOrdinaryGuideTupleToOneDestination() throws IOException {
         String raygen = read("shaders/world/world.rgen.slang");
         int destination = raygen.indexOf("if (destinationValid) {");
         int failure = raygen.indexOf("} else {\n            // No coherent transmitted layer", destination);
@@ -54,14 +55,15 @@ final class DlssdWaterGuideContractTest {
 
         assertTrue(validPath.contains("gv_motionHitCamRel = destinationHitCamRel"));
         assertTrue(validPath.contains("gv_albedo = destinationDiffuseAlbedo"));
-        assertTrue(validPath.contains("if (glassGuide) {"));
+        assertTrue(validPath.contains("#if CAUSTICA_LAYERED_OPTICS"));
         assertTrue(validPath.contains("gv_hitCamRel = destinationHitCamRel"));
-        assertFalse(validPath.contains("gv_normal = destinationNormal"));
-        assertFalse(validPath.contains("gv_rough = destinationRoughness"));
-        assertTrue(validPath.indexOf("if (glassGuide) {") < validPath.indexOf("gv_hitCamRel = destinationHitCamRel"));
-        assertTrue(raygen.contains("Water depth remains on the physical animated"));
-        assertTrue(raygen.contains("gv_animatedGuide = 1.0;\n        }\n    }"));
-        assertFalse(raygen.contains("Clear dielectric depth follows the transmitted destination"));
+        assertTrue(validPath.contains("gv_normal = destinationNormal"));
+        assertTrue(validPath.contains("gv_rough = destinationRoughness"));
+        assertTrue(validPath.contains("gv_specAlb = destinationSpecularAlbedo"));
+        assertTrue(raygen.contains("matching Streamline's documented transparency-layer contract"));
+        assertTrue(raygen.contains("if (writeRrGuides) specMotion = motion"));
+        assertTrue(raygen.contains("if (encounteredAnimatedWater) gv_animatedGuide = 1.0"));
+        assertTrue(raygen.contains("until a true previous-time optical walk exists"));
     }
 
     @Test
@@ -102,28 +104,48 @@ final class DlssdWaterGuideContractTest {
     }
 
     @Test
-    void highQualityTransparencyAddsOneIndependentPrimaryDielectricSample() throws IOException {
+    void highQualityTransparencySplitsTheFirstDielectricIntoDeterministicLayers() throws IOException {
         String raygen = read("shaders/world/world.rgen.slang");
 
-        assertTrue(raygen.contains("#if CAUSTICA_TRANSPARENCY_HQ && !CAUSTICA_NRD"
-                + " && !CAUSTICA_OFFLINE && !CAUSTICA_SHARC_UPDATE"));
-        assertTrue(raygen.contains("#define CAUSTICA_PRIMARY_DIELECTRIC_TWO_SPP 1"));
-        assertTrue(raygen.contains("#define CAUSTICA_PRIMARY_DIELECTRIC_TWO_SPP 0"));
+        assertTrue(raygen.contains("#if CAUSTICA_TRANSPARENCY_HQ && !CAUSTICA_OFFLINE"
+                + " && !CAUSTICA_SHARC_UPDATE"));
+        assertTrue(raygen.contains("#if CAUSTICA_NESTED_MEDIA && !CAUSTICA_NRD"));
+        assertTrue(raygen.contains("#define CAUSTICA_PRIMARY_DIELECTRIC_SPLIT 1"));
+        assertTrue(raygen.contains("#define CAUSTICA_PRIMARY_DIELECTRIC_SPLIT 0"));
         assertTrue(raygen.contains("if (segment == 0 && primaryOpticalSample != 0u)"));
-        assertTrue(raygen.contains("PRIMARY_OPTICAL_SAMPLE_A, primaryDielectricHit"));
-        assertTrue(raygen.contains("PRIMARY_OPTICAL_SAMPLE_B, secondPrimaryDielectricHit"));
+        assertTrue(raygen.contains("PRIMARY_OPTICAL_TRANSMISSION, primaryDielectricHit"));
+        assertTrue(raygen.contains("PRIMARY_OPTICAL_REFLECTION, reflectionDielectricHit"));
         assertTrue(raygen.contains("if (primaryDielectricHit && !primaryOnly)"));
-        assertTrue(raygen.contains("sampleRadiance = 0.5 * (sampleRadiance + secondRadiance)"));
+        assertTrue(raygen.contains("sampleRadiance = F * reflectionRadiance + (1.0 - F) * transmissionRadiance"));
+        assertTrue(raygen.contains("layeredPremultipliedReflection += F * reflectionRadiance"));
+        assertTrue(raygen.contains("layeredPremultipliedTransmission += (1.0 - F) * transmissionRadiance"));
+        assertTrue(raygen.contains("layeredPremultipliedTransmission / (1.0 - layeredOpacity)"));
+        assertTrue(raygen.contains("gColorBeforeTransparency[pix] = float4(layeredBaseRadiance, 1.0)"));
+        assertTrue(raygen.contains("outImage[pix] = float4(frameRadiance, 1.0)"));
         assertTrue(raygen.contains("sampler.state = sampleHash(sampler.state ^ 0xa511e9b3u)"));
         assertTrue(raygen.contains("sampler.branchSalt = sampleHash(sampler.branchSalt ^ 0x6c8e9cf5u)"));
         assertTrue(raygen.contains("+ sampler.branchSalt"));
-        assertFalse(raygen.contains("primarySplitWeight"));
-        assertFalse(raygen.contains("reflectionSampler"));
+        assertTrue(raygen.contains("PathSampler reflectionSampler = sampler"));
+        assertTrue(raygen.contains("float4 mediumIorStack = float4(1.0)"));
+        assertTrue(raygen.contains("solidDielectricExtinction(glassTint)"));
         assertTrue(raygen.contains("gv_specAlb = float3(F, F, F)"));
         assertTrue(raygen.contains("static const float WATER_GUIDE_ROUGH = 0.02"));
         assertTrue(raygen.contains("static const float GLASS_GUIDE_ROUGH = 0.04"));
         assertFalse(raygen.contains("static const float WATER_GUIDE_ROUGH = 0.0;"));
         assertFalse(raygen.contains("static const float GLASS_GUIDE_ROUGH = 0.0;"));
+    }
+
+    @Test
+    void multiSampleLayerDecompositionExactlyRecomposesCorrelatedFresnel() {
+        double f0 = 0.1, t0 = 10.0, r0 = 2.0;
+        double f1 = 0.9, t1 = 1.0, r1 = 8.0;
+        double finalAverage = 0.5 * (f0 * r0 + (1.0 - f0) * t0
+                + f1 * r1 + (1.0 - f1) * t1);
+        double opacity = 0.5 * (f0 + f1);
+        double layer = 0.5 * (f0 * r0 + f1 * r1);
+        double premultipliedTransmission = 0.5 * ((1.0 - f0) * t0 + (1.0 - f1) * t1);
+        double base = premultipliedTransmission / (1.0 - opacity);
+        assertEquals(finalAverage, layer + (1.0 - opacity) * base, 1.0e-12);
     }
 
     private static String read(String relative) throws IOException {

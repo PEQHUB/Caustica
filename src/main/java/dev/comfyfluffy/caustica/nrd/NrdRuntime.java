@@ -6,6 +6,8 @@ import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.util.Collection;
+import java.util.List;
 import java.util.Locale;
 import net.fabricmc.loader.api.FabricLoader;
 
@@ -14,6 +16,7 @@ public final class NrdRuntime {
     private static NrdLibrary library;
     private static boolean attempted;
     private static String unavailableReason = "Not initialized";
+    private static volatile List<String> enabledDeviceExtensions = List.of();
 
     private NrdRuntime() {
     }
@@ -65,6 +68,15 @@ public final class NrdRuntime {
 
     public static String unavailableReason() {
         return unavailableReason;
+    }
+
+    /** Records the exact extension names submitted to Minecraft's Vulkan device creation. */
+    public static void recordEnabledDeviceExtensions(Collection<String> extensions) {
+        enabledDeviceExtensions = List.copyOf(extensions);
+    }
+
+    public static List<String> enabledDeviceExtensions() {
+        return enabledDeviceExtensions;
     }
 
     static String platform() {

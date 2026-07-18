@@ -8,6 +8,7 @@ import java.lang.foreign.SymbolLookup;
 import java.lang.foreign.ValueLayout;
 import java.lang.invoke.MethodHandle;
 import java.nio.file.Path;
+import java.util.List;
 
 /** Flat FFM bindings for the cross-platform Vulkan NRD bridge. */
 public final class NrdLibrary {
@@ -25,7 +26,7 @@ public final class NrdLibrary {
         version = handle(lookup, "nrdbridge_version", FunctionDescriptor.of(ValueLayout.ADDRESS));
         lastError = handle(lookup, "nrdbridge_last_error", FunctionDescriptor.of(ValueLayout.ADDRESS));
         create = handle(lookup, "nrdbridge_create",
-                FunctionDescriptor.of(I32, I64, I64, I64, I32, I32, I32, I32, I32));
+                FunctionDescriptor.of(I32, I64, I64, I64, I32, I32, I32, I32, I32, I64, I32));
         evaluate = handle(lookup, "nrdbridge_evaluate",
                 FunctionDescriptor.of(I32, I64, I64, I32, I64, I64));
         destroy = handle(lookup, "nrdbridge_destroy", FunctionDescriptor.ofVoid());
@@ -44,9 +45,16 @@ public final class NrdLibrary {
     }
 
     public int create(long instance, long physicalDevice, long device, int queueFamily,
-            int width, int height, int family, boolean sphericalHarmonics) {
-        return invokeInt(create, instance, physicalDevice, device, queueFamily, width, height,
-                family, sphericalHarmonics ? 1 : 0);
+            int width, int height, int family, boolean sphericalHarmonics, List<String> deviceExtensions) {
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment pointers = deviceExtensions.isEmpty()
+                    ? MemorySegment.NULL : arena.allocate(ValueLayout.ADDRESS, deviceExtensions.size());
+            for (int i = 0; i < deviceExtensions.size(); i++) {
+                pointers.setAtIndex(ValueLayout.ADDRESS, i, arena.allocateFrom(deviceExtensions.get(i)));
+            }
+            return invokeInt(create, instance, physicalDevice, device, queueFamily, width, height,
+                    family, sphericalHarmonics ? 1 : 0, pointers.address(), deviceExtensions.size());
+        }
     }
 
     public int evaluate(long commandBuffer, MemorySegment resources, int resourceCount,

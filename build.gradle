@@ -272,6 +272,15 @@ abstract class CompileShaders extends DefaultTask {
 							nrdDefines + ["-DCAUSTICA_PORTABLE_TRACE=0", "-capability", "spvShaderInvocationReorderEXT"])
 					compileOneSlang(src, new File(scratchDir, "world_nrd_nv.rgen.spv"),
 							nrdDefines + ["-DCAUSTICA_PORTABLE_TRACE=0", "-capability", "spvShaderInvocationReorderNV"])
+					def nrdHqDefines = nrdDefines.collect {
+						it == "-DCAUSTICA_TRANSPARENCY_HQ=0" ? "-DCAUSTICA_TRANSPARENCY_HQ=1" : it
+					}
+					compileOneSlang(src, new File(scratchDir, "world_nrd_base_hq.rgen.spv"),
+							nrdHqDefines + ["-DCAUSTICA_PORTABLE_TRACE=1"])
+					compileOneSlang(src, new File(scratchDir, "world_nrd_hq.rgen.spv"),
+							nrdHqDefines + ["-DCAUSTICA_PORTABLE_TRACE=0", "-capability", "spvShaderInvocationReorderEXT"])
+					compileOneSlang(src, new File(scratchDir, "world_nrd_nv_hq.rgen.spv"),
+							nrdHqDefines + ["-DCAUSTICA_PORTABLE_TRACE=0", "-capability", "spvShaderInvocationReorderNV"])
 					// Offline uses the same transport/material source but a separate entrypoint binary and sampler.
 					compileOneSlang(src, new File(scratchDir, "world_offline_base.rgen.spv"),
 							["-DCAUSTICA_OFFLINE=1", "-DCAUSTICA_SER=0", "-DCAUSTICA_PORTABLE_TRACE=1", "-O2", "-fp-mode", "precise"])
@@ -446,11 +455,12 @@ abstract class CompileShaders extends DefaultTask {
 				}
 			}
 		}
-		["world_nrd_base.rgen.spv", "world_nrd.rgen.spv", "world_nrd_nv.rgen.spv"].each { name ->
+		["world_nrd_base.rgen.spv", "world_nrd.rgen.spv", "world_nrd_nv.rgen.spv",
+		 "world_nrd_base_hq.rgen.spv", "world_nrd_hq.rgen.spv", "world_nrd_nv_hq.rgen.spv"].each { name ->
 			def raygen = new File(scratchDir, name)
-			if (!raygen.isFile() || raygen.length() > 152_000L) {
+			if (!raygen.isFile() || raygen.length() > 175_000L) {
 				throw new GradleException("NRD world raygen complexity budget exceeded: ${name} is "
-						+ "${raygen.isFile() ? raygen.length() : 'missing'} bytes (limit 152000)")
+						+ "${raygen.isFile() ? raygen.length() : 'missing'} bytes (limit 175000)")
 			}
 		}
 		["world_offline_base.rgen.spv", "world_offline.rgen.spv", "world_offline_nv.rgen.spv"].each { name ->
@@ -900,12 +910,16 @@ def verifyProductionArtifact = tasks.register("verifyProductionArtifact") {
 			"caustica/rt/world_nrd_base.rgen.spv",
 			"caustica/rt/world_nrd.rgen.spv",
 			"caustica/rt/world_nrd_nv.rgen.spv",
+			"caustica/rt/world_nrd_base_hq.rgen.spv",
+			"caustica/rt/world_nrd_hq.rgen.spv",
+			"caustica/rt/world_nrd_nv_hq.rgen.spv",
 			"caustica/rt/world_offline_base.rgen.spv",
 			"caustica/rt/world_offline.rgen.spv",
 			"caustica/rt/world_offline_nv.rgen.spv",
 			"caustica/rt/world_shadow.rchit.spv",
 			"caustica/rt/world_shadow.rmiss.spv",
 			"caustica/rt/nrd_resolve.comp.spv",
+			"caustica/rt/nrd_spatial_upscale.comp.spv",
 			"caustica/rt/dlssd_disocclusion.comp.spv",
 			"caustica/rt/dlssd_disocclusion_particle_history.comp.spv",
 			"caustica/streamline.properties",

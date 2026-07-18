@@ -68,7 +68,8 @@ public final class RtNrd {
             long physical = context.vk().getPhysicalDevice().address();
             long instance = context.vk().getPhysicalDevice().getInstance().address();
             int result = library.create(instance, physical, device, context.graphicsQueueFamilyIndex(),
-                    renderWidth, renderHeight, requestedFamily, requestedSh);
+                    renderWidth, renderHeight, requestedFamily, requestedSh,
+                    NrdRuntime.enabledDeviceExtensions());
             if (result != 0) throw new IllegalStateException(library.lastError());
             initialized = true;
             width = renderWidth;

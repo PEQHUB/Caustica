@@ -7,6 +7,7 @@ import com.mojang.blaze3d.vulkan.init.VulkanPNextStruct;
 import dev.comfyfluffy.caustica.CausticaConfig;
 import dev.comfyfluffy.caustica.CausticaMod;
 import dev.comfyfluffy.caustica.rt.pipeline.RtDlssRr;
+import dev.comfyfluffy.caustica.rt.pipeline.RtNrd;
 import dev.comfyfluffy.caustica.rt.pipeline.RtReconstruction;
 import org.lwjgl.system.MemoryStack;
 import org.lwjgl.vulkan.VKCapabilitiesDevice;
@@ -150,7 +151,7 @@ public final class RtDeviceBringup {
             case EXT -> "world_nrd.rgen.spv";
             case NONE -> "world_nrd_base.rgen.spv";
         } : serBackend.worldRaygenShader;
-        return highQualityTransparencyShader(shader);
+        return nrd ? advancedNrdTransportShader(shader) : highQualityTransparencyShader(shader);
     }
 
     public static String offlineWorldRaygenShader() {
@@ -197,6 +198,14 @@ public final class RtDeviceBringup {
         // two-path shader after reconstruction is switched to NRD or off.
         if (!RtReconstruction.usesDlss() || !RtDlssRr.INSTANCE.isOperational()
                 || !CausticaConfig.Rt.DlssRr.HIGH_QUALITY_TRANSPARENCY.value()) return shader;
+        int suffix = shader.indexOf(".rgen.spv");
+        if (suffix < 0) throw new IllegalArgumentException("not a raygen shader: " + shader);
+        return shader.substring(0, suffix) + "_hq" + shader.substring(suffix);
+    }
+
+    private static String advancedNrdTransportShader(String shader) {
+        if (!RtReconstruction.usesNrd() || !RtNrd.INSTANCE.isOperational()
+                || !CausticaConfig.Rt.Reconstruction.ADVANCED_OPTICAL_TRANSPORT.value()) return shader;
         int suffix = shader.indexOf(".rgen.spv");
         if (suffix < 0) throw new IllegalArgumentException("not a raygen shader: " + shader);
         return shader.substring(0, suffix) + "_hq" + shader.substring(suffix);

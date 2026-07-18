@@ -1115,7 +1115,7 @@ SLBRIDGE_EXPORT int32_t slbridge_evaluate_dlssd(uint64_t frame_token, uint32_t v
         const slbridge_constants* constants, uint64_t command_buffer) {
     if (!g_slSetConstants || !g_slEvaluateFeature || !resources || !constants || !command_buffer
             || !slbridge::detail::isSupportedDlssdResourceCount(resource_count)) {
-        setError("Streamline DLSS-RR evaluation requires ten core resources, at most one optional guide, constants, and a command buffer");
+        setError("Streamline DLSS-RR evaluation requires ten core resources, an optional diffuse guide, an optional atomic transparency layer, constants, and a command buffer");
         return -1;
     }
     auto* token = tokenFromHandle(frame_token);
@@ -1141,6 +1141,9 @@ SLBRIDGE_EXPORT int32_t slbridge_evaluate_dlssd(uint64_t frame_token, uint32_t v
     bool hasDisocclusion = false;
     bool hasBiasCurrentColor = false;
     bool hasDiffusePathGuide = false;
+    bool hasColorBeforeTransparency = false;
+    bool hasTransparencyLayer = false;
+    bool hasTransparencyLayerOpacity = false;
     for (uint32_t i = 0; i < resource_count; i++) {
         const auto& descriptor = resources[i];
         if (!slbridge::detail::isCompleteDlssdVulkanTexture(descriptor)) {
@@ -1176,13 +1179,18 @@ SLBRIDGE_EXPORT int32_t slbridge_evaluate_dlssd(uint64_t frame_token, uint32_t v
         case SLBRIDGE_BUFFER_DISOCCLUSION_MASK: hasDisocclusion = true; break;
         case SLBRIDGE_BUFFER_BIAS_CURRENT_COLOR_HINT: hasBiasCurrentColor = true; break;
         case SLBRIDGE_BUFFER_DIFFUSE_RAY_DIRECTION_HIT_DISTANCE: hasDiffusePathGuide = true; break;
+        case SLBRIDGE_BUFFER_COLOR_BEFORE_TRANSPARENCY: hasColorBeforeTransparency = true; break;
+        case SLBRIDGE_BUFFER_TRANSPARENCY_LAYER: hasTransparencyLayer = true; break;
+        case SLBRIDGE_BUFFER_TRANSPARENCY_LAYER_OPACITY: hasTransparencyLayerOpacity = true; break;
         default: break;
         }
     }
     if (!hasInputColor || !hasOutputColor || !hasDepth || !hasMotion || !hasAlbedo
             || !hasSpecularAlbedo || !hasNormalRoughness || !hasSpecularMotion
             || !hasDisocclusion || !hasBiasCurrentColor
-            || (resource_count == 11 && !hasDiffusePathGuide)) {
+            || !slbridge::detail::hasExpectedDlssdOptionalResources(resource_count,
+                    hasDiffusePathGuide, hasColorBeforeTransparency,
+                    hasTransparencyLayer, hasTransparencyLayerOpacity)) {
         setError("Streamline DLSS-RR is missing one or more required local resource tags");
         return -1;
     }
