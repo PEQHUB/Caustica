@@ -18,7 +18,8 @@ final class GlassOnlyIntegrationContractTest {
         assertTrue(terrain.contains("OPTICAL_SOLID_GLASS = 3"));
         assertTrue(terrain.contains("block == Blocks.GLASS_PANE"));
         assertTrue(terrain.contains("block == Blocks.GLASS"));
-        assertTrue(terrain.contains("q.translucent ? q.opticalClass : 0f"));
+        assertTrue(terrain.contains("q.opticalClass = q.translucent ? opticalClass(state) : 0"));
+        assertTrue(terrain.contains("Float.intBitsToFloat(q.opticalClass)"));
         assertTrue(terrain.contains("Geom g = water ? cur.water() : cur.opaque()"));
     }
 
@@ -33,7 +34,8 @@ final class GlassOnlyIntegrationContractTest {
         assertTrue(raygen.contains("throughput *= exp(-waterExt * payload.hitT);"));
         assertTrue(raygen.contains("waterExt = waterExtinction(surfaceWaterTint);"));
         assertTrue(raygen.contains("inWater = surfaceWaterEntering;"));
-        assertTrue(closestHit.contains("bool plainWater = pr.tint.w > 0.5 && pr.tint.w < 1.5"));
+        assertTrue(closestHit.contains("materialHeader.model == MATERIAL_WATER"));
+        assertTrue(closestHit.contains("(pr.aux0 & 0xfu) << PAYLOAD_OPTICAL_CLASS_SHIFT"));
 
         assertFalse(raygen.contains("MAX_MEDIUM_DEPTH"));
         assertFalse(raygen.contains("pathMedia"));
@@ -57,9 +59,9 @@ final class GlassOnlyIntegrationContractTest {
         assertTrue(raygen.contains("specSurfaceAlbedo, dir, jndc, size"));
         assertTrue(raygen.contains("gv_opticalGuideMode == 3u, true, gv_opticalExitEta"));
         assertTrue(raygen.contains("Favg * Favg * Eavg"));
-        assertTrue(closestHit.contains("float3 texAlbedo = srgbToLinear(blockAtlas.SampleLevel(uv, blockLod).rgb)"));
+        assertTrue(closestHit.contains("float3 texAlbedo = srgbToLinear(blockAlbedoAtlas.SampleLevel(uv, blockLod).rgb)"));
         assertTrue(closestHit.contains("float3 tintLinear = srgbToLinear(tint)"));
-        assertTrue(closestHit.contains("albedo709 = texAlbedo * tintLinear"));
+        assertTrue(closestHit.contains("float3 albedo709 = texAlbedo * tintLinear"));
         assertTrue(closestHit.contains("payload.albedo = bt709ToBt2020(albedo709)"));
         assertFalse(closestHit.contains("payload.albedo = (pr.tint.w > 0.5) ? tint"));
         assertEquals(2, occurrences(raygen, "opticalGuideHit(")); // definition plus one shared call site

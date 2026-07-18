@@ -46,7 +46,13 @@ import net.minecraft.core.SectionPos;
 import net.minecraft.tags.FluidTags;
 import net.minecraft.util.RandomSource;
 import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.BaseTorchBlock;
+import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.IceBlock;
 import net.minecraft.world.level.block.RenderShape;
+import net.minecraft.world.level.block.StainedGlassBlock;
+import net.minecraft.world.level.block.StainedGlassPaneBlock;
+import net.minecraft.world.level.block.TintedGlassBlock;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.material.FluidState;
 import net.minecraft.world.phys.Vec3;
@@ -392,6 +398,11 @@ final class RtTerrainMesher {
         // separates from the front). Pooled — reset each block, never reallocated steady-state.
         private static final float OFFSET = 2.0e-4f;         // outward nudge (blocks) to break coplanar depth ties
         private static final float TRANSLUCENT_INSET = 2.0e-4f; // inward recess (blocks) for glass/ice vs coplanar neighbours
+        private static final int OPTICAL_THIN_GLASS = 2;
+        private static final int OPTICAL_SOLID_GLASS = 3;
+        private static final int OPTICAL_SOLID_ICE = 4;
+        private static final int OPTICAL_TRANSLUCENT_SURFACE = 5;
+        private static final int PRIM_FLAG_TORCH = 1;
         private static final float COINCIDENT_EPS = 1.0e-4f; // verts this close are "the same" point
         private static final int RESOLVE_CAP = 128;          // skip the O(n^2) resolve for pathological blocks
         private final List<PendingQuad> pending = new ArrayList<>(8);
@@ -418,6 +429,7 @@ final class RtTerrainMesher {
             ChunkSectionLayer layer = quad.chunkLayer();
             q.cutout = layer != ChunkSectionLayer.SOLID;
             q.translucent = layer == ChunkSectionLayer.TRANSLUCENT;
+            q.opticalClass = q.translucent ? opticalClass(state) : 0;
 
             // Fabric colors are authored albedo. Continuity uses them for already-resolved overlay tint;
             // ordinary biome-tinted quads retain tintIndex and are multiplied by the world tint below.
@@ -445,9 +457,21 @@ final class RtTerrainMesher {
             q.tr = tr; q.tg = tg; q.tb = tb;
 
             q.emission = quad.emissive() ? 1f : (state != null ? state.getLightEmission() / 15f : 0f);
+            q.torch = state != null && state.getBlock() instanceof BaseTorchBlock;
             TextureAtlasSprite sprite = spriteFinder.find(quad);
             q.sprite = sprite;
             q.materialId = materials.resolve(sprite, state, q.translucent);
+        }
+
+        private static int opticalClass(BlockState state) {
+            if (state == null) return OPTICAL_TRANSLUCENT_SURFACE;
+            var block = state.getBlock();
+            if (block == Blocks.GLASS_PANE || block instanceof StainedGlassPaneBlock) return OPTICAL_THIN_GLASS;
+            if (block == Blocks.GLASS || block instanceof StainedGlassBlock || block instanceof TintedGlassBlock) {
+                return OPTICAL_SOLID_GLASS;
+            }
+            if (block instanceof IceBlock) return OPTICAL_SOLID_ICE;
+            return OPTICAL_TRANSLUCENT_SURFACE;
         }
 
         /** Fabric's cull predicate returns true when the nominal face should be discarded. */
@@ -604,8 +628,8 @@ final class RtTerrainMesher {
                 prim.add(q.tb);
                 prim.add(0f);
                 prim.add(Float.intBitsToFloat(q.materialId)); // TerrainPrim.materialId uint bits
-                prim.add(0f); // flags
-                prim.add(0f); // aux0
+                prim.add(Float.intBitsToFloat(q.torch ? PRIM_FLAG_TORCH : 0));
+                prim.add(Float.intBitsToFloat(q.opticalClass));
                 prim.add(0f); // aux1
                 g.ommSprites.add(q.sprite);
             }
@@ -620,6 +644,8 @@ final class RtTerrainMesher {
         boolean cutout; // non-SOLID render layer (alpha-tested) — also an overlay candidate
         boolean translucent; // TRANSLUCENT layer (stained glass / ice): colored-transmission dielectric
         boolean tinted; // tintIndex >= 0 — the tinted member of a base+overlay pair
+        boolean torch;
+        int opticalClass;
         float tr, tg, tb, emission;
         int materialId;
         TextureAtlasSprite sprite;

@@ -109,8 +109,10 @@ final class OfflineGroundTruthContractTest {
 
         assertTrue(composite.contains("GUIDE_COUNT = 11"));
         assertTrue(raygen.contains("vk::binding(12, 0)"));
-        assertTrue(hit.contains("vk::binding(14, 0)"));
-        assertTrue(hit.contains("vk::binding(15, 0)"));
+        assertTrue(hit.contains("vk::binding(1, 1)"));
+        assertTrue(hit.contains("vk::binding(2, 1)"));
+        assertTrue(hit.contains("vk::binding(3, 1)"));
         assertTrue(miss.contains("vk::binding(16, 0)"));
+        assertTrue(miss.contains("vk::binding(17, 0)"));
     }
 }

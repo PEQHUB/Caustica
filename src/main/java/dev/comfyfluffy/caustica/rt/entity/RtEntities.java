@@ -219,6 +219,9 @@ public final class RtEntities {
     private int tableSlot;
 
     private final FrameLists[] frameLists = new FrameLists[FRAME_LIST_RING];
+    private boolean offlineSession;
+    private FrameEntities offlineSnapshot;
+    private FrameLists offlineSnapshotLists;
 
     // Previous frame's captured entity-local vertex positions + its interpolated world anchor, keyed by
     // entity id. Maps are swapped/reused each frame: entries not seen this frame fall out, while visible
@@ -377,12 +380,19 @@ public final class RtEntities {
     private record Motion(long dispAddr, float rigidX, float rigidY, float rigidZ) {
     }
 
-    // Offline snapshot retention is re-established after the upstream split-bucket lifetime port.
-    // These lifecycle hooks intentionally remain explicit so the composite contract stays source-compatible.
     public void beginOfflineSession() {
+        offlineSession = true;
+        offlineSnapshot = null;
+        offlineSnapshotLists = null;
     }
 
     public void endOfflineSession() {
+        offlineSession = false;
+        offlineSnapshot = null;
+        if (offlineSnapshotLists != null) {
+            offlineSnapshotLists.releaseDeferred();
+            offlineSnapshotLists = null;
+        }
     }
 
     private static final class MotionSlice {
@@ -590,6 +600,9 @@ public final class RtEntities {
     public FrameEntities beginFrame(RtContext ctx, List<RtAccel.Instance> base, int rbx, int rby, int rbz,
                                     double camX, double camY, double camZ, Matrix4f projection, Matrix4f viewRotation) {
         processDeferred();
+        if (offlineSession && offlineSnapshot != null) {
+            return offlineSnapshot;
+        }
         if (!enabled()) {
             return new FrameEntities(base, List.of(), List.of(), 0L);
         }
@@ -624,7 +637,15 @@ public final class RtEntities {
         RtFrameStats.FRAME.count("entityRetainedGeometryBytes", retainedGeometryBytes);
 
         if (build.instances == null) {
-            return new FrameEntities(base, List.of(), List.of(), 0L);
+            FrameEntities terrainOnly = new FrameEntities(base, List.of(), List.of(), 0L);
+            if (offlineSession) offlineSnapshot = terrainOnly;
+            return terrainOnly;
+        }
+        FrameEntities result = new FrameEntities(base, build.instances, build.blas, build.geomTableAddr);
+        if (offlineSession) {
+            offlineSnapshot = result;
+            offlineSnapshotLists = build.lists;
+            return result;
         }
         // Retire this frame's transient meshes + scratch + pooled-BUILD BLAS once it is no longer in flight
         // (their build + the trace that reads them must complete first). Refit AS persist in entityAccels.
@@ -634,7 +655,7 @@ public final class RtEntities {
             // The deferred horizon guarantees these are off all queues, so destroying them now is safe.
             listsForFree.releaseDeferred();
         }));
-        return new FrameEntities(base, build.instances, build.blas, build.geomTableAddr);
+        return result;
     }
 
     /** Capture animated entities (mobs, items, falling blocks) with per-object motion-vector displacement. */

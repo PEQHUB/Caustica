@@ -81,24 +81,24 @@ public struct WorldPush {
     public uint64_t entityTableAddr;  // entity geometry table
     public uint     flags;            // bit0 camera submerged, bit1 PBR BRDF, bit4 water waves
     public uint     maxBounces;
-    public float4   sunDir;           // xyz true sun direction, w dayFactor 0..1
-    public float4   lightDir;         // xyz active NEE light dir, w square half-angle (rad)
-    public float4   lightRadiance;    // xyz HDR light radiance, w star brightness
-    public float4   moonDir;          // xyz moon direction, w moonPhase (0 full .. 4 new)
-    public float4   celestial;        // xyz celestial rotation axis, w star angle (rad)
-    public float4   sunUv;            // vanilla sun sprite atlas rect (u0,v0,u1,v1)
-    public float4   moonUv;           // vanilla current-moon-phase sprite atlas rect
-    public float4   waterParams;      // xyz camera-biome water tint, w wave time (s)
-    public float4   waterAnchor;      // xy world-stable wave-domain anchor
-    public float4x4 curViewProj;      // forward camera-relative view-projection
-    public uint     breakCount;
-    public float    torchIntensity;
-    public uint     psrMaxMirrors;
-    public BreakEntry breaking[8];    // Java capacity and breakCount serialization are generated from this
-    public uint64_t sampleSequenceAddr;
-    public float4 environmentSky;
-    public float4 skyState;
-    public float4 skyLighting;
+    [vk::offset(208)] public float4   sunDir;
+    [vk::offset(224)] public float4   lightDir;
+    [vk::offset(240)] public float4   lightRadiance;
+    [vk::offset(256)] public float4   moonDir;
+    [vk::offset(272)] public float4   celestial;
+    [vk::offset(288)] public float4   sunUv;
+    [vk::offset(304)] public float4   moonUv;
+    [vk::offset(320)] public float4   waterParams;
+    [vk::offset(336)] public float4   waterAnchor;
+    [vk::offset(352)] public float4x4 curViewProj;
+    [vk::offset(416)] public uint     breakCount;
+    [vk::offset(420)] public float    torchIntensity;
+    [vk::offset(424)] public uint     psrMaxMirrors;
+    [vk::offset(432)] public BreakEntry breaking[8];
+    [vk::offset(560)] public uint64_t sampleSequenceAddr;
+    [vk::offset(576)] public float4 environmentSky;
+    [vk::offset(592)] public float4 skyState;
+    [vk::offset(608)] public float4 skyLighting;
 };
 
 // Radiance-ray payload (location 0). Member order and types are a cross-stage ABI.
@@ -122,7 +122,7 @@ public static const uint PAYLOAD_SHOW_CELESTIAL = 4u;
 // (PAYLOAD_SHOW_CELESTIAL) is only meaningful on a miss and this bit only on a hit, so they never need
 // to be read together, but they get distinct bits anyway to keep the two concerns unambiguous.
 public static const uint PAYLOAD_WATER_ENTERING = 8u;
-public static const uint PAYLOAD_EMISSION_SOURCE_SHIFT = 4u;
+public static const uint PAYLOAD_EMISSION_SOURCE_SHIFT = 12u;
 public static const uint PAYLOAD_EMISSION_SOURCE_MASK = 7u;
 public static const uint EMISSION_SOURCE_NONE = 0u;
 public static const uint EMISSION_SOURCE_UNIFORM = 1u;

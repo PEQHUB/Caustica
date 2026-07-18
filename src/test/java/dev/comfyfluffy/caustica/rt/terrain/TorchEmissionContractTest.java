@@ -23,7 +23,7 @@ final class TorchEmissionContractTest {
         String common = Files.readString(Path.of("shaders/world/world_common.slang"));
         String mesher = Files.readString(Path.of(
                 "src/main/java/dev/comfyfluffy/caustica/rt/terrain/RtTerrainMesher.java"));
-        assertTrue(closestHit.contains("emission = mappedEmission;"));
+        assertTrue(closestHit.contains("surface.emission = surface0.b;"));
         assertFalse(closestHit.contains("torchIntensity"));
         assertTrue(closestHit.contains("payload.flags |= PAYLOAD_TORCH_EMITTER;"));
         assertTrue(common.contains("[vk::offset(420)] public float    torchIntensity"));
@@ -31,7 +31,7 @@ final class TorchEmissionContractTest {
         assertTrue(raygen.contains("if (payloadTorchEmitter())"));
         assertTrue(raygen.contains("emissiveRadiance *= EMISSIVE_MAX_MULTIPLIER"));
         assertTrue(mesher.contains("state.getBlock() instanceof BaseTorchBlock"));
-        assertTrue(mesher.contains("(q.torch ? 4f : 0f)"));
+        assertTrue(mesher.contains("Float.intBitsToFloat(q.torch ? PRIM_FLAG_TORCH : 0)"));
         assertTrue(raygen.contains("L += throughput * albedo * emission * emissiveRadiance;"));
         assertTrue(raygen.contains("float3 materialEmissive = albedo * emission * emissiveRadiance;"));
         assertTrue(raygen.contains("cacheableDirectLighting + liveDirectLighting + materialEmissive"));

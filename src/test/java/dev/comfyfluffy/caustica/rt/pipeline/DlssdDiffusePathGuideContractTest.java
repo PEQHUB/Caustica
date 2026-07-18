@@ -36,8 +36,10 @@ final class DlssdDiffusePathGuideContractTest {
         String miss = Files.readString(Path.of("shaders/world/world.rmiss.slang"));
 
         assertTrue(composite.contains("GUIDE_COUNT = 11"));
-        assertTrue(closestHit.contains("[[vk::binding(14, 0)]] Sampler2D blockSpecAtlas"));
-        assertTrue(closestHit.contains("[[vk::binding(15, 0)]] Sampler2D blockNormalAtlas"));
+        assertTrue(closestHit.contains("[[vk::binding(1, 1)]] Sampler2D materialSurface0Tex[]"));
+        assertTrue(closestHit.contains("[[vk::binding(2, 1)]] Sampler2D materialNormalAoTex[]"));
+        assertTrue(closestHit.contains("[[vk::binding(3, 1)]] Sampler2D materialSurface1Tex[]"));
         assertTrue(miss.contains("[[vk::binding(16, 0)]] Sampler2D celestialsAtlas"));
+        assertTrue(miss.contains("[[vk::binding(17, 0)]] [format(\"rgba32f\")] RWTexture2D<float4> skyViewLut"));
     }
 }

@@ -1059,8 +1059,10 @@ public final class RtComposite {
         if (celView == 0L) throw new IllegalStateException("celestials atlas unavailable during world binding");
         boundCelestialAtlasHandle = celView;
         if (worldPipeline.hasSkyAtlas()) {
-            for (RtPipeline pipeline : worldPipelines()) if (pipeline != null)
+            for (RtPipeline pipeline : worldPipelines()) if (pipeline != null) {
                 pipeline.setSkyAtlas(celView, sampler);
+                pipeline.setSkyViewLut(skyViewLut.view);
+            }
         }
         setCelestialUvAtlas(celView);
         RtTerrain.requestFullClear();
@@ -1077,6 +1079,7 @@ public final class RtComposite {
             long celestialView = celestialsAtlasView();
             if (celestialView == 0L) throw new IllegalStateException("celestials atlas unavailable during pipeline binding");
             pipeline.setSkyAtlas(celestialView, sampler);
+            pipeline.setSkyViewLut(skyViewLut.view);
         }
         RtEntityTextures.INSTANCE.bindAll(sampler, pipeline);
     }
