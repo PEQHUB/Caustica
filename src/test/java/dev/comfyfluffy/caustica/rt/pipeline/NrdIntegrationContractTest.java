@@ -113,7 +113,8 @@ final class NrdIntegrationContractTest {
         assertTrue(resolve.contains("? sanitizedNoisy(pixel) : clamp(resolved"));
         assertTrue(composite.contains("nrdResolvedOutput.view, gNrdViewZ.view, output.view"));
         assertTrue(composite.contains("CausticaConfig.Rt.Nrd.SPHERICAL_HARMONICS.value(), true"));
-        assertTrue(raygen.contains("gv_normal = normalize(-rd)"));
+        assertTrue(raygen.contains("void setPrimaryMissGuides(float3 rayDirection)"));
+        assertTrue(raygen.contains("gv_normal = normalize(-rayDirection)"));
         assertTrue(raygen.contains("gv_nrdPrimaryMiss = true"));
         assertTrue(raygen.contains("gv_nrdPrimaryMiss ? NRD_SKY_VIEWZ_SENTINEL : nrdViewZ"));
         assertTrue(raygen.contains("Match NRD's sanitize=true frontend contract"));

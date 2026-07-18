@@ -41,8 +41,10 @@ final class BorderFogContractTest {
         assertFalse(raygen.contains("chunkFadeThreshold"));
         assertTrue(raygen.contains("gv_primaryChunkFade == CHUNK_FADE_STATE_REVEALED"));
         assertTrue(raygen.contains("gv_primaryChunkFade == CHUNK_FADE_STATE_HIDDEN"));
+        assertTrue(raygen.contains("setPrimaryMissGuides(dir)"));
+        assertTrue(raygen.contains("[noinline]\nvoid setPrimaryMissGuides"));
         assertTrue(raygen.contains("frameRadiance = atmosphericBoundaryFog(dir, pc)"));
-        assertTrue(raygen.contains("gv_hitCamRel = dir * 1.0e6"));
+        assertTrue(raygen.contains("gv_hitCamRel = rayDirection * 1.0e6"));
         assertTrue(raygen.contains("gv_animatedGuide = 1.0"));
         assertTrue(raygen.contains("gv_albedo = SKY_DIFF_ALBEDO"));
         assertTrue(raygen.contains("gv_specAlb = SKY_SPEC_ALBEDO"));

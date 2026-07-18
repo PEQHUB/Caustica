@@ -381,6 +381,26 @@ static const float WATER_GUIDE_ROUGH = 0.02;
 static const float3 SKY_SPEC_ALBEDO = float3(0.5, 0.5, 0.5); // RR guide default for sky pixels.
 static const float3 SKY_DIFF_ALBEDO = float3(0.5, 0.5, 0.5);
 
+// A real primary miss and a presentation-hidden chunk are both one complete atmospheric pixel. Keep the
+// tuple non-inlined so it exists once in SPIR-V instead of being cloned at both call sites.
+[noinline]
+void setPrimaryMissGuides(float3 rayDirection) {
+    gv_normal = normalize(-rayDirection);
+    gv_geometricNormal = gv_normal;
+    gv_albedo = SKY_DIFF_ALBEDO;
+    gv_specAlb = SKY_SPEC_ALBEDO;
+    gv_rough = 1.0;
+    gv_hitCamRel = rayDirection * 1.0e6;
+    gv_motionHitCamRel = gv_hitCamRel;
+    gv_motionObjDisp = float3(0.0, 0.0, 0.0);
+    gv_motionUseRefracted = false;
+    gv_opticalGuideMode = 0u;
+    gv_diffuseRayDirectionHitDistance = float4(0.0);
+#if CAUSTICA_NRD
+    gv_nrdPrimaryMiss = true;
+#endif
+}
+
 // Stained glass / ice (material 3): a thin colored dielectric. IOR ~1.5 (soda-lime glass).
 static const float GLASS_IOR = 1.52;
 static const float ICE_IOR = 1.31;
@@ -1482,23 +1502,7 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
             // packed show-celestial flag decides whether this path segment may see the bright disc.
             float3 sky = payload.albedo;
             if (captureGuides && segment == 0) { // primary ray hit sky: guides describe "no surface"
-                // Sky is outside NRD's denoising range and is resolved from the raw trace. Still provide a
-                // finite camera-facing normal so every bound guide remains valid for validation/debug paths.
-                gv_normal = normalize(-rd);
-                gv_geometricNormal = gv_normal;
-                // Flat mid-grey albedo guide for sky (NOT the bright sky radiance): demodulating DLSS-RR
-                // by the huge sun-disc radiance rings/artifacts around the sun. A constant albedo keeps
-                // the brightness in the lighting channel where RR resolves it cleanly.
-                gv_albedo = SKY_DIFF_ALBEDO;
-                gv_specAlb = SKY_SPEC_ALBEDO;
-                gv_rough = 1.0;
-                gv_hitCamRel = rd * 1.0e6; // sky at infinity: only rotation parallax (-> large far depth)
-                gv_motionHitCamRel = gv_hitCamRel;
-                gv_motionUseRefracted = false;
-                gv_motionObjDisp = float3(0.0, 0.0, 0.0); // sky is static
-#if CAUSTICA_NRD
-                gv_nrdPrimaryMiss = true;
-#endif
+                setPrimaryMissGuides(rd);
             }
 #if CAUSTICA_SHARC_UPDATE
             SharcUpdateMiss(sharcParameters, sharcState, sky);
@@ -1900,18 +1904,10 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
                 // claims that the moving interface samples the same destination. Estimate only the mapping
                 // change caused by the previous wave normal and feed Streamline a bounded confidence hint.
                 // This adds no guide ray, image, descriptor, or pass.
-                float3 previousTransmittedDir = refract(rd, previousWaterNormal, etaI / etaT);
-                bool currentTransmissionValid = dot(transmittedDir, transmittedDir) > 0.0;
-                bool previousTransmissionValid = dot(previousTransmittedDir, previousTransmittedDir) > 0.0;
-                float waveHistoryBias = 0.0;
-                if (currentTransmissionValid != previousTransmissionValid) {
-                    waveHistoryBias = 1.0;
-                } else if (currentTransmissionValid) {
-                    float angularPixels = length(transmittedDir - previousTransmittedDir)
-                            / max(primaryConeSpread, 1.0e-5);
-                    float transition = saturate((angularPixels - 0.25) / 1.75);
-                    waveHistoryBias = transition * transition * (3.0 - 2.0 * transition);
-                }
+                // Normal delta is a conservative proxy for refracted-footprint motion. It preserves the
+                // important fractional response without a second refract or a second optical trace.
+                float angularPixels = length(n - previousWaterNormal) / max(primaryConeSpread, 1.0e-5);
+                float waveHistoryBias = saturate((angularPixels - 0.25) * (1.0 / 1.75));
                 gv_animatedGuide = max(gv_animatedGuide, waveHistoryBias);
             }
             if (captureGuides && segment == 0) { // primary water hit: feed RR a smooth dielectric specular surface
@@ -2807,16 +2803,7 @@ void main() {
     }
     if (gv_primaryChunkFade == CHUNK_FADE_STATE_HIDDEN) {
         frameRadiance = atmosphericBoundaryFog(dir, pc);
-        gv_normal = float3(0.0, 0.0, 0.0);
-        gv_albedo = SKY_DIFF_ALBEDO;
-        gv_specAlb = SKY_SPEC_ALBEDO;
-        gv_rough = 1.0;
-        gv_hitCamRel = dir * 1.0e6;
-        gv_motionHitCamRel = gv_hitCamRel;
-        gv_motionObjDisp = float3(0.0, 0.0, 0.0);
-        gv_motionUseRefracted = false;
-        gv_opticalGuideMode = 0u;
-        gv_diffuseRayDirectionHitDistance = float4(0.0, 0.0, 0.0, 0.0);
+        setPrimaryMissGuides(dir);
     }
 
     // Optical transmission changes the visible layer, but reflection motion still belongs to the primary

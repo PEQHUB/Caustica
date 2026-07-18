@@ -24,8 +24,8 @@ final class DlssdWaterGuideContractTest {
         assertFalse(raygen.contains("if (encounteredAnimatedWater) gv_animatedGuide = 1.0"));
         assertFalse(raygen.contains("if (waterWaves) gv_animatedGuide = 1.0"));
         assertTrue(raygen.contains("gv_animatedGuide = max(gv_animatedGuide, waveHistoryBias)"));
-        assertTrue(raygen.contains("saturate((angularPixels - 0.25) / 1.75)"));
-        assertTrue(raygen.contains("currentTransmissionValid != previousTransmissionValid"));
+        assertTrue(raygen.contains("saturate((angularPixels - 0.25) * (1.0 / 1.75))"));
+        assertTrue(raygen.contains("length(n - previousWaterNormal)"));
         assertTrue(mask.contains("imageLoad(animatedGuideImage, pixel)"));
         assertTrue(mask.contains("float currentBias = max(disocclusion, animated)"));
         assertTrue(pipeline.contains("long biasCurrent, long animatedGuide"));

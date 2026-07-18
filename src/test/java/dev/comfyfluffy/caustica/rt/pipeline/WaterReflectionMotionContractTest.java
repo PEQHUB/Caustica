@@ -28,7 +28,7 @@ final class WaterReflectionMotionContractTest {
         assertFalse(raygen.contains("gv_opticalFallbackAlbedo"));
         assertFalse(raygen.contains("if (waterWaves) gv_animatedGuide = 1.0"));
         assertFalse(raygen.contains("if (encounteredAnimatedWater) gv_animatedGuide = 1.0"));
-        assertTrue(raygen.contains("previousTransmittedDir = refract(rd, previousWaterNormal"));
+        assertTrue(raygen.contains("length(n - previousWaterNormal)"));
         assertTrue(raygen.contains("gv_animatedGuide = max(gv_animatedGuide, waveHistoryBias)"));
         assertTrue(raygen.contains("if (writeRrGuides && gv_motionUseRefracted) specMotion = motion"));
         int waterBranch = raygen.indexOf("if (material == MATERIAL_WATER)");
