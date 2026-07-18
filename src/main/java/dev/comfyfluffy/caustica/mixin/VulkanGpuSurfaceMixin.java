@@ -259,7 +259,7 @@ public abstract class VulkanGpuSurfaceMixin {
 	private int caustica$presentThroughStreamline(VkQueue queue, VkPresentInfoKHR presentInfo) {
 		RtDlssFg.INSTANCE.beforePresent();
 		int result = StreamlineRuntime.vkQueuePresent(queue, presentInfo);
-		RtDlssFg.INSTANCE.afterPresent();
+		RtDlssFg.INSTANCE.afterPresent(result);
 		return result;
 	}
 

@@ -21,6 +21,7 @@ import net.minecraft.client.gui.screens.ChatScreen;
 import org.joml.Matrix4f;
 import org.joml.Matrix4fc;
 import org.joml.Vector3f;
+import org.lwjgl.vulkan.KHRSwapchain;
 import org.lwjgl.vulkan.VK10;
 
 /** Streamline-owned DLSS-G, Reflex, PCL, and per-present frame-token controller. */
@@ -535,14 +536,22 @@ public final class RtDlssFg {
     }
 
     /** Called immediately after the one real proxy present. */
-    public void afterPresent() {
+    public void afterPresent(int presentResult) {
         marker(PCL_PRESENT_END);
         if (pluginForSwapchain && dlssgSupported) {
             refreshState();
         }
         refreshReflexState();
         int apiError = StreamlineAbi.pollApiError(StreamlineRuntime.library());
-        if (apiError != 0) {
+        int effectiveError = apiError != 0 ? apiError : presentResult;
+        if (isRecoverablePresentResult(effectiveError)) {
+            // Swapchain invalidation is part of normal resize/minimize/reconfigure handling. Minecraft
+            // owns recreation; invalidate only temporal FG inputs so the replacement generation starts clean.
+            forceResetNextSubmission = true;
+            submittedPresentsWithoutGeneration = 0;
+            CausticaMod.LOGGER.debug("Streamline present requested swapchain recreation (VkResult {})",
+                    effectiveError);
+        } else if (apiError != 0) {
             dlssgFailed = true;
             optionsEnabled = false;
             unavailableReason = "Streamline present API error (VkResult " + apiError + ")";
@@ -551,6 +560,10 @@ public final class RtDlssFg {
         frameToken = 0L;
         currentFrameIndex = -1;
         frameInputsSubmitted = false;
+    }
+
+    static boolean isRecoverablePresentResult(int result) {
+        return result == KHRSwapchain.VK_SUBOPTIMAL_KHR || result == KHRSwapchain.VK_ERROR_OUT_OF_DATE_KHR;
     }
 
     /** Attach one valid real frame's constants and tags before the intercepted present. */

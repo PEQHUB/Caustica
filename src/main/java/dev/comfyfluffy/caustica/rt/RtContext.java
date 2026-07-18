@@ -55,7 +55,6 @@ public final class RtContext {
     private final long vma;
     private final VulkanQueue graphicsQueue;
     private final VulkanQueue computeQueue;
-    private final Object deviceQueueHostLock = new Object();
     private final RtGpuExecutor gpuExecutor;
     private final int shaderGroupHandleSize;
     private final int shaderGroupBaseAlignment;
@@ -157,7 +156,7 @@ public final class RtContext {
     }
 
     Object deviceQueueHostLock() {
-        return deviceQueueHostLock;
+        return StreamlineRuntime.vulkanDeviceQueueHostLock();
     }
 
     public int shaderGroupHandleSize() {
@@ -410,9 +409,7 @@ public final class RtContext {
     }
 
     public void waitIdle(String reason) {
-        synchronized (deviceQueueHostLock) {
-            StreamlineRuntime.vkDeviceWaitIdle(vk, reason, false);
-        }
+        check(StreamlineRuntime.vkDeviceWaitIdle(vk, reason, false), "vkDeviceWaitIdle(" + reason + ")");
     }
 
     public void waitIdle() {

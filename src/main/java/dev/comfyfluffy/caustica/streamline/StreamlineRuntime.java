@@ -54,6 +54,7 @@ public final class StreamlineRuntime {
             "sl.dlss_g.dll", "sl.reflex.dll", "sl.pcl.dll", "nvngx_dlssg.dll", "nvngx_dlssd.dll", "NvLowLatencyVk.dll",
             "reflex.license.txt", "nvngx_dlss.license.txt");
     private static final ThreadLocal<Integer> VULKAN_AVAILABILITY_PROBE_DEPTH = new ThreadLocal<>();
+    private static final Object VULKAN_DEVICE_QUEUE_HOST_LOCK = new Object();
     private static final String VULKAN_MAILBOX_VSYNC_CONFIGURATION = "{\n  \"vSyncConfig\": 1\n}\n";
     private static final int METERING_LOG_TAIL_BYTES = 64 * 1024;
     private static final long METERING_LOG_CACHE_NANOS = 500_000_000L;
@@ -64,6 +65,7 @@ public final class StreamlineRuntime {
     private Path nativeDirectory;
     private boolean initialized;
     private boolean failed;
+    private volatile boolean rollbackUnsafe;
     private boolean featureLoaded;
     private long meteringLogProbeNanos;
     private long meteringLogSize = Long.MIN_VALUE;
@@ -101,7 +103,16 @@ public final class StreamlineRuntime {
     }
 
     public static boolean useVulkanProxies() {
+        if (INSTANCE.rollbackUnsafe) {
+            throw new IllegalStateException(
+                    "Streamline rollback failed; refusing mixed proxy/native Vulkan until process restart");
+        }
         return !vulkanAvailabilityProbeActive() && INSTANCE.initialized && !INSTANCE.failed;
+    }
+
+    /** Shared host-synchronization owner for queue submission versus whole-device idle waits. */
+    public static Object vulkanDeviceQueueHostLock() {
+        return VULKAN_DEVICE_QUEUE_HOST_LOCK;
     }
 
     public static String lastError() {
@@ -272,10 +283,12 @@ public final class StreamlineRuntime {
 
     public static int vkDeviceWaitIdle(VkDevice device, String reason, boolean steadyState) {
         INSTANCE.recordDeviceIdle(reason, steadyState);
-        if (!useVulkanProxies()) {
-            return VK10.vkDeviceWaitIdle(device);
+        synchronized (VULKAN_DEVICE_QUEUE_HOST_LOCK) {
+            if (!useVulkanProxies()) {
+                return VK10.vkDeviceWaitIdle(device);
+            }
+            return INSTANCE.library.vkDeviceWaitIdle(device.address());
         }
-        return INSTANCE.library.vkDeviceWaitIdle(device.address());
     }
 
     private synchronized void recordDeviceIdle(String reason, boolean steadyState) {
@@ -404,22 +417,39 @@ public final class StreamlineRuntime {
 
     public static void shutdown() {
         synchronized (INSTANCE) {
+            boolean shutdownSucceeded = true;
             if (INSTANCE.library != null) {
                 try {
-                    INSTANCE.library.shutdown();
+                    int result = INSTANCE.library.shutdown();
+                    if (result != 0) {
+                        shutdownSucceeded = false;
+                        CausticaMod.LOGGER.error("Streamline shutdown failed: {}", INSTANCE.library.lastError());
+                    }
                 } catch (Throwable throwable) {
-                    CausticaMod.LOGGER.warn("Streamline shutdown failed", throwable);
+                    shutdownSucceeded = false;
+                    CausticaMod.LOGGER.error("Streamline shutdown failed", throwable);
                 }
             }
-            INSTANCE.library = null;
-            INSTANCE.nativeDirectory = null;
             INSTANCE.initialized = false;
-            INSTANCE.failed = false;
             INSTANCE.featureLoaded = false;
+            if (shutdownSucceeded && !INSTANCE.rollbackUnsafe) {
+                INSTANCE.library = null;
+                INSTANCE.nativeDirectory = null;
+                INSTANCE.failed = false;
+            } else {
+                // Keep the loaded binding reachable for diagnostics and permanently reject both proxy and
+                // native fallback calls. Continuing after a failed interposer rollback is process-unsafe.
+                INSTANCE.failed = true;
+                INSTANCE.rollbackUnsafe = true;
+            }
         }
     }
 
     private synchronized boolean initialize() {
+        if (rollbackUnsafe) {
+            throw new IllegalStateException(
+                    "Streamline rollback previously failed; restart is required before Vulkan initialization");
+        }
         if (initialized) {
             return true;
         }
@@ -457,6 +487,7 @@ public final class StreamlineRuntime {
             bridgeInitialized = true;
             featureLoaded = library.isFeatureLoaded(FEATURE_DLSS_G);
             initialized = true;
+            rollbackUnsafe = false;
             CausticaMod.LOGGER.info("Streamline 2.12.0 initialized ({}; variant={})", nativeDirectory, variant == 0 ? "development" : "production");
             return true;
         } catch (Throwable throwable) {
@@ -472,7 +503,10 @@ public final class StreamlineRuntime {
             initialized = false;
             featureLoaded = false;
             failed = true;
-            library = null;
+            rollbackUnsafe = !rolledBack;
+            if (rolledBack) {
+                library = null;
+            }
             CausticaMod.LOGGER.warn("Streamline initialization failed; Vulkan presentation will remain native", throwable);
             if (!rolledBack) {
                 throw new IllegalStateException(
