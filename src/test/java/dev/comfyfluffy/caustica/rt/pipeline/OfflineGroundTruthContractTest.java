@@ -114,8 +114,7 @@ final class OfflineGroundTruthContractTest {
         assertTrue(hit.contains("vk::binding(1, 1)"));
         assertTrue(hit.contains("vk::binding(2, 1)"));
         assertTrue(hit.contains("vk::binding(3, 1)"));
-        assertTrue(miss.contains("vk::binding(16, 0)"));
-        assertTrue(skyLut.contains("vk::binding(14, 0)"));
-        assertTrue(skyLut.contains("vk::binding(20, 0)"));
+        assertTrue(miss.contains("vk::binding(20, 0)"));
+        assertTrue(skyLut.contains("vk::binding(21, 0)"));
     }
 }

@@ -65,22 +65,18 @@ final class DlssdWaterGuideContractTest {
     }
 
     @Test
-    void highQualityWaterUsesACompileTimeIsolatedPreviousRefractionProbe() throws IOException {
+    void highQualityWaterKeepsTheBaselineReconstructionContract() throws IOException {
         String raygen = read("shaders/world/world.rgen.slang");
         String build = read("build.gradle");
         String bringup = read("src/main/java/dev/comfyfluffy/caustica/rt/RtDeviceBringup.java");
         String config = read("src/main/java/dev/comfyfluffy/caustica/CausticaConfig.java");
 
         assertTrue(raygen.contains("#define CAUSTICA_TRANSPARENCY_HQ 0"));
-        assertTrue(raygen.contains("#if CAUSTICA_TRANSPARENCY_HQ"));
-        assertTrue(raygen.contains("previousIncidentDir = normalize((hitPos - pc.camOffset) + pc.camDelta)"));
-        assertTrue(raygen.contains("gv_opticalGuidePreviousDir = previousTransmittedDir"));
-        assertTrue(raygen.contains("rayConeSpread, pc.waterAnchor.z"));
-        assertTrue(raygen.contains("gv_motionUseExplicitPrevious = true"));
-        assertTrue(raygen.contains("if (waterWaves && !gv_opticalGuidePreviousValid) gv_animatedGuide = 1.0"));
-        assertTrue(raygen.contains("if (previousDestinationValid) {"));
-        assertTrue(raygen.contains("} else {\n                    // A previous refracted direction alone is not enough"));
-        assertTrue(raygen.contains("exhaustion the second walk has no coherent previous destination"));
+        assertTrue(raygen.contains("if (waterWaves) gv_animatedGuide = 1.0"));
+        assertFalse(raygen.contains("gv_opticalGuidePreviousDir"));
+        assertFalse(raygen.contains("gv_motionUseExplicitPrevious"));
+        assertFalse(raygen.contains("previousIncidentDir = normalize((hitPos - pc.camOffset) + pc.camDelta)"));
+        assertFalse(raygen.contains("rayConeSpread, pc.waterAnchor.z"));
         assertTrue(build.contains("-DCAUSTICA_TRANSPARENCY_HQ=0"));
         assertTrue(build.contains("-DCAUSTICA_TRANSPARENCY_HQ=1"));
         assertTrue(build.contains("world_hq.rgen.spv"));
@@ -106,25 +102,28 @@ final class DlssdWaterGuideContractTest {
     }
 
     @Test
-    void highQualityTransparencyExactlySplitsOnlyThePrimaryDielectric() throws IOException {
+    void highQualityTransparencyAddsOneIndependentPrimaryDielectricSample() throws IOException {
         String raygen = read("shaders/world/world.rgen.slang");
 
         assertTrue(raygen.contains("#if CAUSTICA_TRANSPARENCY_HQ && !CAUSTICA_NRD"
                 + " && !CAUSTICA_OFFLINE && !CAUSTICA_SHARC_UPDATE"));
-        assertTrue(raygen.contains("#define CAUSTICA_PRIMARY_DIELECTRIC_SPLIT 1"));
-        assertTrue(raygen.contains("#define CAUSTICA_PRIMARY_DIELECTRIC_SPLIT 0"));
-        assertTrue(raygen.contains("if (segment == 0 && primaryOpticalLobe != 0u)"));
-        assertTrue(raygen.contains("throughput *= F"));
-        assertTrue(raygen.contains("throughput *= 1.0 - F"));
-        assertTrue(raygen.contains("PRIMARY_OPTICAL_TRANSMISSION, primaryDielectricSplit"));
-        assertTrue(raygen.contains("PRIMARY_OPTICAL_REFLECTION, reflectedPrimaryDielectricSplit"));
-        assertTrue(raygen.contains("if (primaryDielectricSplit && !primaryOnly)"));
+        assertTrue(raygen.contains("#define CAUSTICA_PRIMARY_DIELECTRIC_TWO_SPP 1"));
+        assertTrue(raygen.contains("#define CAUSTICA_PRIMARY_DIELECTRIC_TWO_SPP 0"));
+        assertTrue(raygen.contains("if (segment == 0 && primaryOpticalSample != 0u)"));
+        assertTrue(raygen.contains("PRIMARY_OPTICAL_SAMPLE_A, primaryDielectricHit"));
+        assertTrue(raygen.contains("PRIMARY_OPTICAL_SAMPLE_B, secondPrimaryDielectricHit"));
+        assertTrue(raygen.contains("if (primaryDielectricHit && !primaryOnly)"));
+        assertTrue(raygen.contains("sampleRadiance = 0.5 * (sampleRadiance + secondRadiance)"));
         assertTrue(raygen.contains("sampler.state = sampleHash(sampler.state ^ 0xa511e9b3u)"));
-        assertFalse(raygen.contains("reflectionSampler.state = sampleHash"));
-        assertTrue(raygen.contains("gv_specAlb = F >= 1.0 ? float3(1.0)"));
-        assertTrue(raygen.contains("rrSpecularAlbedo(float3(f0), gv_rough * gv_rough, cosI)"));
-        assertTrue(raygen.contains("static const float WATER_GUIDE_ROUGH = 0.0"));
-        assertTrue(raygen.contains("static const float GLASS_GUIDE_ROUGH = 0.0"));
+        assertTrue(raygen.contains("sampler.branchSalt = sampleHash(sampler.branchSalt ^ 0x6c8e9cf5u)"));
+        assertTrue(raygen.contains("+ sampler.branchSalt"));
+        assertFalse(raygen.contains("primarySplitWeight"));
+        assertFalse(raygen.contains("reflectionSampler"));
+        assertTrue(raygen.contains("gv_specAlb = float3(F, F, F)"));
+        assertTrue(raygen.contains("static const float WATER_GUIDE_ROUGH = 0.02"));
+        assertTrue(raygen.contains("static const float GLASS_GUIDE_ROUGH = 0.04"));
+        assertFalse(raygen.contains("static const float WATER_GUIDE_ROUGH = 0.0;"));
+        assertFalse(raygen.contains("static const float GLASS_GUIDE_ROUGH = 0.0;"));
     }
 
     private static String read(String relative) throws IOException {

@@ -87,7 +87,7 @@ final class GlassOnlyIntegrationContractTest {
         assertTrue(closestHit.contains("float3 albedo709 = texAlbedo * tintLinear"));
         assertTrue(closestHit.contains("payload.albedo = bt709ToBt2020(albedo709)"));
         assertFalse(closestHit.contains("payload.albedo = (pr.tint.w > 0.5) ? tint"));
-        assertEquals(3, occurrences(raygen, "opticalGuideHit(")); // definition, baseline call, HQ-only previous probe
+        assertEquals(2, occurrences(raygen, "opticalGuideHit(")); // definition and one current-frame guide walk
         assertFalse(raygen.contains("world_dlssd_guides"));
         assertFalse(closestHit.contains("PAYLOAD_SHADOW_QUERY"));
     }

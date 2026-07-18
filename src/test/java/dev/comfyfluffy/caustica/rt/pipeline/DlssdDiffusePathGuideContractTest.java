@@ -4,6 +4,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import org.junit.jupiter.api.Test;
 
 final class DlssdDiffusePathGuideContractTest {
@@ -34,9 +36,12 @@ final class DlssdDiffusePathGuideContractTest {
     }
 
     @Test
-    void extraGuideKeepsMaterialAndSkyDescriptorsAfterTheStorageImages() throws Exception {
+    void reconstructionSupersetHasOneStableNonOverlappingSkyAbi() throws Exception {
         String composite = Files.readString(Path.of(
                 "src/main/java/dev/comfyfluffy/caustica/rt/RtComposite.java"));
+        String pipeline = Files.readString(Path.of(
+                "src/main/java/dev/comfyfluffy/caustica/rt/pipeline/RtPipeline.java"));
+        String raygen = Files.readString(Path.of("shaders/world/world.rgen.slang"));
         String closestHit = Files.readString(Path.of("shaders/world/world.rchit.slang"));
         String miss = Files.readString(Path.of("shaders/world/world.rmiss.slang"));
         String skyLut = Files.readString(Path.of("shaders/world/world_sky_lut.slang"));
@@ -46,7 +51,30 @@ final class DlssdDiffusePathGuideContractTest {
         assertTrue(closestHit.contains("[[vk::binding(1, 1)]] Sampler2D materialSurface0Tex[]"));
         assertTrue(closestHit.contains("[[vk::binding(2, 1)]] Sampler2D materialNormalAoTex[]"));
         assertTrue(closestHit.contains("[[vk::binding(3, 1)]] Sampler2D materialSurface1Tex[]"));
-        assertTrue(miss.contains("[[vk::binding(16, 0)]] Sampler2D celestialsAtlas"));
-        assertTrue(skyLut.contains("[[vk::binding(20, 0)]] [format(\"rgba32f\")] RWTexture2D<float4> skyViewLut"));
+        int highestGuideBinding = highestSetZeroBinding(raygen, 3, 19);
+        int skyBinding = shaderBinding(miss, "celestialsAtlas");
+        int skyLutBinding = shaderBinding(skyLut, "skyViewLut");
+        assertTrue(highestGuideBinding == 19);
+        assertTrue(skyBinding > highestGuideBinding);
+        assertTrue(skyLutBinding > skyBinding);
+        assertTrue(pipeline.contains("int skyBinding = skyAtlas ? " + skyBinding + " : -1"));
+        assertTrue(pipeline.contains("int skyLutBinding = skyAtlas ? " + skyLutBinding + " : -1"));
+    }
+
+    private static int shaderBinding(String source, String resource) {
+        Matcher matcher = Pattern.compile("\\[\\[vk::binding\\((\\d+), 0\\)\\]\\][^;]*\\b"
+                + Pattern.quote(resource) + "\\b").matcher(source);
+        assertTrue(matcher.find(), "missing set-0 binding for " + resource);
+        return Integer.parseInt(matcher.group(1));
+    }
+
+    private static int highestSetZeroBinding(String source, int minimum, int maximum) {
+        Matcher matcher = Pattern.compile("\\[\\[vk::binding\\((\\d+), 0\\)\\]\\]").matcher(source);
+        int highest = -1;
+        while (matcher.find()) {
+            int binding = Integer.parseInt(matcher.group(1));
+            if (binding >= minimum && binding <= maximum) highest = Math.max(highest, binding);
+        }
+        return highest;
     }
 }

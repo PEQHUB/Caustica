@@ -278,13 +278,6 @@ static float3 gv_opticalGuideDir;
 static uint gv_opticalGuideMode; // 0 none, 1 water, 2 glass exit, 3 glass entry (trace exact exit)
 static float gv_opticalExitEta;
 static float gv_animatedGuide;
-#if CAUSTICA_TRANSPARENCY_HQ
-static float3 gv_opticalGuidePreviousDir;
-static bool gv_opticalGuidePreviousValid;
-static float3 gv_motionPreviousHitCamRel;
-static float3 gv_motionPreviousObjDisp;
-static bool gv_motionUseExplicitPrevious;
-#endif
 // Optional DLSSD B-mode guide: normalized world-space direction of the first diffuse continuation
 // and the world-space distance to its first hit. Zero means that the primary path chose no diffuse ray.
 static float4 gv_diffuseRayDirectionHitDistance;
@@ -361,26 +354,15 @@ float3 offsetRayOrigin(float3 position, float3 geometricNormal, float3 outgoingD
 
 // Water is a smooth dielectric. IOR 1.333; absorption is per-block Beer-Lambert extinction.
 static const float WATER_IOR = 1.333;
-#if CAUSTICA_TRANSPARENCY_HQ
-// The traced water/glass lobes are true delta events. HQ reports the same model to Ray
-// Reconstruction; the baseline keeps its established conservative reconstruction widths.
-static const float WATER_GUIDE_ROUGH = 0.0;
-#else
 static const float WATER_GUIDE_ROUGH = 0.02;
-#endif
 static const float3 SKY_SPEC_ALBEDO = float3(0.5, 0.5, 0.5); // RR guide default for sky pixels.
 static const float3 SKY_DIFF_ALBEDO = float3(0.5, 0.5, 0.5);
 
 // Stained glass / ice (material 3): a thin colored dielectric. IOR ~1.5 (soda-lime glass).
 static const float GLASS_IOR = 1.52;
 static const float ICE_IOR = 1.31;
-#if CAUSTICA_TRANSPARENCY_HQ
-static const float ICE_GUIDE_ROUGH = 0.0;
-static const float GLASS_GUIDE_ROUGH = 0.0;
-#else
 static const float ICE_GUIDE_ROUGH = 0.02;
 static const float GLASS_GUIDE_ROUGH = 0.04;
-#endif
 // Transmitted-ray origin offset when crossing a glass face. Must be SMALLER than the terrain-side
 // TRANSLUCENT_INSET (RtTerrain, 2e-4 blocks): glass is recessed into its block by that inset, so a face
 // touching a slab/stair leaves a tiny gap before the neighbour's surface. A block-scale bias would
@@ -392,15 +374,15 @@ static const float GLASS_TRANSMIT_BIAS = 1.0e-4;
 // still cannot loop forever.
 static const int MAX_OPTICAL_INTERFACE_DEPTH = 16;
 
-// HQ integrates both lobes of the first visible dielectric exactly. Later interfaces remain
-// Fresnel-sampled, bounding the work to one additional path instead of growing a binary path tree.
-// This entire contract compiles out of the baseline, offline reference, and SHARC update shaders.
+// HQ takes a second independent sample only when the first visible surface is dielectric. Both paths
+// use the same unbiased stochastic estimator; unlike deterministic lobe splitting, their average does
+// not force two temporal surfaces into every reconstructed frame. This compiles out of baseline/NRD.
 #if CAUSTICA_TRANSPARENCY_HQ && !CAUSTICA_NRD && !CAUSTICA_OFFLINE && !CAUSTICA_SHARC_UPDATE
-#define CAUSTICA_PRIMARY_DIELECTRIC_SPLIT 1
-static const uint PRIMARY_OPTICAL_TRANSMISSION = 1u;
-static const uint PRIMARY_OPTICAL_REFLECTION = 2u;
+#define CAUSTICA_PRIMARY_DIELECTRIC_TWO_SPP 1
+static const uint PRIMARY_OPTICAL_SAMPLE_A = 1u;
+static const uint PRIMARY_OPTICAL_SAMPLE_B = 2u;
 #else
-#define CAUSTICA_PRIMARY_DIELECTRIC_SPLIT 0
+#define CAUSTICA_PRIMARY_DIELECTRIC_TWO_SPP 0
 #endif
 
 // Ray-cone texture LOD: raygen tracks a one-pixel footprint along the path, and closest-hit converts it
@@ -603,6 +585,9 @@ struct PathSampler {
     uint sampleIndex;
     uint bounce;
     uint state;
+#if CAUSTICA_PRIMARY_DIELECTRIC_TWO_SPP
+    uint branchSalt;
+#endif
 #endif
 };
 
@@ -892,7 +877,11 @@ inline float2 rnd2(inout PathSampler sampler, uint salt) {
     uint sequenceBase = (sampler.blueIndex << 3u) + (salt << 1u);
     float2 base = float2(sequence[sequenceBase] >> 8u, sequence[sequenceBase + 1u] >> 8u)
             * (1.0 / 16777216.0);
-    uint shiftIndex = (sampler.sampleIndex * 32u + sampler.bounce) & 65535u;
+    uint shiftIndex = (sampler.sampleIndex * 32u + sampler.bounce
+#if CAUSTICA_PRIMARY_DIELECTRIC_TWO_SPP
+            + sampler.branchSalt
+#endif
+            ) & 65535u;
     float2 shift = float(shiftIndex) * float2(0.7548776662466927, 0.5698402909980532);
     return frac(base + shift);
 #endif
@@ -1333,12 +1322,12 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
 #endif
                  bool captureGuides, bool captureRefractedGuides, bool primaryOnly,
                  inout PathSampler sampler
-#if CAUSTICA_PRIMARY_DIELECTRIC_SPLIT
-                 , uint primaryOpticalLobe, out bool primaryDielectricSplit
+#if CAUSTICA_PRIMARY_DIELECTRIC_TWO_SPP
+                 , uint primaryOpticalSample, out bool primaryDielectricHit
 #endif
                  ) {
-#if CAUSTICA_PRIMARY_DIELECTRIC_SPLIT
-    primaryDielectricSplit = false;
+#if CAUSTICA_PRIMARY_DIELECTRIC_TWO_SPP
+    primaryDielectricHit = false;
 #endif
     float3 L = float3(0.0, 0.0, 0.0);
 #if CAUSTICA_NRD
@@ -1571,15 +1560,7 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
                 // normal or, after the optical walk, with the transmitted lakebed material.
                 gv_normal = interfaceNormal;
                 gv_rough = solidIce ? ICE_GUIDE_ROUGH : GLASS_GUIDE_ROUGH;
-#if CAUSTICA_TRANSPARENCY_HQ
-                float f0Ratio = (etaT - etaI) / (etaT + etaI);
-                float f0 = f0Ratio * f0Ratio;
-                if (thinPane) f0 = 2.0 * f0 / (1.0 + f0);
-                gv_specAlb = F >= 1.0 ? float3(1.0)
-                        : rrSpecularAlbedo(float3(f0), gv_rough * gv_rough, cosI);
-#else
                 gv_specAlb = float3(F, F, F);
-#endif
                 gv_albedo = glassTint;            // demodulate by the transmission tint
                 gv_hitCamRel = hitPos - pc.camOffset;
                 gv_motionHitCamRel = gv_hitCamRel;
@@ -1596,31 +1577,16 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
             if (primaryOnly) {
                 break;
             }
-#if CAUSTICA_PRIMARY_DIELECTRIC_SPLIT
-            if (segment == 0 && primaryOpticalLobe != 0u) {
-                primaryDielectricSplit = true;
-                if (primaryOpticalLobe == PRIMARY_OPTICAL_REFLECTION) {
-                    throughput *= F;
-                    if (F <= 0.0) break;
-                    // Keep stochastic alpha/cutout decisions identical up to this interface, then decorrelate
-                    // only the reflected continuation from the transmitted continuation.
+#if CAUSTICA_PRIMARY_DIELECTRIC_TWO_SPP
+            if (segment == 0 && primaryOpticalSample != 0u) {
+                primaryDielectricHit = true;
+                if (primaryOpticalSample == PRIMARY_OPTICAL_SAMPLE_B) {
+                    // Preserve identical cutout decisions before the interface, then decorrelate every
+                    // scalar and 2D continuation sample once both paths are known to represent this pixel.
                     sampler.state = sampleHash(sampler.state ^ 0xa511e9b3u) | 1u;
-                    rd = reflect(rd, interfaceNormal);
-                    ro = offsetRayOrigin(hitPos, geometricNormal, rd);
-                } else {
-                    throughput *= 1.0 - F;
-                    if (F >= 1.0) break;
-                    if (thinPane) {
-                        throughput *= glassTint;
-                    } else {
-                        if (!entering) throughput *= glassTint;
-                        inWater = !entering && exteriorWater;
-                        if (inWater) waterExt = waterExtinction(pc.waterParams.xyz);
-                    }
-                    rd = transmittedDir;
-                    ro = hitPos - interfaceNormal * GLASS_TRANSMIT_BIAS;
+                    sampler.branchSalt = sampleHash(sampler.branchSalt ^ 0x6c8e9cf5u);
                 }
-            } else
+            }
 #endif
             if (rndf(sampler) < F) {
                 rd = reflect(rd, interfaceNormal);
@@ -1778,25 +1744,11 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
             float etaT = inWater ? 1.0 : WATER_IOR;
             float F = fresnelDielectric(cosI, etaI, etaT);
             float3 transmittedDir = refract(rd, n, etaI / etaT);
-#if CAUSTICA_TRANSPARENCY_HQ
-            // Track the same physical water-interface point from the previous camera, then bend that
-            // previous incident ray by the previous wave normal. Reusing the current incident direction
-            // would correct wave animation but still leave refracted history behind during translation.
-            float3 previousIncidentDir = normalize((hitPos - pc.camOffset) + pc.camDelta);
-            float3 previousTransmittedDir = refract(previousIncidentDir, previousWaterNormal, etaI / etaT);
-#endif
             if (captureGuides && segment == 0) { // primary water hit: feed RR a smooth dielectric specular surface
                 gv_normal = n;
                 gv_rough = WATER_GUIDE_ROUGH;
                 gv_albedo = float3(0.0, 0.0, 0.0);
-#if CAUSTICA_TRANSPARENCY_HQ
-                float f0Ratio = (etaT - etaI) / (etaT + etaI);
-                float f0 = f0Ratio * f0Ratio;
-                gv_specAlb = dot(transmittedDir, transmittedDir) <= 0.0 ? float3(1.0)
-                        : rrSpecularAlbedo(float3(f0), gv_rough * gv_rough, cosI);
-#else
                 gv_specAlb = float3(F, F, F);
-#endif
                 // Capture the physical interface first. The separately preserved specular guides retain
                 // this water surface; a successful optical walk later moves every ordinary guide to the
                 // same refracted destination so DLSSD depth and motion never describe different layers.
@@ -1809,43 +1761,24 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
                     gv_opticalGuideDir = transmittedDir;
                     gv_opticalGuideMode = 1u;
                     gv_opticalExitEta = surfaceWaterEntering ? WATER_IOR : (1.0 / WATER_IOR);
-#if CAUSTICA_TRANSPARENCY_HQ
-                    gv_opticalGuidePreviousDir = previousTransmittedDir;
-                    gv_opticalGuidePreviousValid = waterWaves
-                            && dot(previousTransmittedDir, previousTransmittedDir) > 0.0;
-#endif
                 }
-                // Baseline rejects animated-water history because one current-frame optical walk cannot
-                // identify the previous refracted destination. HQ performs that previous-frame walk below,
-                // so retaining the unconditional rejection hint would mask the extra ray's reconstruction
-                // benefit while still paying its cost.
-#if CAUSTICA_TRANSPARENCY_HQ
-                if (waterWaves && !gv_opticalGuidePreviousValid) gv_animatedGuide = 1.0;
-#else
+                // A current-frame optical walk cannot identify the previous refracted destination. Reject
+                // animated-water history in both modes; inventing previous motion from today's interface
+                // position creates plausible but incorrect correspondence and temporal boiling.
                 if (waterWaves) gv_animatedGuide = 1.0;
-#endif
             }
             if (primaryOnly) {
                 break;
             }
             waterExt = waterExtinction(surfaceWaterTint);
-#if CAUSTICA_PRIMARY_DIELECTRIC_SPLIT
-            if (segment == 0 && primaryOpticalLobe != 0u) {
-                primaryDielectricSplit = true;
-                if (primaryOpticalLobe == PRIMARY_OPTICAL_REFLECTION) {
-                    throughput *= F;
-                    if (F <= 0.0) break;
+#if CAUSTICA_PRIMARY_DIELECTRIC_TWO_SPP
+            if (segment == 0 && primaryOpticalSample != 0u) {
+                primaryDielectricHit = true;
+                if (primaryOpticalSample == PRIMARY_OPTICAL_SAMPLE_B) {
                     sampler.state = sampleHash(sampler.state ^ 0xa511e9b3u) | 1u;
-                    rd = reflect(rd, n);
-                    ro = offsetRayOrigin(hitPos, surfaceWaterGeometricNormal, rd);
-                } else {
-                    throughput *= 1.0 - F;
-                    if (F >= 1.0) break;
-                    rd = transmittedDir;
-                    ro = offsetRayOrigin(hitPos, surfaceWaterGeometricNormal, rd);
-                    inWater = surfaceWaterEntering;
+                    sampler.branchSalt = sampleHash(sampler.branchSalt ^ 0x6c8e9cf5u);
                 }
-            } else
+            }
 #endif
             if (rndf(sampler) < F) {
                 rd = reflect(rd, n);
@@ -2393,6 +2326,9 @@ void main() {
     sampler.bounce = 0u;
     sampler.state = sampleHash((uint(pix.x) * 1973u + uint(pix.y) * 9277u + 26699u)
             ^ (sharcFrame.frameIndex * 2654435761u)) | 1u;
+#if CAUSTICA_PRIMARY_DIELECTRIC_TWO_SPP
+    sampler.branchSalt = 0u;
+#endif
     pc.maxBounces = min(pc.maxBounces, sharcFrame.updateMaxBounces);
     tracePath(origin, direction, primaryRayConeSpread(ndc, size, direction),
             false, false, false, sampler);
@@ -2513,13 +2449,6 @@ void main() {
     gv_opticalGuideMode = 0u;
     gv_opticalExitEta = 1.0;
     gv_animatedGuide = 0.0;
-#if CAUSTICA_TRANSPARENCY_HQ
-    gv_opticalGuidePreviousDir = float3(0.0, 0.0, 0.0);
-    gv_opticalGuidePreviousValid = false;
-    gv_motionPreviousHitCamRel = float3(0.0, 0.0, 0.0);
-    gv_motionPreviousObjDisp = float3(0.0, 0.0, 0.0);
-    gv_motionUseExplicitPrevious = false;
-#endif
     gv_diffuseRayDirectionHitDistance = float4(0.0, 0.0, 0.0, 0.0);
     gv_diffuseGuidePending = false;
     gv_specPreviousNormal = float3(0.0, 0.0, 0.0);
@@ -2540,6 +2469,9 @@ void main() {
         sampler.bounce = 0u;
         sampler.state = sampleHash((uint(pix.x) * 1973u + uint(pix.y) * 9277u + 26699u)
                 ^ (pc.frameIndex * 2654435761u) ^ (s * 2246822519u)) | 1u;
+#if CAUSTICA_PRIMARY_DIELECTRIC_TWO_SPP
+        sampler.branchSalt = 0u;
+#endif
         jndc = (uv + pc.jitter / size) * 2.0 - 1.0;
         float4 nearH = mul(pc.invViewProj, float4(jndc.x, jndc.y, 1.0, 1.0));
         float4 farH = mul(pc.invViewProj, float4(jndc.x, jndc.y, 0.0, 1.0));
@@ -2549,35 +2481,36 @@ void main() {
         dir = normalize(farP - nearP);
         rayConeSpread = primaryRayConeSpread(jndc, size, dir);
 
-#if CAUSTICA_PRIMARY_DIELECTRIC_SPLIT
+#if CAUSTICA_PRIMARY_DIELECTRIC_TWO_SPP
         bool sampleCapturesGuides = captureGuides && s == 0u;
         bool sampleCapturesRefractedGuides = captureRefractedGuides && s == 0u;
         // Start both branches with identical visibility/cutout random decisions. The reflection path is
         // decorrelated inside tracePath only after it reaches the primary dielectric split.
-        PathSampler reflectionSampler = sampler;
-        bool primaryDielectricSplit;
+        PathSampler secondSampler = sampler;
+        bool primaryDielectricHit;
 #if CAUSTICA_NRD
         PathResult sampleResult = tracePath(origin, dir, rayConeSpread,
                 sampleCapturesGuides, sampleCapturesRefractedGuides, primaryOnly, sampler,
-                PRIMARY_OPTICAL_TRANSMISSION, primaryDielectricSplit);
-        if (primaryDielectricSplit && !primaryOnly) {
-            bool reflectedPrimaryDielectricSplit;
-            PathResult reflectionResult = tracePath(origin, dir, rayConeSpread,
-                    false, false, false, reflectionSampler,
-                    PRIMARY_OPTICAL_REFLECTION, reflectedPrimaryDielectricSplit);
-            sampleResult.radiance += reflectionResult.radiance;
-            sampleResult.diffuseRadiance += reflectionResult.diffuseRadiance;
-            sampleResult.specularRadiance += reflectionResult.specularRadiance;
+                PRIMARY_OPTICAL_SAMPLE_A, primaryDielectricHit);
+        if (primaryDielectricHit && !primaryOnly) {
+            bool secondPrimaryDielectricHit;
+            PathResult secondResult = tracePath(origin, dir, rayConeSpread,
+                    false, false, false, secondSampler,
+                    PRIMARY_OPTICAL_SAMPLE_B, secondPrimaryDielectricHit);
+            sampleResult.radiance = 0.5 * (sampleResult.radiance + secondResult.radiance);
+            sampleResult.diffuseRadiance = 0.5 * (sampleResult.diffuseRadiance + secondResult.diffuseRadiance);
+            sampleResult.specularRadiance = 0.5 * (sampleResult.specularRadiance + secondResult.specularRadiance);
         }
 #else
         float3 sampleRadiance = tracePath(origin, dir, rayConeSpread,
                 sampleCapturesGuides, sampleCapturesRefractedGuides, primaryOnly, sampler,
-                PRIMARY_OPTICAL_TRANSMISSION, primaryDielectricSplit);
-        if (primaryDielectricSplit && !primaryOnly) {
-            bool reflectedPrimaryDielectricSplit;
-            sampleRadiance += tracePath(origin, dir, rayConeSpread,
-                    false, false, false, reflectionSampler,
-                    PRIMARY_OPTICAL_REFLECTION, reflectedPrimaryDielectricSplit);
+                PRIMARY_OPTICAL_SAMPLE_A, primaryDielectricHit);
+        if (primaryDielectricHit && !primaryOnly) {
+            bool secondPrimaryDielectricHit;
+            float3 secondRadiance = tracePath(origin, dir, rayConeSpread,
+                    false, false, false, secondSampler,
+                    PRIMARY_OPTICAL_SAMPLE_B, secondPrimaryDielectricHit);
+            sampleRadiance = 0.5 * (sampleRadiance + secondRadiance);
         }
 #endif
 #else
@@ -2641,38 +2574,6 @@ void main() {
             gv_motionObjDisp = destinationMotionPrev;
             gv_motionUseRefracted = true;
             gv_albedo = destinationDiffuseAlbedo;
-#if CAUSTICA_TRANSPARENCY_HQ
-            // The baseline uses one current-frame optical walk. HQ adds a second walk only for animated
-            // primary water, through the previous wave normal and phase, so RR receives the actual
-            // previous refracted destination rather than reprojecting today's bent ray into yesterday.
-            if (gv_opticalGuideMode == 1u && gv_opticalGuidePreviousValid) {
-                float3 previousDestinationHitCamRel;
-                float3 previousDestinationMotionPrev;
-                bool previousDestinationValid;
-                float3 previousDestinationNormal;
-                float previousDestinationRoughness;
-                float3 previousDestinationDiffuseAlbedo;
-                bool previousEncounteredAnimatedWater;
-                opticalGuideHit(gv_hitCamRel + pc.camOffset, gv_opticalGuidePreviousDir,
-                        gv_normal, gv_geometricNormal, false, true, gv_opticalExitEta,
-                        guideBias, guideConeWidth, rayConeSpread, pc.waterAnchor.z,
-                        previousDestinationHitCamRel, previousDestinationMotionPrev,
-                        previousDestinationValid, previousDestinationNormal,
-                        previousDestinationRoughness, previousDestinationDiffuseAlbedo,
-                        previousEncounteredAnimatedWater);
-                if (previousDestinationValid) {
-                    gv_motionPreviousHitCamRel = previousDestinationHitCamRel;
-                    gv_motionPreviousObjDisp = previousDestinationMotionPrev;
-                    gv_motionUseExplicitPrevious = true;
-                } else {
-                    // A previous refracted direction alone is not enough to validate history. At
-                    // disocclusions, TIR transitions, translucent obstructions, or crossing-budget
-                    // exhaustion the second walk has no coherent previous destination, so fall back to
-                    // the same hard animated-water rejection used by the one-ray path.
-                    gv_animatedGuide = 1.0;
-                }
-            }
-#endif
             // Animated water is a visible dielectric interface, not the opaque bed behind it. Keep its
             // depth, wave normal, roughness, Fresnel and reflection motion on that one physical surface;
             // only the transmitted color guides follow the refracted destination. Replacing water depth
@@ -2717,17 +2618,8 @@ void main() {
 
     float2 motion = float2(0.0, 0.0);
     if (writeMotionGuides || debugMotion) {
-#if CAUSTICA_TRANSPARENCY_HQ
-        float3 previousMotionHitCamRel = gv_motionUseExplicitPrevious
-                ? gv_motionPreviousHitCamRel : gv_motionHitCamRel;
-        float3 previousMotionObjDisp = gv_motionUseExplicitPrevious
-                ? gv_motionPreviousObjDisp : gv_motionObjDisp;
-        float4 prevClip = mul(pc.prevViewProj,
-                float4(previousMotionHitCamRel + pc.camDelta - previousMotionObjDisp, 1.0));
-#else
         float4 prevClip = mul(pc.prevViewProj,
                 float4(gv_motionHitCamRel + pc.camDelta - gv_motionObjDisp, 1.0));
-#endif
         float2 prevNdc = prevClip.xy / prevClip.w;
         float2 curNdc = jndc;
         if (gv_motionUseRefracted) {

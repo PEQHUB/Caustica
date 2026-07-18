@@ -139,10 +139,10 @@ public final class RtPipeline {
         try (MemoryStack stack = MemoryStack.stackPush()) {
             int firstExtraBinding = withBlockAlbedoAtlas ? 3 : 2;
             int materialBase = firstExtraBinding + extraStorageImages;
-            // Bindings 14/15 are deliberately vacant: canonical material pages moved to set 1. Preserve
-            // the fork's stable miss ABI at 16/17 for the celestial atlas and physical sky-view LUT.
-            int skyBinding = skyAtlas ? 16 : -1;
-            int skyLutBinding = skyAtlas ? 17 : -1;
+            // Reconstruction guides occupy a variable prefix ending at binding 13 (base) or 19 (NRD).
+            // Keep one fixed miss ABI above both ranges so backend changes cannot move sky descriptors.
+            int skyBinding = skyAtlas ? 20 : -1;
+            int skyLutBinding = skyAtlas ? 21 : -1;
             int skyDescriptors = skyAtlas ? 2 : 0;
             int bindingCount = materialBase + skyDescriptors;
             VkDescriptorSetLayoutBinding.Buffer binds = VkDescriptorSetLayoutBinding.calloc(bindingCount, stack);
@@ -449,7 +449,7 @@ public final class RtPipeline {
         writeAtlasBinding(skyAtlasBinding, imageView, sampler);
     }
 
-    /** Bind the physical sky-view storage image sampled by the miss shader at binding 17. */
+    /** Bind the physical sky-view storage image sampled by the miss shader at binding 21. */
     public void setSkyViewLut(long imageView) {
         if (skyViewLutBinding < 0) return;
         try (MemoryStack stack = MemoryStack.stackPush()) {
