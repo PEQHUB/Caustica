@@ -18,6 +18,9 @@ class EntityDirectFallbackDiagnosticContractTest {
         assertTrue(emitter.contains("structurallyRejectedRoots.put(model, root)"));
         assertTrue(emitter.contains("logFallbackOnce(loggedNamespaceRejects"));
         assertTrue(emitter.contains("logFallbackOnce(loggedTopologyRejects"));
+        assertTrue(emitter.contains("VERIFIED_EMF_CUBE.equals(cube.getClass().getName())"));
+        assertTrue(emitter.contains("if (verifiedEmfCube) {\n                return new CubeTemplate(cube);"),
+                "Verified EMF cubes must retain the generic polygon path used by EMFCube.compile");
         assertTrue(collector.contains("model.renderToBuffer(poseStack, capture"),
                 "Every rejected model must retain the existing visual fallback");
     }
