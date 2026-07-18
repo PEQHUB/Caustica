@@ -1474,6 +1474,7 @@ public final class RtComposite {
         RtGpuExecutor gpuExecutor = ctx.gpuExecutor();
         long graphicsUse = gpuExecutor.beginGraphicsTerrainUse(encoder);
         pendingTerrainGraphicsUse = graphicsUse;
+        RtEntities.FrameEntities frameEntities = null;
         VkCommandBuffer cmd = encoder.allocateAndBeginTransientCommandBuffer();
         RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_COMMAND_BUFFER, cmd.address(), "composite command buffer");
         try (MemoryStack stack = MemoryStack.stackPush(); RtDebugLabels.Scope frameLabel = RtDebugLabels.scope(ctx, cmd, "composite frame")) {
@@ -1634,6 +1635,7 @@ public final class RtComposite {
             // feeds the hit shader entity path (per-prim normal/tint) and motion vectors.
             RtEntities.FrameEntities fe = RtEntities.INSTANCE.beginFrame(ctx, terrain.staticInstances(),
                     terrain.blockX, terrain.blockY, terrain.blockZ, camX, camY, camZ, frameProjection, frameViewRotation);
+            frameEntities = fe;
             // Block-breaking overlay: resolves each destroy-stage RenderType's texture into the
             // SAME bindless entity-texture array (destroy_stage_N.png is a standalone Sampler0 texture,
             // not a block-atlas sprite — see ModelBakery.BREAKING_LOCATIONS/DESTROY_TYPES), so any newly
@@ -1933,6 +1935,9 @@ public final class RtComposite {
             throw new IllegalStateException("vkEndCommandBuffer(rt composite) failed");
         }
         encoder.execute(cmd); // deferred into the frame's submission — correct for per-frame work
+        // Do not attach a merely reserved token: failed recording may never signal it. Once execute succeeds,
+        // every owner in this frame's manifest is protected through the final overlay consumer.
+        RtEntities.INSTANCE.markGraphicsUse(frameEntities, graphicsUse);
     }
 
     private void clearOfflineAccumulation(VkCommandBuffer cmd, MemoryStack stack) {
