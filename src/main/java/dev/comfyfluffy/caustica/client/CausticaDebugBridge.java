@@ -170,6 +170,14 @@ final class CausticaDebugBridge {
         state.setProperty("exposureGpuNanos", Long.toString(RtComposite.INSTANCE.exposureGpuNanos()));
         state.setProperty("displayGpuNanos", Long.toString(RtComposite.INSTANCE.displayGpuNanos()));
         state.setProperty("copyGpuNanos", Long.toString(RtComposite.INSTANCE.copyGpuNanos()));
+        state.setProperty("dlssgBeforePresentCpuNanos",
+                Long.toString(dev.comfyfluffy.caustica.rt.pipeline.RtDlssFg.INSTANCE.beforePresentCpuNanos()));
+        state.setProperty("dlssgAfterPresentCpuNanos",
+                Long.toString(dev.comfyfluffy.caustica.rt.pipeline.RtDlssFg.INSTANCE.afterPresentCpuNanos()));
+        state.setProperty("reflexGpuFrameTimeUs",
+                Integer.toString(dev.comfyfluffy.caustica.rt.pipeline.RtDlssFg.INSTANCE.reflexGpuFrameTimeUs()));
+        state.setProperty("reflexGpuActiveRenderTimeUs",
+                Integer.toString(dev.comfyfluffy.caustica.rt.pipeline.RtDlssFg.INSTANCE.reflexGpuActiveRenderTimeUs()));
         state.setProperty("renderWidth", Integer.toString(RtComposite.INSTANCE.renderWidth()));
         state.setProperty("renderHeight", Integer.toString(RtComposite.INSTANCE.renderHeight()));
         state.setProperty("backend", RtRuntimeStatus.backend());

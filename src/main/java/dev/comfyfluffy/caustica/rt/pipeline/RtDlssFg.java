@@ -104,6 +104,10 @@ public final class RtDlssFg {
     private long timelineWaitCount;
     private long timelineWaitTotalNanos;
     private long timelineWaitMaximumNanos;
+    private volatile long beforePresentCpuNanos;
+    private volatile long afterPresentCpuNanos;
+    private volatile int reflexGpuFrameTimeUs;
+    private volatile int reflexGpuActiveRenderTimeUs;
     private long timelineWaitFailures;
     private long estimatedVramUsage;
     private String featureVersion = "Unknown";
@@ -233,6 +237,11 @@ public final class RtDlssFg {
     public long timelineWaitMaximumNanos() {
         return timelineWaitMaximumNanos;
     }
+
+    public long beforePresentCpuNanos() { return beforePresentCpuNanos; }
+    public long afterPresentCpuNanos() { return afterPresentCpuNanos; }
+    public int reflexGpuFrameTimeUs() { return reflexGpuFrameTimeUs; }
+    public int reflexGpuActiveRenderTimeUs() { return reflexGpuActiveRenderTimeUs; }
 
     public long timelineWaitFailures() {
         return timelineWaitFailures;
@@ -522,6 +531,7 @@ public final class RtDlssFg {
 
     /** Called immediately before the one real proxy present. */
     public void beforePresent() {
+        long started = System.nanoTime();
         ensurePresentToken();
         marker(PCL_RENDER_SUBMIT_END);
         if (!frameInputsSubmitted) {
@@ -533,10 +543,12 @@ public final class RtDlssFg {
         // Streamline's present hook, and the proxy present all observe the same interpolation mode.
         applyOptionsForPresent();
         marker(PCL_PRESENT_START);
+        beforePresentCpuNanos = Math.max(0L, System.nanoTime() - started);
     }
 
     /** Called immediately after the one real proxy present. */
     public void afterPresent(int presentResult) {
+        long started = System.nanoTime();
         marker(PCL_PRESENT_END);
         if (pluginForSwapchain && dlssgSupported) {
             refreshState();
@@ -560,6 +572,7 @@ public final class RtDlssFg {
         frameToken = 0L;
         currentFrameIndex = -1;
         frameInputsSubmitted = false;
+        afterPresentCpuNanos = Math.max(0L, System.nanoTime() - started);
     }
 
     static boolean isRecoverablePresentResult(int result) {
@@ -1045,7 +1058,10 @@ public final class RtDlssFg {
         try (Arena arena = Arena.ofConfined()) {
             MemorySegment state = StreamlineAbi.allocate(arena, StreamlineAbi.REFLEX_STATE_SIZE);
             if (StreamlineRuntime.library().getReflexState(state) == RESULT_OK) {
-                flashIndicatorDriverControlled = StreamlineAbi.bytes(state).getInt(8) != 0;
+                ByteBuffer bytes = StreamlineAbi.bytes(state);
+                flashIndicatorDriverControlled = bytes.getInt(8) != 0;
+                reflexGpuActiveRenderTimeUs = bytes.getInt(80);
+                reflexGpuFrameTimeUs = bytes.getInt(84);
             }
         }
     }
