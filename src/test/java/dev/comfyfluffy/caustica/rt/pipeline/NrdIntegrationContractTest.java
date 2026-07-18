@@ -16,10 +16,10 @@ final class NrdIntegrationContractTest {
         assertTrue(config.contains("reconstruction.backend\", \"auto\""));
         assertTrue(config.contains("nrd.spherical-harmonics"));
         assertTrue(config.contains("nrd.relax-atrous-iterations"));
-        assertTrue(menu.contains("addBundle(\"NRD mode\""));
+        assertTrue(menu.contains("addBundle(\"NRD mode & upscale\""));
         assertTrue(menu.contains("caustica.options.rt.nrd.splitScreen"));
         assertTrue(policy.contains("isLinux() || vendor == 0x1002 || vendor == 0x8086"));
-        assertTrue(policy.contains("!RtDlssRr.INSTANCE.failed()"));
+        assertTrue(policy.contains("Backend identity must not change halfway through a frame"));
     }
 
     @Test
@@ -31,8 +31,13 @@ final class NrdIntegrationContractTest {
         assertTrue(cmake.contains("792eff196afdd350fd9c3f862119017ccb438a0e"));
         assertTrue(cmake.contains("NRI_ENABLE_AMDAGS OFF"));
         assertTrue(bridge.contains("static_assert(sizeof(BridgeCommonSettings) == 308)"));
+        assertTrue(bridge.contains("REBLUR_DIFFUSE_SPECULAR_SH"));
+        assertTrue(bridge.contains("RELAX_DIFFUSE_SPECULAR_SH"));
+        assertTrue(bridge.contains("IN_SPEC_RADIANCE_HITDIST"));
         assertTrue(shader.contains("FRAME_FLAG_NRD_SH"));
         assertTrue(shader.contains("gNrdViewZ"));
+        assertTrue(shader.contains("diffuseSignal = nrdDiffuseRadiance / diffuseDemodulation"));
+        assertTrue(shader.contains("specularSignal = nrdSpecularRadiance / specularDemodulation"));
         assertTrue(workflow.contains("name: nrd-linux-x64"));
         assertTrue(workflow.contains("NRD_LINUX_X64"));
     }
@@ -43,6 +48,7 @@ final class NrdIntegrationContractTest {
         String bringup = source("src/main/java/dev/comfyfluffy/caustica/rt/RtDeviceBringup.java");
         String raygen = source("shaders/world/world.rgen.slang");
         assertTrue(build.contains("world_base.rgen.spv"));
+        assertTrue(build.contains("world_nrd_base.rgen.spv"));
         assertTrue(build.contains("world_offline_base.rgen.spv"));
         assertTrue(bringup.contains("NONE(\"none\", null, \"world_base.rgen.spv\")"));
         assertTrue(raygen.contains("TraceRay(topLevelAS, RAY_FLAG_NONE"));

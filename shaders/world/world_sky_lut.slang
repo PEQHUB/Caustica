@@ -3,7 +3,14 @@ module world_sky_lut;
 
 import world_common;
 
-[[vk::binding(17, 0)]] [format("rgba32f")] RWTexture2D<float4> skyViewLut;
+#ifndef CAUSTICA_NRD
+#define CAUSTICA_NRD 0
+#endif
+#if CAUSTICA_NRD
+[[vk::binding(20, 0)]] [format("rgba32f")] RWTexture2D<float4> skyViewLut;
+#else
+[[vk::binding(14, 0)]] [format("rgba32f")] RWTexture2D<float4> skyViewLut;
+#endif
 
 static const float SKY_VIEW_PI = 3.14159265359;
 public static const float3 SKY_AIRGLOW_ZENITH = float3(0.00000060, 0.00000078, 0.00000120);

@@ -45,6 +45,12 @@
 #ifndef CAUSTICA_SER
 #define CAUSTICA_SER 0
 #endif
+#ifndef CAUSTICA_NRD
+#define CAUSTICA_NRD 0
+#endif
+#ifndef CAUSTICA_PORTABLE_TRACE
+#define CAUSTICA_PORTABLE_TRACE 0
+#endif
 import world_common;
 import world_sky_lut;
 
@@ -74,9 +80,14 @@ static SharcRWPtr<uint> sharcStats;
 [[vk::binding(8, 0)]] [format("rg16f")]   RWTexture2D<float2> gSpecMotion; // reflection MVs for RR
 [[vk::binding(10, 0)]] [format("r16f")] RWTexture2D<float> gAnimatedGuide; // temporal responsivity source
 [[vk::binding(13, 0)]] [format("rgba16f")] RWTexture2D<float4> gDiffuseRayDirectionHitDistance;
+#if CAUSTICA_NRD
 [[vk::binding(14, 0)]] [format("rgba16f")] RWTexture2D<float4> gNrdSh1;
 [[vk::binding(15, 0)]] [format("r32f")] RWTexture2D<float> gNrdViewZ;
 [[vk::binding(16, 0)]] [format("rgba16f")] RWTexture2D<float4> gNrdSignal;
+[[vk::binding(17, 0)]] [format("rgba16f")] RWTexture2D<float4> gNrdSpecSh1;
+[[vk::binding(18, 0)]] [format("rgba16f")] RWTexture2D<float4> gNrdSpecSignal;
+[[vk::binding(19, 0)]] [format("rgba16f")] RWTexture2D<float4> gNrdViewDirection;
+#endif
 #else
 [[vk::binding(9, 0)]] [format("rgba32f")] RWTexture2D<float4> groundTruthAccum; // RGB mean + sample count
 [[vk::binding(11, 0)]] [format("rgba32f")] RWTexture2D<float4> offlinePilotRead;
@@ -953,10 +964,12 @@ RayDesc makeRay(float3 origin, float tmin, float3 dir, float tmax) {
 // Reorder is disabled in the latency-sensitive live shaders after fixed-scene OMM-off and OMM-on A/Bs both
 // showed that its scheduling overhead exceeds the coherence benefit. Offline remains independently tuned.
 void traceRadiance(uint cullMask, float3 ro, float tmin, float3 rd, float tmax) {
-#if CAUSTICA_SER
+#if !CAUSTICA_PORTABLE_TRACE
     HitObject hObj = HitObject::TraceRay(topLevelAS, RAY_FLAG_NONE, cullMask,
             SBT_RADIANCE, SBT_STRIDE_BUCKET, MISS_RADIANCE, makeRay(ro, tmin, rd, tmax), payload);
+#if CAUSTICA_SER
     ReorderThread(hObj);
+#endif
     HitObject::Invoke(topLevelAS, hObj, payload);
 #else
     TraceRay(topLevelAS, RAY_FLAG_NONE, cullMask, SBT_RADIANCE, SBT_STRIDE_BUCKET,
@@ -967,10 +980,12 @@ void traceRadiance(uint cullMask, float3 ro, float tmin, float3 rd, float tmax) 
 // Guide probes need closest-hit material/motion data but consume no sky radiance. A dedicated miss record
 // avoids running the nested atmosphere march when a reflection/refraction guide escapes the scene.
 void traceGuide(uint rayFlags, float3 ro, float tmin, float3 rd, float tmax) {
-#if CAUSTICA_SER
+#if !CAUSTICA_PORTABLE_TRACE
     HitObject hObj = HitObject::TraceRay(topLevelAS, rayFlags, CULL_SECONDARY,
             SBT_RADIANCE, SBT_STRIDE_BUCKET, MISS_GUIDE, makeRay(ro, tmin, rd, tmax), payload);
+#if CAUSTICA_SER
     ReorderThread(hObj);
+#endif
     HitObject::Invoke(topLevelAS, hObj, payload);
 #else
     TraceRay(topLevelAS, rayFlags, CULL_SECONDARY, SBT_RADIANCE, SBT_STRIDE_BUCKET,
@@ -980,13 +995,18 @@ void traceGuide(uint rayFlags, float3 ro, float tmin, float3 rd, float tmax) {
 
 float3 visibility(float3 origin, float3 dir, float tmax) {
     shadowVis = float4(1.0, 1.0, 1.0, -1.0); // a = water-crossing sentinel, filled by the water any-hit
-    // Shadow SBT records run any-hit only for cutout/translucent/water. Cutout alpha-tests; translucent
-    // and water tint shadowVis.rgb and pass through. The tiny shadow closest-hit marks an opaque
-    // blocker in alpha; the dedicated miss leaves the initial sentinel untouched.
+#if CAUSTICA_PORTABLE_TRACE
     TraceRay(topLevelAS, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, CULL_SECONDARY,
             SBT_SHADOW, SBT_STRIDE_BUCKET, MISS_SHADOW,
             makeRay(origin, RAY_TMIN, dir, tmax), shadowVis);
     return shadowVis.a == -2.0 ? float3(0.0, 0.0, 0.0) : shadowVis.rgb;
+#else
+    HitObject hObj = HitObject::TraceRay(topLevelAS,
+            RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER,
+            CULL_SECONDARY, SBT_SHADOW, SBT_STRIDE_BUCKET, 0u,
+            makeRay(origin, RAY_TMIN, dir, tmax), shadowVis);
+    return hObj.IsMiss() ? shadowVis.rgb : float3(0.0, 0.0, 0.0);
+#endif
 }
 
 float2 projectPrevNdc(float3 worldPos) {
@@ -1254,11 +1274,45 @@ void opticalGuideHit(float3 surfacePos, float3 transmittedDir, float3 surfaceNor
     // Crossing-budget exhaustion means no trustworthy diffuse destination was found.
 }
 
-// One Monte Carlo path from (ro, rd). Returns accumulated radiance along the path.
+#if CAUSTICA_NRD
+struct PathResult {
+    float3 radiance;
+    float3 diffuseRadiance;
+    float3 specularRadiance;
+    float4 diffuseDirectionHitDistance;
+    float4 specularDirectionHitDistance;
+};
+#endif
+
+#if CAUSTICA_NRD
+void addNrdContribution(float3 contribution, int primaryLobe,
+        inout float3 diffuseRadiance, inout float3 specularRadiance) {
+    if (primaryLobe == 1) specularRadiance += contribution;
+    else diffuseRadiance += contribution;
+}
+#endif
+
+// One Monte Carlo path from (ro, rd). In addition to the combined estimator, return independent
+// primary-lobe estimators for NRD. The two signals remain separated before material demodulation.
+#if CAUSTICA_NRD
+PathResult tracePath(float3 ro, float3 rd, float primaryConeSpread,
+#else
 float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
+#endif
                  bool captureGuides, bool captureRefractedGuides, bool primaryOnly,
                  inout PathSampler sampler) {
     float3 L = float3(0.0, 0.0, 0.0);
+#if CAUSTICA_NRD
+    float3 nrdDiffuseRadiance = float3(0.0);
+    float3 nrdSpecularRadiance = float3(0.0);
+    float3 pendingPrimaryDiffuseDirect = float3(0.0);
+    float3 pendingPrimarySpecularDirect = float3(0.0);
+    int nrdPrimaryLobe = -1; // 0 diffuse, 1 specular; selected at the first scattering/interface event
+    float4 nrdDiffuseDirectionHitDistance = float4(0.0);
+    float4 nrdSpecularDirectionHitDistance = float4(0.0);
+    bool nrdDiffuseHitPending = false;
+    bool nrdSpecularHitPending = false;
+#endif
     float3 throughput = float3(1.0, 1.0, 1.0);
 #if CAUSTICA_SHARC_UPDATE
     SharcState sharcState;
@@ -1314,6 +1368,17 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
         traceRadiance(segment == 0 ? CULL_PRIMARY : CULL_SECONDARY, ro, 0.0, rd, 10000.0);
 #endif
 
+#if CAUSTICA_NRD
+        if (nrdDiffuseHitPending) {
+            nrdDiffuseDirectionHitDistance.w = max(payload.hitT, 0.0);
+            nrdDiffuseHitPending = false;
+        }
+        if (nrdSpecularHitPending) {
+            nrdSpecularDirectionHitDistance.w = max(payload.hitT, 0.0);
+            nrdSpecularHitPending = false;
+        }
+#endif
+
         if (segment == 0 && payload.hitT >= 0.0) {
             primaryHitDistance = payload.hitT;
         }
@@ -1349,7 +1414,11 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
             SharcUpdateMiss(sharcParameters, sharcState, sky);
             sharcStatAdd(SHARC_STAT_UPDATE_MISSES, 1u);
 #endif
-            L += throughput * sky; // escaped to sky
+            float3 contribution = throughput * sky;
+            L += contribution; // escaped to sky
+#if CAUSTICA_NRD
+            addNrdContribution(contribution, nrdPrimaryLobe, nrdDiffuseRadiance, nrdSpecularRadiance);
+#endif
             break;
         }
 
@@ -1409,6 +1478,9 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
         // closed geometry. No medium stack, ordered shadow walk, or extra pipeline is introduced:
         // ordinary pixels retain the upstream path-tracing kernel and cost.
         if (material == MATERIAL_GLASS) {
+#if CAUSTICA_NRD
+            if (nrdPrimaryLobe < 0) nrdPrimaryLobe = 1;
+#endif
 #if CAUSTICA_SHARC_UPDATE
             SharcUpdateMiss(sharcParameters, sharcState, float3(0.0));
             sharcStatAdd(SHARC_STAT_UPDATE_MISSES, 1u);
@@ -1493,6 +1565,14 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
                 rd = transmittedDir;
                 ro = hitPos - interfaceNormal * GLASS_TRANSMIT_BIAS; // cross to the far side without overshooting a close neighbour
             }
+#if CAUSTICA_NRD
+#if CAUSTICA_NRD
+            if (nrdSpecularDirectionHitDistance.w == 0.0 && !nrdSpecularHitPending) {
+                nrdSpecularDirectionHitDistance = float4(rd, 0.0);
+                nrdSpecularHitPending = true;
+            }
+#endif
+#endif
             ++opticalInterfaceDepth;
             showCelestial = true;                  // specular interface: the continuation ray may see the disc
             continue;
@@ -1502,6 +1582,9 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
         // off secondary rays, so this only fires at bounce 0; they receive direct light and one diffuse
         // path continuation into the scene, but never appear in shadows/reflections/GI or emit radiance.
         if (material == MATERIAL_PARTICLE) {
+#if CAUSTICA_NRD
+            if (nrdPrimaryLobe < 0) nrdPrimaryLobe = 0;
+#endif
 #if CAUSTICA_SHARC_UPDATE
             SharcUpdateMiss(sharcParameters, sharcState, float3(0.0));
             sharcStatAdd(SHARC_STAT_UPDATE_MISSES, 1u);
@@ -1536,7 +1619,12 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
                 float3 shadowOrigin = offsetRayOrigin(hitPos, geometricNormal, lightDir);
                 float3 vis = visibility(shadowOrigin, lightDir, 10000.0);
                 if (max(vis.r, max(vis.g, vis.b)) > 0.0) {
-                    L += throughput * albedo * INV_PI * pc.lightRadiance.xyz * ndl * vis;
+                    float3 contribution = throughput * albedo * INV_PI * pc.lightRadiance.xyz * ndl * vis;
+                    L += contribution;
+#if CAUSTICA_NRD
+                    addNrdContribution(contribution, nrdPrimaryLobe,
+                            nrdDiffuseRadiance, nrdSpecularRadiance);
+#endif
                 }
             }
 
@@ -1546,6 +1634,12 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
             throughput *= albedo;
             rd = cosineDir(n, sampler);
             ro = offsetRayOrigin(hitPos, geometricNormal, rd);
+#if CAUSTICA_NRD
+            if (nrdDiffuseDirectionHitDistance.w == 0.0 && !nrdDiffuseHitPending) {
+                nrdDiffuseDirectionHitDistance = float4(rd, 0.0);
+                nrdDiffuseHitPending = true;
+            }
+#endif
             if (captureGuides && scatteringDepth == 0
                     && (pc.flags & FRAME_FLAG_DIFFUSE_PATH_GUIDE) != 0u) {
                 gv_diffuseRayDirectionHitDistance = float4(rd, 0.0);
@@ -1563,6 +1657,9 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
         // transmission, the new medium is read from this hit's face orientation (payloadWaterEntering),
         // not toggled — see PAYLOAD_WATER_ENTERING. The bounce cap bounds stacked refractions.
         if (material == MATERIAL_WATER) {
+#if CAUSTICA_NRD
+            if (nrdPrimaryLobe < 0) nrdPrimaryLobe = 1;
+#endif
 #if CAUSTICA_SHARC_UPDATE
             SharcUpdateMiss(sharcParameters, sharcState, float3(0.0));
             sharcStatAdd(SHARC_STAT_UPDATE_MISSES, 1u);
@@ -1638,6 +1735,12 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
                 // stray/missing face corrupting the medium for the rest of the path (see PAYLOAD_WATER_ENTERING).
                 inWater = surfaceWaterEntering;
             }
+#if CAUSTICA_NRD
+            if (nrdSpecularDirectionHitDistance.w == 0.0 && !nrdSpecularHitPending) {
+                nrdSpecularDirectionHitDistance = float4(rd, 0.0);
+                nrdSpecularHitPending = true;
+            }
+#endif
             ++opticalInterfaceDepth;
             // Specular interface (mirror reflect / clear refract): the continuation ray should see the
             // sun/moon disc directly — no NEE happened here to double-count it.
@@ -1681,6 +1784,9 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
         // roughness floor and stochastic 90/10 specular/diffuse branch only for authored roughness zero.
         // The reflected sun/moon arrives through the continuation miss, so delta mirrors skip NEE.
         if (exactMirror) {
+#if CAUSTICA_NRD
+            if (nrdPrimaryLobe < 0) nrdPrimaryLobe = 1;
+#endif
 #if CAUSTICA_SHARC_UPDATE
             SharcUpdateMiss(sharcParameters, sharcState, float3(0.0));
             sharcStatAdd(SHARC_STAT_UPDATE_MISSES, 1u);
@@ -1693,6 +1799,12 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
             throughput *= fresnelSchlick(clamp(dot(n, v), 0.0, 1.0), F0);
             ro = p;
             rd = reflect(rd, n);
+#if CAUSTICA_NRD
+            if (nrdSpecularDirectionHitDistance.w == 0.0 && !nrdSpecularHitPending) {
+                nrdSpecularDirectionHitDistance = float4(rd, 0.0);
+                nrdSpecularHitPending = true;
+            }
+#endif
             ++exactMirrorDepth;
             showCelestial = true;
             if (scatteringDepth >= rrStart) {
@@ -1736,7 +1848,12 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
                     sharcPathEligible, sharcPreviousLobeDiffuse, sharcPreviousGlossyAlpha,
                     false,
                     cachedRadiance)) {
-                L += throughput * cachedRadiance;
+                float3 contribution = throughput * cachedRadiance;
+                L += contribution;
+#if CAUSTICA_NRD
+                addNrdContribution(contribution, nrdPrimaryLobe,
+                        nrdDiffuseRadiance, nrdSpecularRadiance);
+#endif
                 break;
             }
         }
@@ -1751,6 +1868,11 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
                 emissiveRadiance *= EMISSIVE_MAX_MULTIPLIER * clamp(pc.torchIntensity, 0.0, 1.0);
             }
             L += throughput * albedo * emission * emissiveRadiance;
+#if CAUSTICA_NRD
+            float3 contribution = throughput * albedo * emission * emissiveRadiance;
+            addNrdContribution(contribution, scatteringDepth == 0 ? 0 : nrdPrimaryLobe,
+                    nrdDiffuseRadiance, nrdSpecularRadiance);
+#endif
         }
 #endif
 
@@ -1794,7 +1916,20 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
                 cacheableDirectLighting += diffuseBrdf * directScale;
                 liveDirectLighting += liveBrdf * directScale;
 #else
+#if CAUSTICA_NRD
+                float3 diffuseContribution = throughput * diffuseBrdf * directRadiance * ndl * vis;
+                float3 specularContribution = throughput * liveBrdf * directRadiance * ndl * vis;
+                L += diffuseContribution + specularContribution;
+                if (scatteringDepth == 0 && nrdPrimaryLobe < 0) {
+                    pendingPrimaryDiffuseDirect += diffuseContribution;
+                    pendingPrimarySpecularDirect += specularContribution;
+                } else {
+                    addNrdContribution(diffuseContribution + specularContribution, nrdPrimaryLobe,
+                            nrdDiffuseRadiance, nrdSpecularRadiance);
+                }
+#else
                 L += throughput * (diffuseBrdf + liveBrdf) * directRadiance * ndl * vis;
+#endif
 #endif
             }
         }
@@ -1813,8 +1948,16 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
                 liveDirectLighting += diffAlb * sss * SSS_STRENGTH * hg(cosT, SSS_G)
                         * backNdl * directRadiance * vis;
 #else
-                L += throughput * diffAlb * sss * SSS_STRENGTH * hg(cosT, SSS_G)
+                float3 contribution = throughput * diffAlb * sss * SSS_STRENGTH * hg(cosT, SSS_G)
                         * backNdl * directRadiance * vis;
+                L += contribution;
+#if CAUSTICA_NRD
+                if (scatteringDepth == 0 && nrdPrimaryLobe < 0)
+                    pendingPrimaryDiffuseDirect += contribution;
+                else
+                    addNrdContribution(contribution, nrdPrimaryLobe,
+                            nrdDiffuseRadiance, nrdSpecularRadiance);
+#endif
 #endif
             }
         }
@@ -1839,7 +1982,12 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
                     sharcPathEligible, sharcPreviousLobeDiffuse, sharcPreviousGlossyAlpha,
                     primaryDiffuseEligible,
                     cachedRadiance)) {
-                L += throughput * (cachedRadiance + liveDirectLighting);
+                float3 contribution = throughput * (cachedRadiance + liveDirectLighting);
+                L += contribution;
+#if CAUSTICA_NRD
+                addNrdContribution(contribution, nrdPrimaryLobe,
+                        nrdDiffuseRadiance, nrdSpecularRadiance);
+#endif
                 break;
             }
         }
@@ -1884,12 +2032,23 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
             break;
         }
 #elif CAUSTICA_SHARC_QUERY
-        L += throughput * (cacheableDirectLighting + liveDirectLighting + materialEmissive);
+        {
+            float3 contribution = throughput * (cacheableDirectLighting + liveDirectLighting + materialEmissive);
+            L += contribution;
+#if CAUSTICA_NRD
+            addNrdContribution(contribution, nrdPrimaryLobe,
+                    nrdDiffuseRadiance, nrdSpecularRadiance);
+#endif
+        }
 #endif
 
         // This vertex's emission and direct lighting are complete. At the depth limit there is no next
         // ray, so sampling a continuation lobe and running roulette cannot contribute to the result.
         if (scatteringDepth >= maxBounces) {
+#if CAUSTICA_NRD
+            nrdDiffuseRadiance += pendingPrimaryDiffuseDirect;
+            nrdSpecularRadiance += pendingPrimarySpecularDirect;
+#endif
             break;
         }
 
@@ -1900,7 +2059,26 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
 #endif
         if (pbr) {
             float ps = clamp(luminance(F0) / (luminance(F0) + luminance(diffAlb) + 1.0e-4), 0.1, 0.9);
-            if (rndf(sampler) < ps) {
+#if CAUSTICA_NRD
+            // NRD's 3x3 hit-distance reconstruction requires a spatially guaranteed lobe sample. A
+            // frame-rotated 2x2 Bayer permutation plus [1/4, 3/4] probability bounds supplies one sample
+            // of each lobe in every 2x2 neighborhood without biasing the probability-weighted estimator.
+            ps = clamp(ps, 0.25, 0.75);
+            uint2 lobePixel = uint2(sampler.blueIndex & 63u, sampler.blueIndex >> 6u);
+            uint bayer2x2 = (lobePixel.y & 1u) == 0u
+                    ? ((lobePixel.x & 1u) == 0u ? 0u : 2u)
+                    : ((lobePixel.x & 1u) == 0u ? 3u : 1u);
+            float lobeSample = (float((bayer2x2 + pc.frameIndex) & 3u) + 0.5) * 0.25;
+#else
+            float lobeSample = rndf(sampler);
+#endif
+            if (lobeSample < ps) {
+#if CAUSTICA_NRD
+                if (nrdPrimaryLobe < 0) {
+                    nrdPrimaryLobe = 1;
+                    nrdSpecularRadiance += pendingPrimarySpecularDirect / ps;
+                }
+#endif
 #if CAUSTICA_SHARC_UPDATE
                 causticaSharcDiscardCurrentVertex(sharcState);
 #endif
@@ -1919,6 +2097,12 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
                 throughput *= F * ggxG1(ndl2, rough) / ps;
                 rd = l;
                 ro = offsetRayOrigin(hitPos, geometricNormal, rd);
+#if CAUSTICA_NRD
+                if (nrdSpecularDirectionHitDistance.w == 0.0 && !nrdSpecularHitPending) {
+                    nrdSpecularDirectionHitDistance = float4(rd, 0.0);
+                    nrdSpecularHitPending = true;
+                }
+#endif
                 rayConeSpread = max(rayConeSpread, rough * rough * RAY_CONE_GLOSSY_SPREAD_SCALE);
 #if CAUSTICA_SHARC_QUERY
                 // Glossy queries use the documented effective-cone test at the next hit.
@@ -1928,6 +2112,12 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
                 // light and turns physical disk radiance into rare saturated fireflies.
                 showCelestial = false;
             } else {
+#if CAUSTICA_NRD
+                if (nrdPrimaryLobe < 0) {
+                    nrdPrimaryLobe = 0;
+                    nrdDiffuseRadiance += pendingPrimaryDiffuseDirect / (1.0 - ps);
+                }
+#endif
 #if CAUSTICA_SHARC_QUERY
                 sharcPreviousLobeDiffuse = true;
                 sharcPreviousGlossyAlpha = 0.0;
@@ -1941,6 +2131,12 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
                         / max(diffusePdf * (1.0 - ps), 1.0e-7);
                 rd = l;
                 ro = offsetRayOrigin(hitPos, geometricNormal, rd);
+#if CAUSTICA_NRD
+                if (nrdDiffuseDirectionHitDistance.w == 0.0 && !nrdDiffuseHitPending) {
+                    nrdDiffuseDirectionHitDistance = float4(rd, 0.0);
+                    nrdDiffuseHitPending = true;
+                }
+#endif
                 if (captureGuides && scatteringDepth == 0
                         && (pc.flags & FRAME_FLAG_DIFFUSE_PATH_GUIDE) != 0u) {
                     gv_diffuseRayDirectionHitDistance = float4(rd, 0.0);
@@ -1950,6 +2146,12 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
                 showCelestial = false; // diffuse lobe: disc covered by NEE, hide it (anti-firefly)
             }
         } else {
+#if CAUSTICA_NRD
+            if (nrdPrimaryLobe < 0) {
+                nrdPrimaryLobe = 0;
+                nrdDiffuseRadiance += pendingPrimaryDiffuseDirect + pendingPrimarySpecularDirect;
+            }
+#endif
 #if CAUSTICA_SHARC_QUERY
             sharcPreviousLobeDiffuse = true;
             sharcPreviousGlossyAlpha = 0.0;
@@ -1958,6 +2160,12 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
             showCelestial = false; // diffuse bounce: hide the disc (covered by NEE)
             rd = cosineDir(n, sampler);
             ro = offsetRayOrigin(hitPos, geometricNormal, rd);
+#if CAUSTICA_NRD
+            if (nrdDiffuseDirectionHitDistance.w == 0.0 && !nrdDiffuseHitPending) {
+                nrdDiffuseDirectionHitDistance = float4(rd, 0.0);
+                nrdDiffuseHitPending = true;
+            }
+#endif
             if (captureGuides && scatteringDepth == 0
                     && (pc.flags & FRAME_FLAG_DIFFUSE_PATH_GUIDE) != 0u) {
                 gv_diffuseRayDirectionHitDistance = float4(rd, 0.0);
@@ -1999,10 +2207,25 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
         float fogWeight = 1.0 - exp(-opticalDepth);
         // Attenuate the completed camera path once, then replace the lost radiance with the same
         // light-conditioned atmosphere used by visible sky misses. This does not enter path transport.
-        L = lerp(L, atmosphericBoundaryFog(rd, pc), fogWeight);
+        float3 fogRadiance = atmosphericBoundaryFog(rd, pc);
+        L = lerp(L, fogRadiance, fogWeight);
+#if CAUSTICA_NRD
+        nrdDiffuseRadiance = nrdDiffuseRadiance * (1.0 - fogWeight) + fogRadiance * fogWeight;
+        nrdSpecularRadiance *= 1.0 - fogWeight;
+#endif
     }
 #endif
+#if CAUSTICA_NRD
+    PathResult result;
+    result.radiance = L;
+    result.diffuseRadiance = nrdDiffuseRadiance;
+    result.specularRadiance = nrdSpecularRadiance;
+    result.diffuseDirectionHitDistance = nrdDiffuseDirectionHitDistance;
+    result.specularDirectionHitDistance = nrdSpecularDirectionHitDistance;
+    return result;
+#else
     return L;
+#endif
 }
 
 [shader("raygeneration")]
@@ -2136,11 +2359,18 @@ void main() {
     bool primaryOnly = pc.debugView != 0u;
 #endif
     bool writeRrGuides = (pc.flags & FRAME_FLAG_RR_GUIDES) != 0u;
+#if CAUSTICA_NRD
     bool writeNrdGuides = (pc.flags & FRAME_FLAG_NRD) != 0u;
+#else
+    bool writeNrdGuides = false;
+#endif
     bool writeMotionGuides = writeRrGuides || (pc.flags & FRAME_FLAG_FG_GUIDES) != 0u;
     bool writeExposureDepth = (pc.flags & FRAME_FLAG_EXPOSURE_DEPTH) != 0u;
     bool captureGuides = writeMotionGuides || writeExposureDepth || primaryOnly;
-    bool captureRefractedGuides = writeMotionGuides
+    // NRD's probabilistic primary-lobe signal assigns clear interfaces to specular, so its single
+    // normal/depth/MV guide must remain on that physical interface. DLSS-RR retains the established
+    // transmitted-destination guide path for its separate ordinary/specular guide contract.
+    bool captureRefractedGuides = (writeMotionGuides && !writeNrdGuides)
             || pc.debugView == 2u || pc.debugView == 5u
             || pc.debugView == 6u || pc.debugView == 7u;
 #if CAUSTICA_SHARC_QUERY && CAUSTICA_SHARC_DIAGNOSTICS
@@ -2149,6 +2379,12 @@ void main() {
     uint pathCount = primaryOnly ? 1u : spp;
 #endif
     float3 frameRadiance = float3(0.0, 0.0, 0.0);
+#if CAUSTICA_NRD
+    float3 nrdDiffuseRadiance = float3(0.0);
+    float3 nrdSpecularRadiance = float3(0.0);
+    float4 nrdDiffuseDirectionHitDistance = float4(0.0);
+    float4 nrdSpecularDirectionHitDistance = float4(0.0);
+#endif
     float2 jndc = ndc;
     float3 dir = float3(0.0, 0.0, 1.0);
     float rayConeSpread = RAY_CONE_MIN_SPREAD;
@@ -2184,12 +2420,28 @@ void main() {
         dir = normalize(farP - nearP);
         rayConeSpread = primaryRayConeSpread(jndc, size, dir);
 
-        float3 sampleRadiance = tracePath(origin, dir, rayConeSpread,
+#if CAUSTICA_NRD
+        PathResult sampleResult = tracePath(origin, dir, rayConeSpread,
                 captureGuides && s == 0u,
                 captureRefractedGuides && s == 0u, primaryOnly, sampler);
-        frameRadiance += sampleRadiance;
+        frameRadiance += sampleResult.radiance;
+        nrdDiffuseRadiance += sampleResult.diffuseRadiance;
+        nrdSpecularRadiance += sampleResult.specularRadiance;
+        if (s == 0u) {
+            nrdDiffuseDirectionHitDistance = sampleResult.diffuseDirectionHitDistance;
+            nrdSpecularDirectionHitDistance = sampleResult.specularDirectionHitDistance;
+        }
+#else
+        frameRadiance += tracePath(origin, dir, rayConeSpread,
+                captureGuides && s == 0u,
+                captureRefractedGuides && s == 0u, primaryOnly, sampler);
+#endif
     }
     frameRadiance /= float(pathCount);
+#if CAUSTICA_NRD
+    nrdDiffuseRadiance /= float(pathCount);
+    nrdSpecularRadiance /= float(pathCount);
+#endif
 
     // Optical transmission changes the visible layer, but reflection motion still belongs to the primary
     // glass/water interface. Preserve that interface before replacing ordinary guides with the destination.
@@ -2286,9 +2538,11 @@ void main() {
         if ((pc.flags & FRAME_FLAG_DIFFUSE_PATH_GUIDE) != 0u) {
             gDiffuseRayDirectionHitDistance[pix] = gv_diffuseRayDirectionHitDistance;
         }
+#if CAUSTICA_NRD
         if (writeNrdGuides) {
             gNrdViewZ[pix] = nrdViewZ;
         }
+#endif
     } else if (writeMotionGuides) {
         gDepth[pix] = gv_depth;
         gMotion[pix] = motion;
@@ -2342,39 +2596,75 @@ void main() {
     // Single noisy estimate; the denoiser (DLSS-RR) handles temporal convergence.
     // Calibrated scene-linear radiance is the stable DLSS-D contract. Camera exposure is applied only
     // after reconstruction by the display pipeline.
+#if CAUSTICA_NRD
     if ((pc.flags & FRAME_FLAG_NRD) != 0u) {
-        float hitDistance = max(gv_diffuseRayDirectionHitDistance.w, 1.0e-6);
-        float3 rawDirection = gv_diffuseRayDirectionHitDistance.xyz;
-        float3 direction = dot(rawDirection, rawDirection) > 1.0e-8
-                ? normalize(rawDirection) : gv_normal;
         bool reblur = pc.nrdSettings.w < 0.5;
-        float packedHitDistance = hitDistance;
-        if (reblur) {
+        float diffuseHitDistance = nrdDiffuseDirectionHitDistance.w;
+        float specularHitDistance = nrdSpecularDirectionHitDistance.w;
+        float packedDiffuseHitDistance = diffuseHitDistance;
+        float packedSpecularHitDistance = specularHitDistance;
+        if (reblur && diffuseHitDistance > 0.0) {
             float roughnessCurve = (1.0 - exp2(-200.0 * gv_rough * gv_rough))
                     * pow(clamp(gv_rough, 0.0, 1.0), 0.5);
             float normalization = (pc.nrdSettings.x + nrdViewZ * pc.nrdSettings.y)
                     * lerp(pc.nrdSettings.z, 1.0, roughnessCurve);
-            packedHitDistance = max(clamp(hitDistance / max(normalization, 1.0e-6), 0.0, 1.0), 1.0e-6);
+            packedDiffuseHitDistance = clamp(diffuseHitDistance / max(normalization, 1.0e-6), 0.0, 1.0);
         }
+        if (reblur && specularHitDistance > 0.0) {
+            float roughnessCurve = (1.0 - exp2(-200.0 * specSurfaceRoughness * specSurfaceRoughness))
+                    * pow(clamp(specSurfaceRoughness, 0.0, 1.0), 0.5);
+            float normalization = (pc.nrdSettings.x + nrdViewZ * pc.nrdSettings.y)
+                    * lerp(pc.nrdSettings.z, 1.0, roughnessCurve);
+            packedSpecularHitDistance = clamp(specularHitDistance / max(normalization, 1.0e-6), 0.0, 1.0);
+        }
+
+        // NRD filters incident radiance, not material-weighted outgoing radiance. Preserve the existing
+        // authored material guides as the exact remodulation factors used by the resolve pass.
+        float3 diffuseDemodulation = max(gv_albedo, float3(1.0e-4));
+        float3 specularDemodulation = max(specSurfaceAlbedo, float3(1.0e-4));
+        float3 diffuseSignal = nrdDiffuseRadiance / diffuseDemodulation;
+        float3 specularSignal = nrdSpecularRadiance / specularDemodulation;
+        float3 diffuseDirection = dot(nrdDiffuseDirectionHitDistance.xyz,
+                nrdDiffuseDirectionHitDistance.xyz) > 1.0e-8
+                ? normalize(nrdDiffuseDirectionHitDistance.xyz) : gv_normal;
+        float3 specularDirection = dot(nrdSpecularDirectionHitDistance.xyz,
+                nrdSpecularDirectionHitDistance.xyz) > 1.0e-8
+                ? normalize(nrdSpecularDirectionHitDistance.xyz) : reflect(dir, specSurfaceNormal);
+
         if ((pc.flags & FRAME_FLAG_NRD_SH) != 0u) {
             if (reblur) {
-                float y = dot(frameRadiance, float3(0.25, 0.5, 0.25));
-                float2 cocg = float2(dot(frameRadiance, float3(0.5, 0.0, -0.5)),
-                        dot(frameRadiance, float3(-0.25, 0.5, -0.25)));
-                gNrdSignal[pix] = float4(y, cocg, packedHitDistance);
-                gNrdSh1[pix] = float4(direction * y, 0.0);
+                float diffuseY = dot(diffuseSignal, float3(0.25, 0.5, 0.25));
+                float2 diffuseCoCg = float2(dot(diffuseSignal, float3(0.5, 0.0, -0.5)),
+                        dot(diffuseSignal, float3(-0.25, 0.5, -0.25)));
+                float specularY = dot(specularSignal, float3(0.25, 0.5, 0.25));
+                float2 specularCoCg = float2(dot(specularSignal, float3(0.5, 0.0, -0.5)),
+                        dot(specularSignal, float3(-0.25, 0.5, -0.25)));
+                gNrdSignal[pix] = float4(diffuseY, diffuseCoCg, packedDiffuseHitDistance);
+                gNrdSh1[pix] = float4(diffuseDirection * diffuseY, 0.0);
+                gNrdSpecSignal[pix] = float4(specularY, specularCoCg, packedSpecularHitDistance);
+                gNrdSpecSh1[pix] = float4(specularDirection * specularY, 0.0);
             } else {
-                gNrdSignal[pix] = float4(frameRadiance, packedHitDistance);
-                gNrdSh1[pix] = float4(direction * dot(frameRadiance, float3(0.2126, 0.7152, 0.0722)), 0.0);
+                gNrdSignal[pix] = float4(diffuseSignal, packedDiffuseHitDistance);
+                gNrdSh1[pix] = float4(diffuseDirection
+                        * dot(diffuseSignal, float3(0.2126, 0.7152, 0.0722)), 0.0);
+                gNrdSpecSignal[pix] = float4(specularSignal, packedSpecularHitDistance);
+                gNrdSpecSh1[pix] = float4(specularDirection
+                        * dot(specularSignal, float3(0.2126, 0.7152, 0.0722)), 0.0);
             }
         } else if (reblur) {
-            gNrdSignal[pix] = float4(dot(frameRadiance, float3(0.25, 0.5, 0.25)),
-                    dot(frameRadiance, float3(0.5, 0.0, -0.5)),
-                    dot(frameRadiance, float3(-0.25, 0.5, -0.25)), packedHitDistance);
+            gNrdSignal[pix] = float4(dot(diffuseSignal, float3(0.25, 0.5, 0.25)),
+                    dot(diffuseSignal, float3(0.5, 0.0, -0.5)),
+                    dot(diffuseSignal, float3(-0.25, 0.5, -0.25)), packedDiffuseHitDistance);
+            gNrdSpecSignal[pix] = float4(dot(specularSignal, float3(0.25, 0.5, 0.25)),
+                    dot(specularSignal, float3(0.5, 0.0, -0.5)),
+                    dot(specularSignal, float3(-0.25, 0.5, -0.25)), packedSpecularHitDistance);
         } else {
-            gNrdSignal[pix] = float4(frameRadiance, packedHitDistance);
+            gNrdSignal[pix] = float4(diffuseSignal, packedDiffuseHitDistance);
+            gNrdSpecSignal[pix] = float4(specularSignal, packedSpecularHitDistance);
         }
+        gNrdViewDirection[pix] = float4(normalize(-gv_hitCamRel), specSurfaceRoughness);
     }
+#endif
     outImage[pix] = float4(frameRadiance, 1.0);
 #endif // CAUSTICA_OFFLINE
 #endif

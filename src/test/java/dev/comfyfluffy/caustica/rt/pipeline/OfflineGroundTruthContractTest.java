@@ -108,12 +108,14 @@ final class OfflineGroundTruthContractTest {
         String composite = Files.readString(Path.of(
                 "src/main/java/dev/comfyfluffy/caustica/rt/RtComposite.java"));
 
-        assertTrue(composite.contains("GUIDE_COUNT = 14"));
+        assertTrue(composite.contains("BASE_GUIDE_COUNT = 11"));
+        assertTrue(composite.contains("NRD_GUIDE_COUNT = 17"));
         assertTrue(raygen.contains("vk::binding(12, 0)"));
         assertTrue(hit.contains("vk::binding(1, 1)"));
         assertTrue(hit.contains("vk::binding(2, 1)"));
         assertTrue(hit.contains("vk::binding(3, 1)"));
         assertTrue(miss.contains("vk::binding(16, 0)"));
-        assertTrue(skyLut.contains("vk::binding(17, 0)"));
+        assertTrue(skyLut.contains("vk::binding(14, 0)"));
+        assertTrue(skyLut.contains("vk::binding(20, 0)"));
     }
 }

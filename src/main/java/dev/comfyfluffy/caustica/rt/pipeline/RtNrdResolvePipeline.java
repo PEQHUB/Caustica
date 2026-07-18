@@ -50,8 +50,8 @@ public final class RtNrdResolvePipeline {
         VkDevice device = context.vk();
         try (MemoryStack stack = MemoryStack.stackPush()) {
             LongBuffer output = stack.mallocLong(1);
-            VkDescriptorSetLayoutBinding.Buffer bindings = VkDescriptorSetLayoutBinding.calloc(4, stack);
-            for (int i = 0; i < 4; i++) bindings.get(i).binding(i)
+            VkDescriptorSetLayoutBinding.Buffer bindings = VkDescriptorSetLayoutBinding.calloc(9, stack);
+            for (int i = 0; i < 9; i++) bindings.get(i).binding(i)
                     .descriptorType(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).descriptorCount(1)
                     .stageFlags(VK10.VK_SHADER_STAGE_COMPUTE_BIT);
             VkDescriptorSetLayoutCreateInfo layoutInfo = VkDescriptorSetLayoutCreateInfo.calloc(stack)
@@ -60,7 +60,7 @@ public final class RtNrdResolvePipeline {
                     "vkCreateDescriptorSetLayout(NRD resolve)");
             long setLayout = output.get(0);
             VkDescriptorPoolSize.Buffer poolSize = VkDescriptorPoolSize.calloc(1, stack)
-                    .type(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).descriptorCount(4);
+                    .type(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).descriptorCount(9);
             VkDescriptorPoolCreateInfo poolInfo = VkDescriptorPoolCreateInfo.calloc(stack).sType$Default()
                     .maxSets(1).pPoolSizes(poolSize);
             check(VK10.vkCreateDescriptorPool(device, poolInfo, null, output),
@@ -92,12 +92,14 @@ public final class RtNrdResolvePipeline {
         }
     }
 
-    public void setImages(long sh0, long sh1, long normalRoughness, long output) {
+    public void setImages(long diffuseSh0, long diffuseSh1, long specularSh0, long specularSh1,
+            long normalRoughness, long diffuseAlbedo, long specularAlbedo, long viewDirection, long output) {
         try (MemoryStack stack = MemoryStack.stackPush()) {
-            long[] views = {sh0, sh1, normalRoughness, output};
-            VkDescriptorImageInfo.Buffer images = VkDescriptorImageInfo.calloc(4, stack);
-            VkWriteDescriptorSet.Buffer writes = VkWriteDescriptorSet.calloc(4, stack);
-            for (int i = 0; i < 4; i++) {
+            long[] views = {diffuseSh0, diffuseSh1, specularSh0, specularSh1,
+                    normalRoughness, diffuseAlbedo, specularAlbedo, viewDirection, output};
+            VkDescriptorImageInfo.Buffer images = VkDescriptorImageInfo.calloc(9, stack);
+            VkWriteDescriptorSet.Buffer writes = VkWriteDescriptorSet.calloc(9, stack);
+            for (int i = 0; i < 9; i++) {
                 images.get(i).imageView(views[i]).imageLayout(VK10.VK_IMAGE_LAYOUT_GENERAL);
                 writes.get(i).sType$Default().dstSet(descriptorSet).dstBinding(i).descriptorCount(1)
                         .descriptorType(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)

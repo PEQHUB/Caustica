@@ -455,6 +455,23 @@ public class CausticaSettingsScreen extends Screen {
                 .activeWhen(this::nrdControlsActive));
         nrd.add(toggle(Component.translatable("caustica.options.rt.nrd.sh"),
                 CausticaConfig.Rt.Nrd.SPHERICAL_HARMONICS).activeWhen(this::nrdControlsActive));
+        nrd.add(new Dropdown<>(180, Component.translatable("caustica.options.rt.nrd.upscaleMode"),
+                List.of("native", "quality", "balanced", "performance", "ultra-performance", "custom"),
+                CausticaConfig.Rt.Nrd.UPSCALE_MODE::configuredValue,
+                CausticaConfig.Rt.Nrd.UPSCALE_MODE::set,
+                value -> Component.translatable("caustica.options.rt.nrd.upscaleMode." + value), null)
+                .activeWhen(this::nrdControlsActive));
+        nrd.add(floatSlider(Component.translatable("caustica.options.rt.nrd.renderScale"),
+                CausticaConfig.Rt.Nrd.CUSTOM_RENDER_SCALE, 0.25, 1.0,
+                value -> String.format("%.0f%%", value * 100.0))
+                .activeWhen(() -> nrdControlsActive()
+                        && "custom".equals(CausticaConfig.Rt.Nrd.UPSCALE_MODE.configuredValue())));
+        nrd.add(new Dropdown<>(180, Component.translatable("caustica.options.rt.nrd.upscaleFilter"),
+                List.of("linear", "nearest"), CausticaConfig.Rt.Nrd.UPSCALE_FILTER::configuredValue,
+                CausticaConfig.Rt.Nrd.UPSCALE_FILTER::set,
+                value -> Component.translatable("caustica.options.rt.nrd.upscaleFilter." + value), null)
+                .activeWhen(() -> nrdControlsActive()
+                        && !"native".equals(CausticaConfig.Rt.Nrd.UPSCALE_MODE.configuredValue())));
         nrd.add(toggle(Component.translatable("caustica.options.rt.nrd.antiFirefly"),
                 CausticaConfig.Rt.Nrd.ANTI_FIREFLY).activeWhen(this::nrdControlsActive));
         nrd.add(toggle(Component.translatable("caustica.options.rt.nrd.antilag"),
@@ -511,14 +528,75 @@ public class CausticaSettingsScreen extends Screen {
         nrd.add(floatSlider(Component.translatable("caustica.options.rt.nrd.splitScreen"),
                 CausticaConfig.Rt.Nrd.SPLIT_SCREEN, 0.0, 1.0, value -> String.format("%.0f%% noisy", value * 100.0))
                 .activeWhen(this::nrdControlsActive));
-        addBundle("NRD mode", "Vendor-neutral Vulkan denoising; SH stores directional radiance at a higher memory cost");
-        addGrid(nrd.subList(0, 4));
+        addBundle("NRD mode & upscale", "Diffuse/specular Vulkan denoising at selectable render resolution; SH stores directional radiance at a higher cost");
+        addGrid(nrd.subList(0, 7));
         addBundle("NRD temporal history", "Accumulation length and post-disocclusion reconstruction");
-        addGrid(nrd.subList(4, 8));
+        addGrid(nrd.subList(7, 11));
         addBundle("NRD spatial filtering", "Prepass, blur footprint, surface rejection, and RELAX wavelets");
-        addGrid(nrd.subList(8, 15));
+        addGrid(nrd.subList(11, 18));
         addBundle("NRD hit distance & diagnostics", "REBLUR normalization, antilag response, and live A/B split");
-        addGrid(nrd.subList(15, nrd.size()));
+        addGrid(nrd.subList(18, nrd.size()));
+
+        List<AbstractWidget> advanced = new ArrayList<>();
+        advanced.add(intSlider(Component.translatable("caustica.options.rt.nrd.stabilizedHistory"),
+                CausticaConfig.Rt.Nrd.MAX_STABILIZED_FRAMES, 0, 255, value -> String.format("%.0f frames", value))
+                .activeWhen(this::nrdControlsActive));
+        advanced.add(floatSlider(Component.translatable("caustica.options.rt.nrd.specularPrepass"),
+                CausticaConfig.Rt.Nrd.SPECULAR_PREPASS_BLUR_RADIUS, 0.0, 100.0, value -> String.format("%.1f px", value))
+                .activeWhen(this::nrdControlsActive));
+        advanced.add(floatSlider(Component.translatable("caustica.options.rt.nrd.fastClampSigma"),
+                CausticaConfig.Rt.Nrd.FAST_HISTORY_CLAMP_SIGMA, 1.0, 3.0, value -> String.format("%.2f", value))
+                .activeWhen(this::nrdControlsActive));
+        advanced.add(floatSlider(Component.translatable("caustica.options.rt.nrd.minHitWeight"),
+                CausticaConfig.Rt.Nrd.MIN_HIT_DISTANCE_WEIGHT, 0.001, 0.2, value -> String.format("%.3f", value))
+                .activeWhen(this::nrdControlsActive));
+        advanced.add(floatSlider(Component.translatable("caustica.options.rt.nrd.fireflyScale"),
+                CausticaConfig.Rt.Nrd.FIREFLY_SUPPRESSOR_SCALE, 1.0, 3.0, value -> String.format("%.2f", value))
+                .activeWhen(this::nrdControlsActive));
+        advanced.add(floatSlider(Component.translatable("caustica.options.rt.nrd.responsiveRoughness"),
+                CausticaConfig.Rt.Nrd.RESPONSIVE_ROUGHNESS_THRESHOLD, 0.0, 1.0, value -> String.format("%.3f", value))
+                .activeWhen(this::nrdControlsActive));
+        advanced.add(intSlider(Component.translatable("caustica.options.rt.nrd.responsiveMinFrames"),
+                CausticaConfig.Rt.Nrd.RESPONSIVE_MIN_FRAMES, 0, 3, value -> String.format("%.0f frames", value))
+                .activeWhen(this::nrdControlsActive));
+        advanced.add(floatSlider(Component.translatable("caustica.options.rt.nrd.convergenceScale"),
+                CausticaConfig.Rt.Nrd.CONVERGENCE_SCALE, 0.1, 4.0, value -> String.format("%.2f", value))
+                .activeWhen(this::nrdControlsActive));
+        advanced.add(floatSlider(Component.translatable("caustica.options.rt.nrd.convergenceBase"),
+                CausticaConfig.Rt.Nrd.CONVERGENCE_BASE, 0.0, 1.0, value -> String.format("%.3f", value))
+                .activeWhen(this::nrdControlsActive));
+        advanced.add(floatSlider(Component.translatable("caustica.options.rt.nrd.convergenceFraction"),
+                CausticaConfig.Rt.Nrd.CONVERGENCE_HISTORY_FRACTION, 0.0, 1.0, value -> String.format("%.3f", value))
+                .activeWhen(this::nrdControlsActive));
+        advanced.add(floatSlider(Component.translatable("caustica.options.rt.nrd.antilagSensitivity"),
+                CausticaConfig.Rt.Nrd.ANTILAG_SENSITIVITY, 0.1, 10.0, value -> String.format("%.2f", value))
+                .activeWhen(() -> nrdControlsActive() && CausticaConfig.Rt.Nrd.ANTILAG.configuredValue()));
+        addBundle("REBLUR advanced", "Stabilization, responsive accumulation, convergence, and sample rejection controls");
+        addGrid(advanced);
+
+        List<AbstractWidget> relax = new ArrayList<>();
+        relax.add(floatSlider(Component.translatable("caustica.options.rt.nrd.relaxNormalPower"),
+                CausticaConfig.Rt.Nrd.RELAX_HISTORY_NORMAL_POWER, 0.1, 64.0, value -> String.format("%.2f", value)));
+        relax.add(floatSlider(Component.translatable("caustica.options.rt.nrd.relaxDiffusePhi"),
+                CausticaConfig.Rt.Nrd.RELAX_DIFFUSE_PHI_LUMINANCE, 0.1, 10.0, value -> String.format("%.2f", value)));
+        relax.add(floatSlider(Component.translatable("caustica.options.rt.nrd.relaxSpecularPhi"),
+                CausticaConfig.Rt.Nrd.RELAX_SPECULAR_PHI_LUMINANCE, 0.1, 10.0, value -> String.format("%.2f", value)));
+        relax.add(floatSlider(Component.translatable("caustica.options.rt.nrd.relaxDepthThreshold"),
+                CausticaConfig.Rt.Nrd.RELAX_DEPTH_THRESHOLD, 0.0001, 0.1, value -> String.format("%.4f", value)));
+        relax.add(floatSlider(Component.translatable("caustica.options.rt.nrd.relaxVarianceBoost"),
+                CausticaConfig.Rt.Nrd.RELAX_SPECULAR_VARIANCE_BOOST, 0.0, 4.0, value -> String.format("%.2f", value)));
+        relax.add(floatSlider(Component.translatable("caustica.options.rt.nrd.relaxLobeSlack"),
+                CausticaConfig.Rt.Nrd.RELAX_SPECULAR_LOBE_SLACK, 0.0, 1.0, value -> String.format("%.3f", value)));
+        relax.add(toggle(Component.translatable("caustica.options.rt.nrd.relaxRoughnessEdges"),
+                CausticaConfig.Rt.Nrd.RELAX_ROUGHNESS_EDGE_STOPPING));
+        relax.add(floatSlider(Component.translatable("caustica.options.rt.nrd.relaxAntilagAcceleration"),
+                CausticaConfig.Rt.Nrd.RELAX_ANTILAG_ACCELERATION, 0.0, 1.0, value -> String.format("%.3f", value)));
+        relax.add(floatSlider(Component.translatable("caustica.options.rt.nrd.relaxAntilagTemporal"),
+                CausticaConfig.Rt.Nrd.RELAX_ANTILAG_TEMPORAL_SIGMA, 0.01, 10.0, value -> String.format("%.2f", value)));
+        relax.add(floatSlider(Component.translatable("caustica.options.rt.nrd.relaxAntilagReset"),
+                CausticaConfig.Rt.Nrd.RELAX_ANTILAG_RESET, 0.0, 1.0, value -> String.format("%.3f", value)));
+        addBundle("RELAX advanced", "Wavelet edge stopping, variance response, and antilag controls");
+        addGrid(relax);
     }
 
     private boolean dlssControlsActive() {

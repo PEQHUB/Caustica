@@ -242,22 +242,30 @@ abstract class CompileShaders extends DefaultTask {
 				// Build both hit-object encodings from one source; RtDeviceBringup selects the supported backend.
 				// Live rendering omits invocation reordering. Offline is an independent throughput specialization.
 				compileOneSlang(src, spv, base == "world.rgen"
-						? ["-DCAUSTICA_OFFLINE=0", "-DCAUSTICA_SER=0", "-O2", "-fp-mode", "precise",
+						? ["-DCAUSTICA_OFFLINE=0", "-DCAUSTICA_SER=0", "-DCAUSTICA_PORTABLE_TRACE=0", "-O2", "-fp-mode", "precise",
 						   "-capability", "spvShaderInvocationReorderEXT"] : [])
 				if (base == "world.rgen") {
 					compileOneSlang(src, new File(scratchDir, "world_base.rgen.spv"),
-							["-DCAUSTICA_OFFLINE=0", "-DCAUSTICA_SER=0", "-O2", "-fp-mode", "precise"])
+							["-DCAUSTICA_OFFLINE=0", "-DCAUSTICA_SER=0", "-DCAUSTICA_PORTABLE_TRACE=1", "-O2", "-fp-mode", "precise"])
 					compileOneSlang(src, new File(scratchDir, "world_nv.rgen.spv"),
-							["-DCAUSTICA_OFFLINE=0", "-DCAUSTICA_SER=0", "-O2", "-fp-mode", "precise",
+							["-DCAUSTICA_OFFLINE=0", "-DCAUSTICA_SER=0", "-DCAUSTICA_PORTABLE_TRACE=0", "-O2", "-fp-mode", "precise",
 							 "-capability", "spvShaderInvocationReorderNV"])
+					def nrdDefines = ["-DCAUSTICA_OFFLINE=0", "-DCAUSTICA_SER=0", "-DCAUSTICA_NRD=1",
+							"-O2", "-fp-mode", "precise"]
+					compileOneSlang(src, new File(scratchDir, "world_nrd_base.rgen.spv"),
+							nrdDefines + ["-DCAUSTICA_PORTABLE_TRACE=1"])
+					compileOneSlang(src, new File(scratchDir, "world_nrd.rgen.spv"),
+							nrdDefines + ["-DCAUSTICA_PORTABLE_TRACE=0", "-capability", "spvShaderInvocationReorderEXT"])
+					compileOneSlang(src, new File(scratchDir, "world_nrd_nv.rgen.spv"),
+							nrdDefines + ["-DCAUSTICA_PORTABLE_TRACE=0", "-capability", "spvShaderInvocationReorderNV"])
 					// Offline uses the same transport/material source but a separate entrypoint binary and sampler.
 					compileOneSlang(src, new File(scratchDir, "world_offline_base.rgen.spv"),
-							["-DCAUSTICA_OFFLINE=1", "-DCAUSTICA_SER=0", "-O2", "-fp-mode", "precise"])
+							["-DCAUSTICA_OFFLINE=1", "-DCAUSTICA_SER=0", "-DCAUSTICA_PORTABLE_TRACE=1", "-O2", "-fp-mode", "precise"])
 					compileOneSlang(src, new File(scratchDir, "world_offline.rgen.spv"),
-							["-DCAUSTICA_OFFLINE=1", "-DCAUSTICA_SER=1", "-O2", "-fp-mode", "precise",
+							["-DCAUSTICA_OFFLINE=1", "-DCAUSTICA_SER=1", "-DCAUSTICA_PORTABLE_TRACE=0", "-O2", "-fp-mode", "precise",
 							 "-capability", "spvShaderInvocationReorderEXT"])
 					compileOneSlang(src, new File(scratchDir, "world_offline_nv.rgen.spv"),
-							["-DCAUSTICA_OFFLINE=1", "-DCAUSTICA_SER=1", "-O2", "-fp-mode", "precise",
+							["-DCAUSTICA_OFFLINE=1", "-DCAUSTICA_SER=1", "-DCAUSTICA_PORTABLE_TRACE=0", "-O2", "-fp-mode", "precise",
 							 "-capability", "spvShaderInvocationReorderNV"])
 				}
 			} else {
@@ -292,43 +300,43 @@ abstract class CompileShaders extends DefaultTask {
 			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc.rgen.spv"),
 					queryDefines + sharcInclude + ["-capability", "spvShaderInvocationReorderEXT"])
 			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_base.rgen.spv"),
-					queryDefines + sharcInclude)
+					queryDefines + sharcInclude + ["-DCAUSTICA_PORTABLE_TRACE=1"])
 			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_nv.rgen.spv"),
 					queryDefines + sharcInclude + ["-capability", "spvShaderInvocationReorderNV"])
 			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_diffuse.rgen.spv"),
 					diffuseQueryDefines + sharcInclude + ["-capability", "spvShaderInvocationReorderEXT"])
 			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_diffuse_base.rgen.spv"),
-					diffuseQueryDefines + sharcInclude)
+					diffuseQueryDefines + sharcInclude + ["-DCAUSTICA_PORTABLE_TRACE=1"])
 			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_diffuse_nv.rgen.spv"),
 					diffuseQueryDefines + sharcInclude + ["-capability", "spvShaderInvocationReorderNV"])
 			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_primary.rgen.spv"),
 					primaryQueryDefines + sharcInclude + ["-capability", "spvShaderInvocationReorderEXT"])
 			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_primary_base.rgen.spv"),
-					primaryQueryDefines + sharcInclude)
+					primaryQueryDefines + sharcInclude + ["-DCAUSTICA_PORTABLE_TRACE=1"])
 			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_primary_nv.rgen.spv"),
 					primaryQueryDefines + sharcInclude + ["-capability", "spvShaderInvocationReorderNV"])
 			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_update.rgen.spv"),
 					updateDefines + sharcInclude + ["-capability", "spvShaderInvocationReorderEXT"])
 			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_update_base.rgen.spv"),
-					updateDefines + sharcInclude)
+					updateDefines + sharcInclude + ["-DCAUSTICA_PORTABLE_TRACE=1"])
 			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_update_nv.rgen.spv"),
 					updateDefines + sharcInclude + ["-capability", "spvShaderInvocationReorderNV"])
 			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_diagnostic.rgen.spv"),
 					diagnosticQueryDefines + sharcInclude + ["-capability", "spvShaderInvocationReorderEXT"])
 			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_diagnostic_base.rgen.spv"),
-					diagnosticQueryDefines + sharcInclude)
+					diagnosticQueryDefines + sharcInclude + ["-DCAUSTICA_PORTABLE_TRACE=1"])
 			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_diagnostic_nv.rgen.spv"),
 					diagnosticQueryDefines + sharcInclude + ["-capability", "spvShaderInvocationReorderNV"])
 			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_primary_diagnostic.rgen.spv"),
 					primaryDiagnosticQueryDefines + sharcInclude + ["-capability", "spvShaderInvocationReorderEXT"])
 			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_primary_diagnostic_base.rgen.spv"),
-					primaryDiagnosticQueryDefines + sharcInclude)
+					primaryDiagnosticQueryDefines + sharcInclude + ["-DCAUSTICA_PORTABLE_TRACE=1"])
 			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_primary_diagnostic_nv.rgen.spv"),
 					primaryDiagnosticQueryDefines + sharcInclude + ["-capability", "spvShaderInvocationReorderNV"])
 			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_update_diagnostic.rgen.spv"),
 					diagnosticUpdateDefines + sharcInclude + ["-capability", "spvShaderInvocationReorderEXT"])
 			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_update_diagnostic_base.rgen.spv"),
-					diagnosticUpdateDefines + sharcInclude)
+					diagnosticUpdateDefines + sharcInclude + ["-DCAUSTICA_PORTABLE_TRACE=1"])
 			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_update_diagnostic_nv.rgen.spv"),
 					diagnosticUpdateDefines + sharcInclude + ["-capability", "spvShaderInvocationReorderNV"])
 			[
@@ -391,6 +399,13 @@ abstract class CompileShaders extends DefaultTask {
 						throw new GradleException("Live raygen sampler must be fully inlined: ${name} calls ${functionName}")
 					}
 				}
+			}
+		}
+		["world_nrd_base.rgen.spv", "world_nrd.rgen.spv", "world_nrd_nv.rgen.spv"].each { name ->
+			def raygen = new File(scratchDir, name)
+			if (!raygen.isFile() || raygen.length() > 152_000L) {
+				throw new GradleException("NRD world raygen complexity budget exceeded: ${name} is "
+						+ "${raygen.isFile() ? raygen.length() : 'missing'} bytes (limit 152000)")
 			}
 		}
 		["world_offline_base.rgen.spv", "world_offline.rgen.spv", "world_offline_nv.rgen.spv"].each { name ->
@@ -832,6 +847,9 @@ def verifyProductionArtifact = tasks.register("verifyProductionArtifact") {
 		def required = [
 			"fabric.mod.json",
 			"caustica/rt/world_base.rgen.spv",
+			"caustica/rt/world_nrd_base.rgen.spv",
+			"caustica/rt/world_nrd.rgen.spv",
+			"caustica/rt/world_nrd_nv.rgen.spv",
 			"caustica/rt/world_offline_base.rgen.spv",
 			"caustica/rt/world_offline.rgen.spv",
 			"caustica/rt/world_offline_nv.rgen.spv",

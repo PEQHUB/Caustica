@@ -175,7 +175,8 @@ public final class RtComposite {
     // Real inline push constants (fast constant-bank reads), separate from the WorldPush BDA ring above.
     // tableAddr/entityTableAddr/frameIndex are duplicated so hit shaders skip a global-memory dereference;
     // PushAddrData is generated from the same Slang module and owns this second ABI as well.
-    private static final int GUIDE_COUNT = 14; // shared reconstruction guides + NRD signal, SH1, and view-Z
+    private static final int BASE_GUIDE_COUNT = 11;
+    private static final int NRD_GUIDE_COUNT = 17;
     private static final int FRAME_FLAG_RR_GUIDES = 1 << 5;
     private static final int FRAME_FLAG_FG_GUIDES = 1 << 6;
     private static final int FRAME_FLAG_OFFLINE_GROUND_TRUTH = 1 << 7;
@@ -240,6 +241,7 @@ public final class RtComposite {
     }
 
     private RtPipeline worldPipeline;
+    private boolean worldPipelineNrd;
     private RtPipeline offlinePipeline;
     private RtPipeline sharcUpdatePipeline;
     private RtPipeline sharcQueryPipeline;
@@ -343,8 +345,14 @@ public final class RtComposite {
     private RtImage gNrdSh1;
     private RtImage gNrdViewZ;
     private RtImage gNrdSignal;
+    private RtImage gNrdSpecSh1;
+    private RtImage gNrdSpecSignal;
+    private RtImage gNrdViewDirection;
     private RtImage nrdRawOutput;
     private RtImage nrdSh1Output;
+    private RtImage nrdSpecRawOutput;
+    private RtImage nrdSpecSh1Output;
+    private RtImage nrdResolvedOutput;
     private RtImage gDepthHistoryA;
     private RtImage gDepthHistoryB;
     private RtImage gDisocclusion;
@@ -768,6 +776,14 @@ public final class RtComposite {
     }
 
     private RtPipeline ensureWorld(RtContext ctx) {
+        boolean requestedNrd = RtReconstruction.usesNrd();
+        if (worldPipeline != null && worldPipelineNrd != requestedNrd) {
+            ctx.waitIdle("reconstruction shader variant change");
+            worldPipeline.destroy();
+            worldPipeline = null;
+            destroyOfflineResources();
+            destroySharcResources();
+        }
         if (worldPipeline == null) {
             if (blockAtlasView() == 0L || celestialsAtlasView() == 0L) {
                 throw new IllegalStateException("world and celestial atlases must be ready before RT pipeline creation");
@@ -783,10 +799,13 @@ public final class RtComposite {
                 skyViewStateValid = false;
             }
             bindlessTextureCapacity = RtEntityTextures.maxTextures();
-            worldPipeline = RtPipeline.create(ctx, RtDeviceBringup.worldRaygenShader(),
+            boolean nrdPipeline = requestedNrd;
+            worldPipeline = RtPipeline.create(ctx, RtDeviceBringup.worldRaygenShader(nrdPipeline),
                     new String[]{"world.rmiss.spv", "world_guide.rmiss.spv", "world_shadow.rmiss.spv"},
-                    "world.rchit.spv", "world_shadow.rchit.spv", "world.rahit.spv",
-                    WorldPushConstantsData.BYTE_SIZE, true, GUIDE_COUNT, bindlessTextureCapacity, true, true);
+                    "world.rchit.spv", RtDeviceBringup.shadowClosestHitShader(), "world.rahit.spv",
+                    WorldPushConstantsData.BYTE_SIZE, true,
+                    nrdPipeline ? NRD_GUIDE_COUNT : BASE_GUIDE_COUNT, bindlessTextureCapacity, true, true);
+            worldPipelineNrd = nrdPipeline;
             // Per-frame push data lives in this BDA ring; the pipeline only pushes its address.
             if (pushRing == null) {
                 pushRing = new RtBuffer[PUSH_RING];
@@ -816,8 +835,8 @@ public final class RtComposite {
         if (offlinePipeline == null) {
             offlinePipeline = RtPipeline.create(ctx, RtDeviceBringup.offlineWorldRaygenShader(),
                     new String[]{"world.rmiss.spv", "world_guide.rmiss.spv", "world_shadow.rmiss.spv"},
-                    "world.rchit.spv", "world_shadow.rchit.spv", "world.rahit.spv",
-                    WorldPushConstantsData.BYTE_SIZE, true, GUIDE_COUNT, bindlessTextureCapacity, true, true);
+                    "world.rchit.spv", RtDeviceBringup.shadowClosestHitShader(), "world.rahit.spv",
+                    WorldPushConstantsData.BYTE_SIZE, true, BASE_GUIDE_COUNT, bindlessTextureCapacity, true, true);
             pathSampleSequence = RtPathSampleSequence.create(ctx);
             if (output != null) {
                 offlinePipeline.setStorageImage(output.view);
@@ -840,7 +859,8 @@ public final class RtComposite {
     }
 
     private boolean sharcRequested() {
-        return CausticaConfig.Rt.Sharc.ENABLED.value() && RtSharcSupport.available();
+        return !RtReconstruction.usesNrd()
+                && CausticaConfig.Rt.Sharc.ENABLED.value() && RtSharcSupport.available();
     }
 
     /** Lazily owns every SHaRC-only allocation so disabled/offline mode retains the baseline ABI and memory use. */
@@ -864,16 +884,16 @@ public final class RtComposite {
         try {
             sharcUpdatePipeline = RtPipeline.create(ctx, RtDeviceBringup.sharcUpdateRaygenShader(),
                     new String[]{"world_sharc.rmiss.spv", "world_sharc_guide.rmiss.spv", "world_shadow.rmiss.spv"},
-                    "world_sharc.rchit.spv", "world_shadow.rchit.spv", "world_sharc.rahit.spv", SharcPushAddrData.BYTE_SIZE,
-                    true, GUIDE_COUNT, bindlessTextureCapacity, true, true);
+                    "world_sharc.rchit.spv", RtDeviceBringup.shadowClosestHitShader(), "world_sharc.rahit.spv", SharcPushAddrData.BYTE_SIZE,
+                    true, BASE_GUIDE_COUNT, bindlessTextureCapacity, true, true);
             sharcQueryPipeline = RtPipeline.create(ctx, RtDeviceBringup.sharcQueryRaygenShader(),
                     new String[]{"world_sharc.rmiss.spv", "world_sharc_guide.rmiss.spv", "world_shadow.rmiss.spv"},
-                    "world_sharc.rchit.spv", "world_shadow.rchit.spv", "world_sharc.rahit.spv", SharcPushAddrData.BYTE_SIZE,
-                    true, GUIDE_COUNT, bindlessTextureCapacity, true, true);
+                    "world_sharc.rchit.spv", RtDeviceBringup.shadowClosestHitShader(), "world_sharc.rahit.spv", SharcPushAddrData.BYTE_SIZE,
+                    true, BASE_GUIDE_COUNT, bindlessTextureCapacity, true, true);
             sharcDiffuseQueryPipeline = RtPipeline.create(ctx, RtDeviceBringup.sharcDiffuseQueryRaygenShader(),
                     new String[]{"world_sharc.rmiss.spv", "world_sharc_guide.rmiss.spv", "world_shadow.rmiss.spv"},
-                    "world_sharc.rchit.spv", "world_shadow.rchit.spv", "world_sharc.rahit.spv", SharcPushAddrData.BYTE_SIZE,
-                    true, GUIDE_COUNT, bindlessTextureCapacity, true, true);
+                    "world_sharc.rchit.spv", RtDeviceBringup.shadowClosestHitShader(), "world_sharc.rahit.spv", SharcPushAddrData.BYTE_SIZE,
+                    true, BASE_GUIDE_COUNT, bindlessTextureCapacity, true, true);
             sharcResolvePipeline = RtSharcResolvePipeline.create(ctx);
             sharcCache = RtSharcCache.create(ctx, exponent);
             sharcCache.requestReset(sharcCreationResetReason);
@@ -904,8 +924,8 @@ public final class RtComposite {
         try {
             sharcPrimaryQueryPipeline = RtPipeline.create(ctx, RtDeviceBringup.sharcPrimaryQueryRaygenShader(),
                     new String[]{"world_sharc.rmiss.spv", "world_sharc_guide.rmiss.spv", "world_shadow.rmiss.spv"},
-                    "world_sharc.rchit.spv", "world_shadow.rchit.spv", "world_sharc.rahit.spv", SharcPushAddrData.BYTE_SIZE,
-                    true, GUIDE_COUNT, bindlessTextureCapacity, true, true);
+                    "world_sharc.rchit.spv", RtDeviceBringup.shadowClosestHitShader(), "world_sharc.rahit.spv", SharcPushAddrData.BYTE_SIZE,
+                    true, BASE_GUIDE_COUNT, bindlessTextureCapacity, true, true);
             if (output != null) {
                 sharcPrimaryQueryPipeline.setStorageImage(output.view);
                 bindGuideImages();
@@ -943,22 +963,22 @@ public final class RtComposite {
         if (sharcDiagnosticUpdatePipeline == null) {
             sharcDiagnosticUpdatePipeline = RtPipeline.create(ctx, RtDeviceBringup.sharcDiagnosticUpdateRaygenShader(),
                     new String[]{"world_sharc.rmiss.spv", "world_sharc_guide.rmiss.spv", "world_shadow.rmiss.spv"},
-                    "world_sharc.rchit.spv", "world_shadow.rchit.spv", "world_sharc.rahit.spv", SharcPushAddrData.BYTE_SIZE,
-                    true, GUIDE_COUNT, bindlessTextureCapacity, true, true);
+                    "world_sharc.rchit.spv", RtDeviceBringup.shadowClosestHitShader(), "world_sharc.rahit.spv", SharcPushAddrData.BYTE_SIZE,
+                    true, BASE_GUIDE_COUNT, bindlessTextureCapacity, true, true);
         }
         if (sharcDiagnosticQueryPipeline == null) {
             sharcDiagnosticQueryPipeline = RtPipeline.create(ctx, RtDeviceBringup.sharcDiagnosticQueryRaygenShader(),
                     new String[]{"world_sharc.rmiss.spv", "world_sharc_guide.rmiss.spv", "world_shadow.rmiss.spv"},
-                    "world_sharc.rchit.spv", "world_shadow.rchit.spv", "world_sharc.rahit.spv", SharcPushAddrData.BYTE_SIZE,
-                    true, GUIDE_COUNT, bindlessTextureCapacity, true, true);
+                    "world_sharc.rchit.spv", RtDeviceBringup.shadowClosestHitShader(), "world_sharc.rahit.spv", SharcPushAddrData.BYTE_SIZE,
+                    true, BASE_GUIDE_COUNT, bindlessTextureCapacity, true, true);
         }
         if (CausticaConfig.Rt.Sharc.PRIMARY_DIFFUSE_REUSE.value()
                 && sharcPrimaryDiagnosticQueryPipeline == null) {
             sharcPrimaryDiagnosticQueryPipeline = RtPipeline.create(ctx,
                     RtDeviceBringup.sharcPrimaryDiagnosticQueryRaygenShader(),
                     new String[]{"world_sharc.rmiss.spv", "world_sharc_guide.rmiss.spv", "world_shadow.rmiss.spv"},
-                    "world_sharc.rchit.spv", "world_shadow.rchit.spv", "world_sharc.rahit.spv", SharcPushAddrData.BYTE_SIZE,
-                    true, GUIDE_COUNT, bindlessTextureCapacity, true, true);
+                    "world_sharc.rchit.spv", RtDeviceBringup.shadowClosestHitShader(), "world_sharc.rahit.spv", SharcPushAddrData.BYTE_SIZE,
+                    true, BASE_GUIDE_COUNT, bindlessTextureCapacity, true, true);
         }
         if (output != null) {
             sharcDiagnosticUpdatePipeline.setStorageImage(output.view);
@@ -1176,9 +1196,14 @@ public final class RtComposite {
                 pipeline.setExtraStorageImage(5, gSpecMotion.view);
                 pipeline.setExtraStorageImage(7, gAnimatedGuide.view);
                 pipeline.setExtraStorageImage(10, gDiffuseRayDirectionHitDistance.view);
-                pipeline.setExtraStorageImage(11, gNrdSh1.view);
-                pipeline.setExtraStorageImage(12, gNrdViewZ.view);
-                pipeline.setExtraStorageImage(13, gNrdSignal.view);
+            }
+            if (RtReconstruction.usesNrd() && worldPipeline != null && gNrdSignal != null) {
+                worldPipeline.setExtraStorageImage(11, gNrdSh1.view);
+                worldPipeline.setExtraStorageImage(12, gNrdViewZ.view);
+                worldPipeline.setExtraStorageImage(13, gNrdSignal.view);
+                worldPipeline.setExtraStorageImage(14, gNrdSpecSh1.view);
+                worldPipeline.setExtraStorageImage(15, gNrdSpecSignal.view);
+                worldPipeline.setExtraStorageImage(16, gNrdViewDirection.view);
             }
         }
         if (offlinePipeline != null && groundTruthAccum != null
@@ -1238,6 +1263,18 @@ public final class RtComposite {
             gNrdSignal.destroy();
             gNrdSignal = null;
         }
+        if (gNrdSpecSh1 != null) {
+            gNrdSpecSh1.destroy();
+            gNrdSpecSh1 = null;
+        }
+        if (gNrdSpecSignal != null) {
+            gNrdSpecSignal.destroy();
+            gNrdSpecSignal = null;
+        }
+        if (gNrdViewDirection != null) {
+            gNrdViewDirection.destroy();
+            gNrdViewDirection = null;
+        }
         if (nrdRawOutput != null) {
             nrdRawOutput.destroy();
             nrdRawOutput = null;
@@ -1246,6 +1283,18 @@ public final class RtComposite {
             nrdSh1Output.destroy();
             nrdSh1Output = null;
         }
+        if (nrdSpecRawOutput != null) {
+            nrdSpecRawOutput.destroy();
+            nrdSpecRawOutput = null;
+        }
+        if (nrdSpecSh1Output != null) {
+            nrdSpecSh1Output.destroy();
+            nrdSpecSh1Output = null;
+        }
+        if (nrdResolvedOutput != null && nrdResolvedOutput != rrOutput) {
+            nrdResolvedOutput.destroy();
+        }
+        nrdResolvedOutput = null;
         if (nrdResolvePipeline != null) {
             nrdResolvePipeline.destroy();
             nrdResolvePipeline = null;
@@ -1388,6 +1437,7 @@ public final class RtComposite {
         int rrGuideW = rrOperational ? renderW : 1;
         int rrGuideH = rrOperational ? renderH : 1;
         boolean nrdOperational = rrOperational && RtReconstruction.usesNrd();
+        boolean nrdSh = nrdOperational && CausticaConfig.Rt.Nrd.SPHERICAL_HARMONICS.value();
         int motionGuideW = motionGuidesRequired ? renderW : 1;
         int motionGuideH = motionGuidesRequired ? renderH : 1;
         int depthGuideW = (motionGuidesRequired || exposureDepthRequired) ? renderW : 1;
@@ -1412,12 +1462,20 @@ public final class RtComposite {
                 "DLSSD animated-surface responsivity");
         gDiffuseRayDirectionHitDistance = ctx.createStorageImage(rrGuideW, rrGuideH,
                 VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "DLSSD diffuse ray direction + hit distance");
-        gNrdSh1 = ctx.createStorageImage(nrdOperational ? renderW : 1, nrdOperational ? renderH : 1,
-                VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "NRD directional SH1 signal");
-        gNrdViewZ = ctx.createStorageImage(nrdOperational ? renderW : 1, nrdOperational ? renderH : 1,
-                VK10.VK_FORMAT_R32_SFLOAT, "NRD linear view depth");
-        gNrdSignal = ctx.createStorageImage(nrdOperational ? renderW : 1, nrdOperational ? renderH : 1,
-                VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "NRD packed input signal");
+        if (RtReconstruction.usesNrd()) {
+            gNrdSh1 = ctx.createStorageImage(nrdSh ? renderW : 1, nrdSh ? renderH : 1,
+                    VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "NRD directional SH1 signal");
+            gNrdViewZ = ctx.createStorageImage(nrdOperational ? renderW : 1, nrdOperational ? renderH : 1,
+                    VK10.VK_FORMAT_R32_SFLOAT, "NRD linear view depth");
+            gNrdSignal = ctx.createStorageImage(nrdOperational ? renderW : 1, nrdOperational ? renderH : 1,
+                    VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "NRD packed input signal");
+            gNrdSpecSh1 = ctx.createStorageImage(nrdSh ? renderW : 1, nrdSh ? renderH : 1,
+                    VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "NRD specular directional SH1 signal");
+            gNrdSpecSignal = ctx.createStorageImage(nrdOperational ? renderW : 1, nrdOperational ? renderH : 1,
+                    VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "NRD packed specular input signal");
+            gNrdViewDirection = ctx.createStorageImage(nrdSh ? renderW : 1, nrdSh ? renderH : 1,
+                    VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "NRD view direction and specular roughness");
+        }
         gDepthHistoryA = ctx.createStorageImage(rrGuideW, rrGuideH, VK10.VK_FORMAT_R32_SFLOAT,
                 "DLSSD depth history A");
         gDepthHistoryB = ctx.createStorageImage(rrGuideW, rrGuideH, VK10.VK_FORMAT_R32_SFLOAT,
@@ -1441,10 +1499,19 @@ public final class RtComposite {
         if (nrdOperational) {
             nrdRawOutput = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R16G16B16A16_SFLOAT,
                     "NRD packed output");
-            nrdSh1Output = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R16G16B16A16_SFLOAT,
-                    "NRD SH1 output");
+            nrdSh1Output = ctx.createStorageImage(nrdSh ? renderW : 1, nrdSh ? renderH : 1,
+                    VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "NRD SH1 output");
+            nrdSpecRawOutput = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R16G16B16A16_SFLOAT,
+                    "NRD packed specular output");
+            nrdSpecSh1Output = ctx.createStorageImage(nrdSh ? renderW : 1, nrdSh ? renderH : 1,
+                    VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "NRD specular SH1 output");
+            nrdResolvedOutput = renderW == width && renderH == height ? rrOutput
+                    : ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R16G16B16A16_SFLOAT,
+                            "NRD resolved render-resolution output");
             nrdResolvePipeline = RtNrdResolvePipeline.create(ctx);
-            nrdResolvePipeline.setImages(nrdRawOutput.view, nrdSh1Output.view, gNormal.view, rrOutput.view);
+            nrdResolvePipeline.setImages(nrdRawOutput.view, nrdSh1Output.view,
+                    nrdSpecRawOutput.view, nrdSpecSh1Output.view, gNormal.view,
+                    gAlbedo.view, gSpecAlbedo.view, gNrdViewDirection.view, nrdResolvedOutput.view);
         }
         exposure.ensureResources(ctx);
         exposure.resetAutoHistory(); // tile coordinates and trusted-history identity changed with these images
@@ -1940,7 +2007,8 @@ public final class RtComposite {
                                 resetTemporal);
                     } else {
                         rrDone = RtNrd.INSTANCE.evaluate(ctx, cmd.address(), gMotion, gNormal, gNrdViewZ,
-                                gNrdSignal, gNrdSh1, nrdRawOutput, nrdSh1Output,
+                                gNrdSignal, gNrdSh1, gNrdSpecSignal, gNrdSpecSh1,
+                                nrdRawOutput, nrdSh1Output, nrdSpecRawOutput, nrdSpecSh1Output,
                                 frameProjection, mvCurProjView,
                                 fgPreviousViewProjectionValid ? fgPreviousViewProjection : mvCurProjView,
                                 mvCamDeltaX, mvCamDeltaY, mvCamDeltaZ,
@@ -1948,19 +2016,36 @@ public final class RtComposite {
                         if (rrDone) {
                             VulkanCommandEncoder.memoryBarrier(cmd, stack);
                             nrdResolvePipeline.setImages(nrdRawOutput.view, nrdSh1Output.view,
-                                    gNormal.view, rrOutput.view);
+                                    nrdSpecRawOutput.view, nrdSpecSh1Output.view, gNormal.view,
+                                    gAlbedo.view, gSpecAlbedo.view, gNrdViewDirection.view,
+                                    nrdResolvedOutput.view);
                             nrdResolvePipeline.dispatch(cmd, renderW, renderH,
                                     "relax".equals(CausticaConfig.Rt.Nrd.DENOISER.get()) ? 1 : 0,
                                     CausticaConfig.Rt.Nrd.SPHERICAL_HARMONICS.value());
+                            if (nrdResolvedOutput != rrOutput) {
+                                VulkanCommandEncoder.memoryBarrier(cmd, stack);
+                                blitUpscale(cmd, stack, nrdResolvedOutput, rrOutput,
+                                        "nearest".equals(CausticaConfig.Rt.Nrd.UPSCALE_FILTER.get())
+                                                ? VK10.VK_FILTER_NEAREST : VK10.VK_FILTER_LINEAR);
+                            }
                         }
                     }
                 }
                 if (!rrDone && RtReconstruction.usesNrd()) {
                     VulkanCommandEncoder.memoryBarrier(cmd, stack);
-                    nrdResolvePipeline.setImages(gNrdSignal.view, gNrdSh1.view, gNormal.view, rrOutput.view);
+                    nrdResolvePipeline.setImages(gNrdSignal.view, gNrdSh1.view,
+                            gNrdSpecSignal.view, gNrdSpecSh1.view, gNormal.view,
+                            gAlbedo.view, gSpecAlbedo.view, gNrdViewDirection.view,
+                            nrdResolvedOutput.view);
                     nrdResolvePipeline.dispatch(cmd, renderW, renderH,
                             "relax".equals(CausticaConfig.Rt.Nrd.DENOISER.get()) ? 1 : 0,
                             CausticaConfig.Rt.Nrd.SPHERICAL_HARMONICS.value());
+                    if (nrdResolvedOutput != rrOutput) {
+                        VulkanCommandEncoder.memoryBarrier(cmd, stack);
+                        blitUpscale(cmd, stack, nrdResolvedOutput, rrOutput,
+                                "nearest".equals(CausticaConfig.Rt.Nrd.UPSCALE_FILTER.get())
+                                        ? VK10.VK_FILTER_NEAREST : VK10.VK_FILTER_LINEAR);
+                    }
                     rrDone = true; // decoded noisy fallback remains a valid current display frame
                 }
             } else if (traceGpuProfiler != null) {
@@ -1975,7 +2060,7 @@ public final class RtComposite {
                 VulkanCommandEncoder.memoryBarrier(cmd, stack);
                 try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "fallback upscale");
                      RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.upscale")) {
-                    blitUpscale(cmd, stack, output, rrOutput);
+                    blitUpscale(cmd, stack, output, rrOutput, VK10.VK_FILTER_LINEAR);
                 }
             }
             if (traceGpuProfiler != null) traceGpuProfiler.reconstructionEnd(cmd);
@@ -2906,14 +2991,14 @@ public final class RtComposite {
      * Linear-filtered fallback from RR render resolution to display resolution. Native-resolution RT feeds
      * display mapping directly and does not use this copy.
      */
-    private static void blitUpscale(VkCommandBuffer cmd, MemoryStack stack, RtImage src, RtImage dst) {
+    private static void blitUpscale(VkCommandBuffer cmd, MemoryStack stack, RtImage src, RtImage dst, int filter) {
         VkImageBlit.Buffer region = VkImageBlit.calloc(1, stack);
         region.get(0).srcSubresource().aspectMask(VK10.VK_IMAGE_ASPECT_COLOR_BIT).mipLevel(0).baseArrayLayer(0).layerCount(1);
         region.get(0).dstSubresource().aspectMask(VK10.VK_IMAGE_ASPECT_COLOR_BIT).mipLevel(0).baseArrayLayer(0).layerCount(1);
         region.get(0).srcOffsets(1).set(src.width, src.height, 1); // srcOffsets[0] zeroed by calloc
         region.get(0).dstOffsets(1).set(dst.width, dst.height, 1);
         VK10.vkCmdBlitImage(cmd, src.image, VK10.VK_IMAGE_LAYOUT_GENERAL,
-                dst.image, VK10.VK_IMAGE_LAYOUT_GENERAL, region, VK10.VK_FILTER_LINEAR);
+                dst.image, VK10.VK_IMAGE_LAYOUT_GENERAL, region, filter);
     }
 
     /**

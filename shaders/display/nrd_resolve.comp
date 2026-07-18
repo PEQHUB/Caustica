@@ -1,10 +1,15 @@
 #version 460
 
 layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
-layout(binding = 0, set = 0, rgba16f) uniform readonly image2D sh0Image;
-layout(binding = 1, set = 0, rgba16f) uniform readonly image2D sh1Image;
-layout(binding = 2, set = 0, rgba16f) uniform readonly image2D normalRoughnessImage;
-layout(binding = 3, set = 0, rgba16f) uniform writeonly image2D outputImage;
+layout(binding = 0, set = 0, rgba16f) uniform readonly image2D diffuseSh0Image;
+layout(binding = 1, set = 0, rgba16f) uniform readonly image2D diffuseSh1Image;
+layout(binding = 2, set = 0, rgba16f) uniform readonly image2D specularSh0Image;
+layout(binding = 3, set = 0, rgba16f) uniform readonly image2D specularSh1Image;
+layout(binding = 4, set = 0, rgba16f) uniform readonly image2D normalRoughnessImage;
+layout(binding = 5, set = 0, rgba16f) uniform readonly image2D diffuseAlbedoImage;
+layout(binding = 6, set = 0, rgba16f) uniform readonly image2D specularAlbedoImage;
+layout(binding = 7, set = 0, rgba16f) uniform readonly image2D viewDirectionImage;
+layout(binding = 8, set = 0, rgba16f) uniform writeonly image2D outputImage;
 
 layout(push_constant) uniform Push {
     uint width;
@@ -23,22 +28,38 @@ vec3 correctedYCoCg(float y, float y0, vec2 cocg) {
     return ycocgToLinear(vec3(y, cocg));
 }
 
+vec3 resolveSh(vec4 sh0, vec3 sh1, vec3 direction) {
+    const float invPi = 0.3183098861837907;
+    float y = sh0.x * invPi + dot(sh1, direction) * (3.0 * invPi);
+    return correctedYCoCg(y, sh0.x, sh0.yz);
+}
+
 void main() {
     ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
     if (pixel.x >= int(pc.width) || pixel.y >= int(pc.height)) return;
-    vec4 sh0 = imageLoad(sh0Image, pixel);
-    vec3 color;
+    vec4 diffuseSh0 = imageLoad(diffuseSh0Image, pixel);
+    vec4 specularSh0 = imageLoad(specularSh0Image, pixel);
+    vec3 diffuse;
+    vec3 specular;
     if (pc.sphericalHarmonics == 0u) {
-        color = pc.family == 0u ? ycocgToLinear(sh0.xyz) : max(sh0.xyz, vec3(0.0));
+        diffuse = pc.family == 0u ? ycocgToLinear(diffuseSh0.xyz) : max(diffuseSh0.xyz, vec3(0.0));
+        specular = pc.family == 0u ? ycocgToLinear(specularSh0.xyz) : max(specularSh0.xyz, vec3(0.0));
     } else if (pc.family == 0u) {
-        vec3 c1 = imageLoad(sh1Image, pixel).xyz;
         vec3 normal = normalize(imageLoad(normalRoughnessImage, pixel).xyz);
-        const float invPi = 0.3183098861837907;
-        float y = sh0.x * invPi + dot(c1, normal) * (3.0 * invPi);
-        color = correctedYCoCg(y, sh0.x, sh0.yz);
+        vec4 viewRoughness = imageLoad(viewDirectionImage, pixel);
+        vec3 viewDirection = normalize(viewRoughness.xyz);
+        float noV = abs(dot(normal, viewDirection));
+        float a = 0.298475 * log(max(39.4115 - 39.0029 * viewRoughness.w, 1.0e-4));
+        float dominantFactor = clamp(pow(clamp(1.0 - noV, 0.0, 1.0), 10.8649) * (1.0 - a) + a, 0.0, 1.0);
+        vec3 dominantDirection = normalize(mix(normal, reflect(-viewDirection, normal), dominantFactor));
+        diffuse = resolveSh(diffuseSh0, imageLoad(diffuseSh1Image, pixel).xyz, normal);
+        specular = resolveSh(specularSh0, imageLoad(specularSh1Image, pixel).xyz, dominantDirection);
     } else {
         // RELAX SH0 retains linear RGB; SH1 still participates in NRD's directional temporal/spatial filters.
-        color = max(sh0.xyz, vec3(0.0));
+        diffuse = max(diffuseSh0.xyz, vec3(0.0));
+        specular = max(specularSh0.xyz, vec3(0.0));
     }
-    imageStore(outputImage, pixel, vec4(color, 1.0));
+    vec3 diffuseAlbedo = max(imageLoad(diffuseAlbedoImage, pixel).rgb, vec3(0.0));
+    vec3 specularAlbedo = max(imageLoad(specularAlbedoImage, pixel).rgb, vec3(0.0));
+    imageStore(outputImage, pixel, vec4(diffuse * diffuseAlbedo + specular * specularAlbedo, 1.0));
 }

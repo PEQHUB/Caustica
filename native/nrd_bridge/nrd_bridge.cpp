@@ -64,15 +64,36 @@ struct BridgeSettings {
     float hitDistanceB;
     float hitDistanceC;
     float antilagSigma;
+    uint32_t maxStabilizedFrames;
+    uint32_t responsiveMinFrames;
+    uint32_t roughnessEdgeStopping;
+    float specularPrepassBlurRadius;
+    float fastHistoryClampingSigma;
+    float minHitDistanceWeight;
+    float fireflySuppressorScale;
+    float responsiveRoughnessThreshold;
+    float convergenceScale;
+    float convergenceBase;
+    float convergenceHistoryFraction;
+    float relaxHistoryNormalPower;
+    float relaxDiffusePhiLuminance;
+    float relaxSpecularPhiLuminance;
+    float relaxDepthThreshold;
+    float relaxSpecularVarianceBoost;
+    float relaxSpecularLobeSlack;
+    float antilagSensitivity;
+    float relaxAntilagAcceleration;
+    float relaxAntilagTemporalSigma;
+    float relaxAntilagReset;
 };
 
 static_assert(sizeof(BridgeResource) == 16);
 static_assert(sizeof(BridgeCommonSettings) == 308);
-static_assert(sizeof(BridgeSettings) == 68);
+static_assert(sizeof(BridgeSettings) == 152);
 
 struct State {
     nrd::Integration integration;
-    nrd::Denoiser denoiser = nrd::Denoiser::REBLUR_DIFFUSE;
+    nrd::Denoiser denoiser = nrd::Denoiser::REBLUR_DIFFUSE_SPECULAR;
     uint16_t width = 0;
     uint16_t height = 0;
     bool sphericalHarmonics = false;
@@ -91,8 +112,8 @@ void setError(const char* operation, const char* detail = nullptr) {
 
 nrd::Denoiser selectDenoiser(int32_t family, bool sh) {
     if (family == 1)
-        return sh ? nrd::Denoiser::RELAX_DIFFUSE_SH : nrd::Denoiser::RELAX_DIFFUSE;
-    return sh ? nrd::Denoiser::REBLUR_DIFFUSE_SH : nrd::Denoiser::REBLUR_DIFFUSE;
+        return sh ? nrd::Denoiser::RELAX_DIFFUSE_SPECULAR_SH : nrd::Denoiser::RELAX_DIFFUSE_SPECULAR;
+    return sh ? nrd::Denoiser::REBLUR_DIFFUSE_SPECULAR_SH : nrd::Denoiser::REBLUR_DIFFUSE_SPECULAR;
 }
 
 nrd::ResourceType slotType(int32_t slot) {
@@ -106,6 +127,12 @@ nrd::ResourceType slotType(int32_t slot) {
         case 6: return nrd::ResourceType::IN_DIFF_SH1;
         case 7: return nrd::ResourceType::OUT_DIFF_SH0;
         case 8: return nrd::ResourceType::OUT_DIFF_SH1;
+        case 9: return nrd::ResourceType::IN_SPEC_RADIANCE_HITDIST;
+        case 10: return nrd::ResourceType::OUT_SPEC_RADIANCE_HITDIST;
+        case 11: return nrd::ResourceType::IN_SPEC_SH0;
+        case 12: return nrd::ResourceType::IN_SPEC_SH1;
+        case 13: return nrd::ResourceType::OUT_SPEC_SH0;
+        case 14: return nrd::ResourceType::OUT_SPEC_SH1;
         default: return nrd::ResourceType::MAX_NUM;
     }
 }
@@ -167,7 +194,7 @@ NRDBRIDGE_API int32_t nrdbridge_create(uint64_t instance, uint64_t physicalDevic
         integrationDesc.resourceHeight = state->height;
         integrationDesc.queuedFrameNum = 3;
         integrationDesc.autoWaitForIdle = false;
-        integrationDesc.enableWholeLifetimeDescriptorCaching = false;
+        integrationDesc.enableWholeLifetimeDescriptorCaching = true;
 
         if (state->integration.RecreateVK(integrationDesc, instanceDesc, deviceDesc) != nrd::Result::SUCCESS) {
             setError("NRD Integration::RecreateVK failed");
@@ -224,15 +251,25 @@ NRDBRIDGE_API int32_t nrdbridge_evaluate(uint64_t commandBuffer, const BridgeRes
             return -2;
         }
 
-        if (g_state->denoiser == nrd::Denoiser::REBLUR_DIFFUSE
-                || g_state->denoiser == nrd::Denoiser::REBLUR_DIFFUSE_SH) {
+        if (g_state->denoiser == nrd::Denoiser::REBLUR_DIFFUSE_SPECULAR
+                || g_state->denoiser == nrd::Denoiser::REBLUR_DIFFUSE_SPECULAR_SH) {
             nrd::ReblurSettings settings = {};
             settings.maxAccumulatedFrameNum = std::min(bridgeSettings->maxAccumulatedFrames, nrd::REBLUR_MAX_HISTORY_FRAME_NUM);
             settings.maxFastAccumulatedFrameNum = std::min(bridgeSettings->maxFastAccumulatedFrames, settings.maxAccumulatedFrameNum);
+            settings.maxStabilizedFrameNum = std::min(bridgeSettings->maxStabilizedFrames, settings.maxAccumulatedFrameNum);
             settings.historyFixFrameNum = std::min(bridgeSettings->historyFixFrames, 3u);
             settings.historyFixBasePixelStride = bridgeSettings->historyFixStride;
             settings.historyFixAlternatePixelStride = bridgeSettings->historyFixStride;
             settings.diffusePrepassBlurRadius = bridgeSettings->prepassBlurRadius;
+            settings.specularPrepassBlurRadius = bridgeSettings->specularPrepassBlurRadius;
+            settings.fastHistoryClampingSigmaScale = bridgeSettings->fastHistoryClampingSigma;
+            settings.minHitDistanceWeight = bridgeSettings->minHitDistanceWeight;
+            settings.fireflySuppressorMinRelativeScale = bridgeSettings->fireflySuppressorScale;
+            settings.responsiveAccumulationSettings.roughnessThreshold = bridgeSettings->responsiveRoughnessThreshold;
+            settings.responsiveAccumulationSettings.minAccumulatedFrameNum = bridgeSettings->responsiveMinFrames;
+            settings.convergenceSettings.s = bridgeSettings->convergenceScale;
+            settings.convergenceSettings.b = bridgeSettings->convergenceBase;
+            settings.convergenceSettings.p = bridgeSettings->convergenceHistoryFraction;
             settings.minBlurRadius = bridgeSettings->minBlurRadius;
             settings.maxBlurRadius = bridgeSettings->maxBlurRadius;
             settings.lobeAngleFraction = bridgeSettings->lobeAngleFraction;
@@ -242,8 +279,10 @@ NRDBRIDGE_API int32_t nrdbridge_evaluate(uint64_t commandBuffer, const BridgeRes
             settings.hitDistanceParameters.B = bridgeSettings->hitDistanceB;
             settings.hitDistanceParameters.C = bridgeSettings->hitDistanceC;
             settings.enableAntiFirefly = bridgeSettings->antiFirefly != 0;
+            settings.hitDistanceReconstructionMode = nrd::HitDistanceReconstructionMode::AREA_3X3;
             settings.antilagSettings.luminanceSigmaScale = bridgeSettings->antilag
                     ? bridgeSettings->antilagSigma : 1.0e6f;
+            settings.antilagSettings.luminanceSensitivity = bridgeSettings->antilagSensitivity;
             if (g_state->integration.SetDenoiserSettings(kDenoiserId, &settings) != nrd::Result::SUCCESS) {
                 setError("NRD SetDenoiserSettings(REBLUR) failed");
                 return -3;
@@ -253,19 +292,36 @@ NRDBRIDGE_API int32_t nrdbridge_evaluate(uint64_t commandBuffer, const BridgeRes
             settings.diffuseMaxAccumulatedFrameNum = bridgeSettings->maxAccumulatedFrames;
             settings.diffuseMaxFastAccumulatedFrameNum = std::min(
                     bridgeSettings->maxFastAccumulatedFrames, bridgeSettings->maxAccumulatedFrames);
+            settings.specularMaxAccumulatedFrameNum = bridgeSettings->maxAccumulatedFrames;
+            settings.specularMaxFastAccumulatedFrameNum = std::min(
+                    bridgeSettings->maxFastAccumulatedFrames, bridgeSettings->maxAccumulatedFrames);
             settings.historyFixFrameNum = std::min(bridgeSettings->historyFixFrames, 3u);
             settings.historyFixBasePixelStride = bridgeSettings->historyFixStride;
             settings.historyFixAlternatePixelStride = bridgeSettings->historyFixStride;
             settings.diffusePrepassBlurRadius = bridgeSettings->prepassBlurRadius;
+            settings.specularPrepassBlurRadius = bridgeSettings->specularPrepassBlurRadius;
+            settings.fastHistoryClampingSigmaScale = bridgeSettings->fastHistoryClampingSigma;
+            settings.minHitDistanceWeight = bridgeSettings->minHitDistanceWeight;
+            settings.historyFixEdgeStoppingNormalPower = bridgeSettings->relaxHistoryNormalPower;
+            settings.diffusePhiLuminance = bridgeSettings->relaxDiffusePhiLuminance;
+            settings.specularPhiLuminance = bridgeSettings->relaxSpecularPhiLuminance;
+            settings.depthThreshold = bridgeSettings->relaxDepthThreshold;
+            settings.specularVarianceBoost = bridgeSettings->relaxSpecularVarianceBoost;
+            settings.specularLobeAngleSlack = bridgeSettings->relaxSpecularLobeSlack;
             settings.lobeAngleFraction = bridgeSettings->lobeAngleFraction;
             settings.roughnessFraction = bridgeSettings->roughnessFraction;
             settings.atrousIterationNum = std::clamp(bridgeSettings->relaxAtrousIterations, 2u, 8u);
             settings.enableAntiFirefly = bridgeSettings->antiFirefly != 0;
+            settings.enableRoughnessEdgeStopping = bridgeSettings->roughnessEdgeStopping != 0;
+            settings.hitDistanceReconstructionMode = nrd::HitDistanceReconstructionMode::AREA_3X3;
             if (!bridgeSettings->antilag) {
                 settings.antilagSettings.accelerationAmount = 0.0f;
                 settings.antilagSettings.resetAmount = 0.0f;
             } else {
+                settings.antilagSettings.accelerationAmount = bridgeSettings->relaxAntilagAcceleration;
                 settings.antilagSettings.spatialSigmaScale = bridgeSettings->antilagSigma;
+                settings.antilagSettings.temporalSigmaScale = bridgeSettings->relaxAntilagTemporalSigma;
+                settings.antilagSettings.resetAmount = bridgeSettings->relaxAntilagReset;
             }
             if (g_state->integration.SetDenoiserSettings(kDenoiserId, &settings) != nrd::Result::SUCCESS) {
                 setError("NRD SetDenoiserSettings(RELAX) failed");

@@ -142,8 +142,13 @@ public final class RtDeviceBringup {
         return rtRequested;
     }
 
-    public static String worldRaygenShader() {
-        return serBackend.worldRaygenShader;
+    public static String worldRaygenShader(boolean nrd) {
+        if (!nrd) return serBackend.worldRaygenShader;
+        return switch (serBackend) {
+            case NV -> "world_nrd_nv.rgen.spv";
+            case EXT -> "world_nrd.rgen.spv";
+            case NONE -> "world_nrd_base.rgen.spv";
+        };
     }
 
     public static String offlineWorldRaygenShader() {
@@ -186,6 +191,11 @@ public final class RtDeviceBringup {
     public static String sharcDiagnosticUpdateRaygenShader() {
         return backendShader("world_sharc_update_diagnostic.rgen.spv",
                 "world_sharc_update_diagnostic_nv.rgen.spv", "world_sharc_update_diagnostic_base.rgen.spv");
+    }
+
+    /** Standard TraceRay fallback needs a real shadow closest-hit; hit-object variants skip it entirely. */
+    public static String shadowClosestHitShader() {
+        return serBackend == SerBackend.NONE ? "world_shadow.rchit.spv" : null;
     }
 
     private static String backendShader(String ext, String nv, String base) {

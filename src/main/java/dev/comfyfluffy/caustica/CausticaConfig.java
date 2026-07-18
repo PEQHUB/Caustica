@@ -927,16 +927,38 @@ public final class CausticaConfig {
                     value -> "relax".equalsIgnoreCase(value) ? "relax" : "reblur");
             public static final BooleanSetting SPHERICAL_HARMONICS = bool(
                     "caustica.rt.nrd.sphericalHarmonics", "nrd.spherical-harmonics", false);
+            public static final StringSetting UPSCALE_MODE = string(
+                    "caustica.rt.nrd.upscaleMode", "nrd.upscale-mode", "native",
+                    value -> switch (value == null ? "" : value.trim().toLowerCase(java.util.Locale.ROOT)) {
+                        case "native", "quality", "balanced", "performance", "ultra-performance", "custom" ->
+                                value.trim().toLowerCase(java.util.Locale.ROOT);
+                        default -> "quality";
+                    });
+            public static final FloatSetting CUSTOM_RENDER_SCALE = clampedFloat(
+                    "caustica.rt.nrd.customRenderScale", "nrd.custom-render-scale", 0.67f, 0.25f, 1.0f);
+            public static final StringSetting UPSCALE_FILTER = string(
+                    "caustica.rt.nrd.upscaleFilter", "nrd.upscale-filter", "linear",
+                    value -> "nearest".equalsIgnoreCase(value) ? "nearest" : "linear");
             public static final IntSetting MAX_ACCUMULATED_FRAMES = clampedInt(
                     "caustica.rt.nrd.maxAccumulatedFrames", "nrd.max-accumulated-frames", 30, 0, 255);
             public static final IntSetting MAX_FAST_ACCUMULATED_FRAMES = clampedInt(
                     "caustica.rt.nrd.maxFastAccumulatedFrames", "nrd.max-fast-accumulated-frames", 6, 0, 63);
+            public static final IntSetting MAX_STABILIZED_FRAMES = clampedInt(
+                    "caustica.rt.nrd.maxStabilizedFrames", "nrd.max-stabilized-frames", 30, 0, 255);
             public static final IntSetting HISTORY_FIX_FRAMES = clampedInt(
                     "caustica.rt.nrd.historyFixFrames", "nrd.history-fix-frames", 3, 0, 3);
             public static final IntSetting HISTORY_FIX_STRIDE = clampedInt(
                     "caustica.rt.nrd.historyFixStride", "nrd.history-fix-stride", 14, 1, 32);
             public static final FloatSetting PREPASS_BLUR_RADIUS = clampedFloat(
                     "caustica.rt.nrd.prepassBlurRadius", "nrd.prepass-blur-radius", 30.0f, 0.0f, 100.0f);
+            public static final FloatSetting SPECULAR_PREPASS_BLUR_RADIUS = clampedFloat(
+                    "caustica.rt.nrd.specularPrepassBlurRadius", "nrd.specular-prepass-blur-radius", 50.0f, 0.0f, 100.0f);
+            public static final FloatSetting FAST_HISTORY_CLAMP_SIGMA = clampedFloat(
+                    "caustica.rt.nrd.fastHistoryClampSigma", "nrd.fast-history-clamp-sigma", 2.0f, 1.0f, 3.0f);
+            public static final FloatSetting MIN_HIT_DISTANCE_WEIGHT = clampedFloat(
+                    "caustica.rt.nrd.minHitDistanceWeight", "nrd.min-hit-distance-weight", 0.1f, 0.001f, 0.2f);
+            public static final FloatSetting FIREFLY_SUPPRESSOR_SCALE = clampedFloat(
+                    "caustica.rt.nrd.fireflySuppressorScale", "nrd.firefly-suppressor-scale", 2.0f, 1.0f, 3.0f);
             public static final FloatSetting MIN_BLUR_RADIUS = clampedFloat(
                     "caustica.rt.nrd.minBlurRadius", "nrd.min-blur-radius", 1.0f, 0.0f, 10.0f);
             public static final FloatSetting MAX_BLUR_RADIUS = clampedFloat(
@@ -963,8 +985,40 @@ public final class CausticaConfig {
                     "caustica.rt.nrd.antilag", "nrd.antilag", false);
             public static final FloatSetting ANTILAG_SIGMA = clampedFloat(
                     "caustica.rt.nrd.antilagSigma", "nrd.antilag-sigma", 2.0f, 0.1f, 10.0f);
+            public static final FloatSetting ANTILAG_SENSITIVITY = clampedFloat(
+                    "caustica.rt.nrd.antilagSensitivity", "nrd.antilag-sensitivity", 3.0f, 0.1f, 10.0f);
+            public static final FloatSetting RESPONSIVE_ROUGHNESS_THRESHOLD = clampedFloat(
+                    "caustica.rt.nrd.responsiveRoughnessThreshold", "nrd.responsive-roughness-threshold", 0.0f, 0.0f, 1.0f);
+            public static final IntSetting RESPONSIVE_MIN_FRAMES = clampedInt(
+                    "caustica.rt.nrd.responsiveMinFrames", "nrd.responsive-min-frames", 3, 0, 3);
+            public static final FloatSetting CONVERGENCE_SCALE = clampedFloat(
+                    "caustica.rt.nrd.convergenceScale", "nrd.convergence-scale", 1.0f, 0.1f, 4.0f);
+            public static final FloatSetting CONVERGENCE_BASE = clampedFloat(
+                    "caustica.rt.nrd.convergenceBase", "nrd.convergence-base", 0.2f, 0.0f, 1.0f);
+            public static final FloatSetting CONVERGENCE_HISTORY_FRACTION = clampedFloat(
+                    "caustica.rt.nrd.convergenceHistoryFraction", "nrd.convergence-history-fraction", 0.8f, 0.0f, 1.0f);
             public static final IntSetting RELAX_ATROUS_ITERATIONS = clampedInt(
                     "caustica.rt.nrd.relaxAtrousIterations", "nrd.relax-atrous-iterations", 5, 2, 8);
+            public static final FloatSetting RELAX_HISTORY_NORMAL_POWER = clampedFloat(
+                    "caustica.rt.nrd.relaxHistoryNormalPower", "nrd.relax-history-normal-power", 8.0f, 0.1f, 64.0f);
+            public static final FloatSetting RELAX_DIFFUSE_PHI_LUMINANCE = clampedFloat(
+                    "caustica.rt.nrd.relaxDiffusePhiLuminance", "nrd.relax-diffuse-phi-luminance", 2.0f, 0.1f, 10.0f);
+            public static final FloatSetting RELAX_SPECULAR_PHI_LUMINANCE = clampedFloat(
+                    "caustica.rt.nrd.relaxSpecularPhiLuminance", "nrd.relax-specular-phi-luminance", 1.0f, 0.1f, 10.0f);
+            public static final FloatSetting RELAX_DEPTH_THRESHOLD = clampedFloat(
+                    "caustica.rt.nrd.relaxDepthThreshold", "nrd.relax-depth-threshold", 0.003f, 0.0001f, 0.1f);
+            public static final FloatSetting RELAX_SPECULAR_VARIANCE_BOOST = clampedFloat(
+                    "caustica.rt.nrd.relaxSpecularVarianceBoost", "nrd.relax-specular-variance-boost", 0.0f, 0.0f, 4.0f);
+            public static final FloatSetting RELAX_SPECULAR_LOBE_SLACK = clampedFloat(
+                    "caustica.rt.nrd.relaxSpecularLobeSlack", "nrd.relax-specular-lobe-slack", 0.15f, 0.0f, 1.0f);
+            public static final BooleanSetting RELAX_ROUGHNESS_EDGE_STOPPING = bool(
+                    "caustica.rt.nrd.relaxRoughnessEdgeStopping", "nrd.relax-roughness-edge-stopping", true);
+            public static final FloatSetting RELAX_ANTILAG_ACCELERATION = clampedFloat(
+                    "caustica.rt.nrd.relaxAntilagAcceleration", "nrd.relax-antilag-acceleration", 0.3f, 0.0f, 1.0f);
+            public static final FloatSetting RELAX_ANTILAG_TEMPORAL_SIGMA = clampedFloat(
+                    "caustica.rt.nrd.relaxAntilagTemporalSigma", "nrd.relax-antilag-temporal-sigma", 0.5f, 0.01f, 10.0f);
+            public static final FloatSetting RELAX_ANTILAG_RESET = clampedFloat(
+                    "caustica.rt.nrd.relaxAntilagReset", "nrd.relax-antilag-reset", 0.5f, 0.0f, 1.0f);
 
             private Nrd() {
             }
