@@ -10,7 +10,8 @@ final class TerrainBlasPublicationContractTest {
     @Test
     void completedTerrainBuildPublishesWithoutUnsafeCompactionPhase() throws Exception {
         String terrain = Files.readString(Path.of(
-                "src/main/java/dev/comfyfluffy/caustica/rt/terrain/RtTerrain.java"));
+                "src/main/java/dev/comfyfluffy/caustica/rt/terrain/RtTerrain.java"))
+                .replace("\r\n", "\n");
 
         assertTrue(terrain.contains("prepared.releaseBuildInputs();\n"
                 + "                    completeTask(task, prepared, build, null);"));
