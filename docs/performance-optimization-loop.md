@@ -120,6 +120,12 @@ Rejected variants were a packed geometric-normal payload, normal-view raygen spe
 linear sampling of the spectral sky LUT, redundant miss-direction normalization removal, and an early-return
 version of the exposure reduction. Each either regressed the fixed scene or failed its visual/state gate.
 
+An optional EMF mixin that reused the temporary `Vector3f` allocated by
+`EMFModelPartCustom.EMFCube.compile` also passed the strict entity-capture parity oracle but was rejected.
+In the same entity-heavy scene, provisional normalized fallback cost increased from roughly 124 to 140 ns
+per emitted quad (8.60 to 9.15 microseconds per model submission). The JVM already optimizes this temporary
+well enough that the redirect and injected-field access were counterproductive; the mixin was fully removed.
+
 ## 2026-07-17 additional 25% village pass
 
 The second optimization goal used the same SHaRC-off 3840x2160-output / 1920x1080-internal scene at
