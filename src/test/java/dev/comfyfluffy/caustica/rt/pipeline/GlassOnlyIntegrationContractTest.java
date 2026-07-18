@@ -20,6 +20,8 @@ final class GlassOnlyIntegrationContractTest {
         assertTrue(terrain.contains("block == Blocks.GLASS"));
         assertTrue(terrain.contains("q.opticalClass = q.translucent ? opticalClass(state) : 0"));
         assertTrue(terrain.contains("Float.intBitsToFloat(q.opticalClass)"));
+        assertTrue(terrain.contains("OPTICAL_EXTERIOR_WATER = 1 << 4"));
+        assertTrue(terrain.contains("view.getFluidState(cullPos.setWithOffset(pos, opticalFace)).is(FluidTags.WATER)"));
         assertTrue(terrain.contains("Geom g = water ? cur.water() : cur.opaque()"));
     }
 
@@ -36,6 +38,10 @@ final class GlassOnlyIntegrationContractTest {
         assertTrue(raygen.contains("refract(rd, interfaceNormal, etaI / etaT)"));
         assertTrue(raygen.contains("reflect(rd, interfaceNormal)"));
         assertTrue(raygen.contains("crossGlassExit ? normalize(payload.geometricNormal) : payload.normal"));
+        assertTrue(raygen.contains("payloadInterfaceExteriorWater() ? WATER_IOR : 1.0"));
+        assertTrue(raygen.contains("inWater = !entering && exteriorWater"));
+        assertTrue(closestHit.contains("pr.aux0 & 0x10u"));
+        assertTrue(common.contains("PAYLOAD_INTERFACE_EXTERIOR_WATER"));
         assertTrue(raygen.contains("bool inWater = (pc.flags & 1u) != 0u;"));
         assertTrue(raygen.contains("throughput *= exp(-waterExt * payload.hitT);"));
         assertTrue(raygen.contains("waterExt = waterExtinction(surfaceWaterTint);"));
@@ -57,7 +63,8 @@ final class GlassOnlyIntegrationContractTest {
         assertTrue(raygen.contains("surfaceWaterEntering ? WATER_IOR : (1.0 / WATER_IOR)"));
         assertTrue(raygen.contains("diffuseAlbedo = SKY_DIFF_ALBEDO"));
         assertTrue(raygen.contains("gv_opticalGuideDir = transmittedDir"));
-        assertTrue(raygen.contains("gv_opticalExitEta = thinPane ? 1.0 : materialIor / outsideIor"));
+        assertTrue(raygen.contains("gv_opticalExitEta = thinPane ? 1.0 : materialIor"));
+        assertTrue(raygen.contains("eta = exitEta / exteriorIor"));
         assertTrue(raygen.contains("eta = entering ? (1.0 / WATER_IOR) : WATER_IOR"));
         assertTrue(raygen.contains("Crossing-budget exhaustion means no trustworthy diffuse destination"));
         assertTrue(raygen.contains("gv_hitCamRel = destinationHitCamRel"));

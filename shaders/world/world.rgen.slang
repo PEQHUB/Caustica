@@ -288,6 +288,7 @@ uint payloadOpticalClass() {
     return (payload.flags & PAYLOAD_OPTICAL_CLASS_MASK) >> PAYLOAD_OPTICAL_CLASS_SHIFT;
 }
 bool payloadInterfaceEntering() { return (payload.flags & PAYLOAD_INTERFACE_ENTERING) != 0u; }
+bool payloadInterfaceExteriorWater() { return (payload.flags & PAYLOAD_INTERFACE_EXTERIOR_WATER) != 0u; }
 // Set by world.rchit only on a MATERIAL_WATER hit (see PAYLOAD_WATER_ENTERING) — whether the ray was
 // travelling into the water volume (vs. out of it) at this hit's face.
 bool payloadWaterEntering() { return (payload.flags & PAYLOAD_WATER_ENTERING) != 0u; }
@@ -1213,6 +1214,8 @@ void opticalGuideHit(float3 surfacePos, float3 transmittedDir, float3 surfaceNor
         float3 interfaceNormal = crossGlassExit ? normalize(payload.geometricNormal) : payload.normal;
         float eta = exitEta;
         if (crossGlassExit) {
+            float exteriorIor = payloadInterfaceExteriorWater() ? WATER_IOR : 1.0;
+            eta = exitEta / exteriorIor;
             glassExitPending = false;
         }
         if (crossWater) {
@@ -1416,7 +1419,10 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
             }
 
             float materialIor = opticalClass == OPTICAL_SOLID_ICE ? ICE_IOR : GLASS_IOR;
-            float outsideIor = inWater ? WATER_IOR : 1.0;
+            // The fluid mesher removes a water face coincident with glass/ice. The surviving optical
+            // primitive therefore owns both media and must not infer its far side from the current path.
+            bool exteriorWater = payloadInterfaceExteriorWater();
+            float outsideIor = exteriorWater ? WATER_IOR : 1.0;
             float etaI = thinPane ? outsideIor : (entering ? outsideIor : materialIor);
             float etaT = thinPane ? materialIor : (entering ? materialIor : outsideIor);
             float cosI = clamp(dot(-rd, interfaceNormal), 0.0, 1.0);
@@ -1432,11 +1438,6 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
                 transmittedDir = normalize(transmittedDir);
             }
 
-            // Approximate volume absorption once per completed solid traversal. This is deliberately local
-            // to the glass hit and does not replace or alter upstream water medium attenuation.
-            if (!thinPane && !entering) {
-                throughput *= glassTint;
-            }
             if (captureGuides && segment == 0) { // primary glass hit: feed RR a smooth dielectric specular surface
                 gv_normal = n;
                 gv_rough = opticalClass == OPTICAL_SOLID_ICE ? 0.12 : GLASS_GUIDE_ROUGH;
@@ -1451,7 +1452,7 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
                     // the bounded guide continuation finds and refracts through their actual exit face.
                     gv_opticalGuideDir = transmittedDir;
                     gv_opticalGuideMode = entering ? 3u : 2u;
-                    gv_opticalExitEta = thinPane ? 1.0 : materialIor / outsideIor;
+                    gv_opticalExitEta = thinPane ? 1.0 : materialIor;
                 }
             }
             if (primaryOnly) {
@@ -1463,6 +1464,12 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
             } else {
                 if (thinPane) {
                     throughput *= glassTint;
+                } else {
+                    // Tint represents absorption through the completed solid, not an internally reflected
+                    // exit attempt. Update the water state only after transmission crosses the boundary.
+                    if (!entering) throughput *= glassTint;
+                    inWater = !entering && exteriorWater;
+                    if (inWater) waterExt = waterExtinction(pc.waterParams.xyz);
                 }
                 rd = transmittedDir;
                 ro = hitPos - interfaceNormal * GLASS_TRANSMIT_BIAS; // cross to the far side without overshooting a close neighbour

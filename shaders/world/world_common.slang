@@ -134,6 +134,9 @@ public static const uint EMISSION_SOURCE_OVERRIDE = 4u;
 public static const uint PAYLOAD_INTERFACE_ENTERING = PAYLOAD_WATER_ENTERING;
 public static const uint PAYLOAD_OPTICAL_CLASS_SHIFT = 4u;
 public static const uint PAYLOAD_OPTICAL_CLASS_MASK = 0xfu << PAYLOAD_OPTICAL_CLASS_SHIFT;
+// TerrainPrim.aux0 bit 4 records that the non-glass side of this clear interface is water. The fluid
+// mesher culls its coincident face, so the surviving glass/ice primitive owns the complete transition.
+public static const uint PAYLOAD_INTERFACE_EXTERIOR_WATER = 1u << 15u;
 #if CAUSTICA_SHARC
 public static const uint PAYLOAD_SHARC_DYNAMIC = 1u << 8u;
 #endif

@@ -402,6 +402,7 @@ final class RtTerrainMesher {
         private static final int OPTICAL_SOLID_GLASS = 3;
         private static final int OPTICAL_SOLID_ICE = 4;
         private static final int OPTICAL_TRANSLUCENT_SURFACE = 5;
+        private static final int OPTICAL_EXTERIOR_WATER = 1 << 4;
         private static final int PRIM_FLAG_TORCH = 1;
         private static final float COINCIDENT_EPS = 1.0e-4f; // verts this close are "the same" point
         private static final int RESOLVE_CAP = 128;          // skip the O(n^2) resolve for pathological blocks
@@ -430,6 +431,11 @@ final class RtTerrainMesher {
             q.cutout = layer != ChunkSectionLayer.SOLID;
             q.translucent = layer == ChunkSectionLayer.TRANSLUCENT;
             q.opticalClass = q.translucent ? opticalClass(state) : 0;
+            Direction opticalFace = quad.nominalFace();
+            if (q.translucent && opticalFace != null
+                    && view.getFluidState(cullPos.setWithOffset(pos, opticalFace)).is(FluidTags.WATER)) {
+                q.opticalClass |= OPTICAL_EXTERIOR_WATER;
+            }
 
             // Fabric colors are authored albedo. Continuity uses them for already-resolved overlay tint;
             // ordinary biome-tinted quads retain tintIndex and are multiplied by the world tint below.

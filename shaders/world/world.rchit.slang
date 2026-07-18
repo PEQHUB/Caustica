@@ -407,6 +407,9 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
                 glassSurface.metalness, 0.0, 0.0, materialHeader.params.z,
                 materialHeader.params.w, EMISSION_SOURCE_NONE);
         payload.flags |= ((pr.aux0 & 0xfu) << PAYLOAD_OPTICAL_CLASS_SHIFT);
+        if ((pr.aux0 & 0x10u) != 0u) {
+            payload.flags |= PAYLOAD_INTERFACE_EXTERIOR_WATER;
+        }
         if (entering) {
             payload.flags |= PAYLOAD_INTERFACE_ENTERING;
         }
