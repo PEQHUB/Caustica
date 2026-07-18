@@ -47,6 +47,18 @@ final class PathSamplingContractTest {
     }
 
     @Test
+    void liveContinuationRoulettePrecedesExpensiveLobeSamplingAndRemainsUnbiased() throws Exception {
+        String raygen = Files.readString(Path.of("shaders/world/world.rgen.slang"));
+        int roulette = raygen.indexOf("Roulette owns only the not-yet-sampled continuation");
+        int lobeSampling = raygen.indexOf("Indirect continuation: importance-sample");
+        assertTrue(roulette >= 0);
+        assertTrue(lobeSampling > roulette);
+        assertTrue(raygen.contains("int rrStart = 1;"));
+        assertTrue(raygen.contains("#if !CAUSTICA_SHARC_UPDATE && !CAUSTICA_SHARC_QUERY"));
+        assertTrue(raygen.substring(roulette, lobeSampling).contains("throughput /= q;"));
+        assertTrue(raygen.substring(roulette, lobeSampling).contains("if (rndf(sampler) > q)"));
+    }
+    @Test
     void liveOwenSobolPairOccupiesEverySixteenBySixteenCell() {
         for (int pair = 0; pair < RtBlueNoiseSequence.DIMENSIONS / 2; pair++) {
             Set<Integer> cells = new HashSet<>();

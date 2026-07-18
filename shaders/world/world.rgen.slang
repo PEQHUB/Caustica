@@ -1229,7 +1229,7 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
     int exactMirrorDepth = 0;
     int scatteringDepth = 0;
     int opticalInterfaceDepth = 0;
-    int rrStart = maxBounces <= 3 ? 1 : 2;
+    int rrStart = 1;
     bool pbr = (pc.flags & 2u) != 0u; // GGX BRDF + material guides, else Lambertian fallback
     // Start submerged if the camera is in water so the first segment gets the right medium orientation
     // and absorption when the eye is underwater.
@@ -1809,6 +1809,19 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
             break;
         }
 
+        // Roulette owns only the not-yet-sampled continuation. Emission and NEE at this vertex are already
+        // accumulated above, so terminating here is unbiased. Running it before EON/GGX lobe construction
+        // avoids paying that substantial arithmetic for paths which will not launch another ray.
+#if !CAUSTICA_SHARC_UPDATE && !CAUSTICA_SHARC_QUERY
+        if (scatteringDepth >= rrStart) {
+            float q = clamp(max(throughput.r, max(throughput.g, throughput.b)), 0.02, 1.0);
+            if (rndf(sampler) > q) {
+                break;
+            }
+            throughput /= q;
+        }
+#endif
+
         // Indirect continuation: importance-sample the diffuse OR the GGX specular lobe, chosen by their
         // relative reflectance. With PBR off, use the cosine-weighted Lambertian fallback.
 #if CAUSTICA_SHARC_UPDATE
@@ -1879,7 +1892,9 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
             rayConeSpread = max(rayConeSpread, RAY_CONE_DIFFUSE_SPREAD);
         }
 
-        // Russian roulette on deeper bounces: survive with prob = max channel, rescale survivors.
+#if CAUSTICA_SHARC_UPDATE || CAUSTICA_SHARC_QUERY
+        // Cache variants retain roulette after the sampled lobe so SharcSetThroughput observes the complete
+        // transition ratio. The SHaRC-off live path uses the cheaper equivalent continuation gate above.
         if (scatteringDepth >= rrStart) {
             float q = clamp(max(throughput.r, max(throughput.g, throughput.b)), 0.02, 1.0);
             if (rndf(sampler) > q) {
@@ -1887,6 +1902,7 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
             }
             throughput /= q;
         }
+#endif
 #if CAUSTICA_SHARC_UPDATE
         SharcSetThroughput(sharcState, throughput / max(throughputBeforeBounce, float3(1.0e-6)));
 #endif
