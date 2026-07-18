@@ -1370,6 +1370,12 @@ public final class RtComposite {
             for (RtPipeline pipeline : worldPipelines()) if (pipeline != null) pipeline.setStorageImage(output.view);
             bindGuideImages();
         }
+        // The display pipeline consumes blue noise directly, so output creation must not depend on the
+        // client-tick world prewarm having happened first. Startup ordering can legitimately reach the
+        // first composite before that tick (for example after an automatic world load).
+        if (blueNoiseSequence == null) {
+            blueNoiseSequence = RtBlueNoiseSequence.create(ctx);
+        }
         RtImage displayInput = rrOutput != null ? rrOutput : output;
         displayPipeline.setImages(displayImage.view, displayInput.view, exposure.image().view, hdrDisplayImage.view,
                 blueNoiseSequence.buffer());
