@@ -17,17 +17,27 @@ final class ResponsiveOptionsMenuContractTest {
         assertTrue(entry.contains("extends CausticaSettingsScreen"));
         assertTrue(workstation.contains("OVERVIEW(\"Overview\")"));
         assertTrue(workstation.contains("MAX_CONTENT_WIDTH = 1600"));
-        assertTrue(workstation.contains("MAX_GRID_COLUMNS = 6"));
+        assertTrue(workstation.contains("TARGET_CELL_WIDTH = 180"));
+        assertTrue(workstation.contains("MAX_GRID_COLUMNS = 8"));
         assertTrue(workstation.contains("new EditBox"));
         assertTrue(workstation.contains("setResponder(this::searchChanged)"));
-        assertTrue(workstation.contains("setInitialFocus(searchBox)"));
+        assertTrue(workstation.contains("setInitialFocus(targetWidget != null ? targetWidget : searchBox)"));
         assertTrue(workstation.contains("addSearchResults()"));
         assertTrue(workstation.contains("matchesSearch"));
         assertTrue(workstation.contains("addQuickLinks"));
         assertTrue(workstation.contains("recent(itemLimit)"));
         assertTrue(workstation.contains("frequent(itemLimit, recent)"));
+        assertTrue(workstation.contains("Math.clamp((available - 28) / 40, 0, 8)"));
+        assertTrue(workstation.contains("revealControl(item)"));
+        assertTrue(workstation.contains("pendingTargetId"));
+        assertTrue(workstation.contains("TARGET_FLASH_MILLIS"));
+        assertTrue(workstation.contains("bodyScrollArea.setScrollAmount"));
+        assertTrue(workstation.contains("usageCategories"));
         assertTrue(usage.contains("FREQUENCY_HALF_LIFE_DAYS = 30.0"));
         assertTrue(usage.contains("caustica-menu-usage.json"));
+        assertTrue(usage.contains("lastCategory"));
+        assertTrue(usage.contains("scrollPositions"));
+        assertTrue(usage.contains("setMenuPosition"));
     }
 
     @Test

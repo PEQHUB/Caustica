@@ -2,6 +2,9 @@ package dev.comfyfluffy.caustica.client;
 
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 import com.google.gson.reflect.TypeToken;
 import java.io.IOException;
 import java.lang.reflect.Type;
@@ -25,24 +28,45 @@ final class CausticaMenuUsage {
     private static final double FREQUENCY_HALF_LIFE_DAYS = 30.0;
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
     private static final Type ENTRY_MAP_TYPE = new TypeToken<Map<String, Entry>>() { }.getType();
+    private static final Type SNAPSHOT_TYPE = new TypeToken<Snapshot>() { }.getType();
 
     private final Path path = FabricLoader.getInstance().getConfigDir().resolve("caustica-menu-usage.json");
     private final Map<String, Entry> entries = new HashMap<>();
+    private final Map<String, Double> scrollPositions = new HashMap<>();
+    private String lastCategory = "OVERVIEW";
     private boolean dirty;
 
     private CausticaMenuUsage() {
         load();
     }
 
-    synchronized void record(String label) {
+    synchronized void record(String label, String category) {
         String trimmed = label == null ? "" : label.trim();
         if (trimmed.isEmpty()) return;
         String id = normalize(trimmed);
         Entry entry = entries.computeIfAbsent(id, ignored -> new Entry());
         entry.label = trimmed;
+        entry.category = category == null ? "" : category;
         entry.count++;
         entry.lastUsedMillis = System.currentTimeMillis();
         dirty = true;
+    }
+
+    synchronized String lastCategory() {
+        return lastCategory;
+    }
+
+    synchronized double scrollPosition(String category) {
+        return scrollPositions.getOrDefault(category, 0.0);
+    }
+
+    synchronized void setMenuPosition(String category, double scrollAmount) {
+        if (category == null || category.isBlank() || !Double.isFinite(scrollAmount)) return;
+        double normalizedScroll = Math.max(0.0, scrollAmount);
+        Double previous = scrollPositions.put(category, normalizedScroll);
+        boolean categoryChanged = !category.equals(lastCategory);
+        lastCategory = category;
+        if (categoryChanged || previous == null || Math.abs(previous - normalizedScroll) > 0.5) dirty = true;
     }
 
     synchronized List<Item> recent(int limit) {
@@ -50,7 +74,7 @@ final class CausticaMenuUsage {
                 .sorted(Comparator.<Map.Entry<String, Entry>>comparingLong(value -> value.getValue().lastUsedMillis)
                         .reversed())
                 .limit(Math.max(0, limit))
-                .map(value -> new Item(value.getKey(), value.getValue().label))
+                .map(value -> new Item(value.getKey(), value.getValue().label, value.getValue().category))
                 .toList();
     }
 
@@ -64,7 +88,7 @@ final class CausticaMenuUsage {
                                 value -> score(value.getValue(), now)).reversed()
                         .thenComparing(value -> value.getValue().label, String.CASE_INSENSITIVE_ORDER))
                 .limit(Math.max(0, limit))
-                .map(value -> new Item(value.getKey(), value.getValue().label))
+                .map(value -> new Item(value.getKey(), value.getValue().label, value.getValue().category))
                 .toList();
     }
 
@@ -73,7 +97,8 @@ final class CausticaMenuUsage {
         try {
             Files.createDirectories(path.getParent());
             Path temporary = path.resolveSibling(path.getFileName() + ".tmp");
-            Files.writeString(temporary, GSON.toJson(entries, ENTRY_MAP_TYPE));
+            Files.writeString(temporary, GSON.toJson(
+                    new Snapshot(entries, lastCategory, scrollPositions), SNAPSHOT_TYPE));
             try {
                 Files.move(temporary, path, StandardCopyOption.REPLACE_EXISTING,
                         StandardCopyOption.ATOMIC_MOVE);
@@ -89,10 +114,28 @@ final class CausticaMenuUsage {
     private void load() {
         if (!Files.isRegularFile(path)) return;
         try {
-            Map<String, Entry> loaded = GSON.fromJson(Files.readString(path), ENTRY_MAP_TYPE);
-            if (loaded != null) entries.putAll(loaded);
+            JsonElement root = JsonParser.parseString(Files.readString(path));
+            JsonObject object = root.isJsonObject() ? root.getAsJsonObject() : null;
+            if (object != null && object.has("entries")) {
+                Snapshot loaded = GSON.fromJson(root, SNAPSHOT_TYPE);
+                if (loaded != null && loaded.entries() != null) entries.putAll(loaded.entries());
+                if (loaded != null && loaded.lastCategory() != null) lastCategory = loaded.lastCategory();
+                if (loaded != null && loaded.scrollPositions() != null) {
+                    loaded.scrollPositions().forEach((category, scroll) -> {
+                        if (category != null && scroll != null && Double.isFinite(scroll)) {
+                            scrollPositions.put(category, Math.max(0.0, scroll));
+                        }
+                    });
+                }
+            } else {
+                // Backward-compatible migration from the original label -> usage-entry map.
+                Map<String, Entry> loaded = GSON.fromJson(root, ENTRY_MAP_TYPE);
+                if (loaded != null) entries.putAll(loaded);
+            }
         } catch (RuntimeException | IOException ignored) {
             entries.clear();
+            scrollPositions.clear();
+            lastCategory = "OVERVIEW";
         }
     }
 
@@ -101,15 +144,20 @@ final class CausticaMenuUsage {
         return entry.count * Math.pow(0.5, ageDays / FREQUENCY_HALF_LIFE_DAYS);
     }
 
-    private static String normalize(String value) {
+    static String normalize(String value) {
         return value.toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9]+", " ").trim();
     }
 
-    record Item(String id, String label) {
+    record Item(String id, String label, String category) {
+    }
+
+    private record Snapshot(Map<String, Entry> entries, String lastCategory,
+                            Map<String, Double> scrollPositions) {
     }
 
     private static final class Entry {
         String label = "";
+        String category = "";
         long count;
         long lastUsedMillis;
     }

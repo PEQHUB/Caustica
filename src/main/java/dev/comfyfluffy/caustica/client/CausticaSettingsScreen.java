@@ -28,6 +28,7 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.OptionInstance;
 import net.minecraft.client.Options;
 import net.minecraft.client.gui.GuiGraphicsExtractor;
+import net.minecraft.client.gui.components.AbstractScrollArea;
 import net.minecraft.client.gui.components.AbstractWidget;
 import net.minecraft.client.gui.components.EditBox;
 import net.minecraft.client.gui.components.ScrollableLayout;
@@ -44,11 +45,12 @@ public class CausticaSettingsScreen extends Screen {
     private static final int HEADER_HEIGHT = 28;
     private static final int FOOTER_HEIGHT = 28;
     private static final int RAIL_WIDTH = 104;
-    private static final int GRID_GAP = 4;
-    private static final int CONTROL_HEIGHT = 22;
+    private static final int GRID_GAP = 3;
+    private static final int CONTROL_HEIGHT = 20;
     private static final int MAX_CONTENT_WIDTH = 1600;
-    private static final int TARGET_CELL_WIDTH = 220;
-    private static final int MAX_GRID_COLUMNS = 6;
+    private static final int TARGET_CELL_WIDTH = 180;
+    private static final int MAX_GRID_COLUMNS = 8;
+    private static final long TARGET_FLASH_MILLIS = 1800L;
     private static final List<Integer> DLSS_QUALITY_ORDER = List.of(3, 0, 1, 2, 5);
     private static final List<Integer> SHARC_CACHE_EXPONENTS = List.of(
             16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28);
@@ -65,9 +67,12 @@ public class CausticaSettingsScreen extends Screen {
     private final Screen previous;
     protected final Options options;
     private ScrollableLayout bodyScroll;
+    private AbstractScrollArea bodyScrollArea;
     private CategoryLayout body;
     private final Map<AbstractWidget, Runnable> toneResets = new IdentityHashMap<>();
     private final Map<AbstractWidget, String> usageLabels = new IdentityHashMap<>();
+    private final Map<AbstractWidget, Category> usageCategories = new IdentityHashMap<>();
+    private final Map<String, Category> controlCategories = new java.util.HashMap<>();
     private final List<Dropdown<?>> dropdowns = new ArrayList<>();
     private final List<QuickHeading> quickHeadings = new ArrayList<>();
     private final List<AbstractWidget> collectedSearchResults = new ArrayList<>();
@@ -75,10 +80,16 @@ public class CausticaSettingsScreen extends Screen {
     private String searchQuery = "";
     private String searchContext = "";
     private boolean collectingSearchResults;
+    private boolean indexingControls;
     private boolean saved;
     private int contentWidth;
     private int gridColumns;
     private Category category = Category.OVERVIEW;
+    private Category buildingCategory = Category.OVERVIEW;
+    private String pendingTargetId;
+    private AbstractWidget targetWidget;
+    private AbstractWidget flashWidget;
+    private long flashUntilMillis;
 
     private enum Category {
         OVERVIEW("Overview"), OUTPUT("Display & Latency"), RECONSTRUCTION("Reconstruction"),
@@ -96,9 +107,11 @@ public class CausticaSettingsScreen extends Screen {
         super(Component.translatable("caustica.options.title"));
         this.previous = previous;
         this.options = options;
-        if (initialCategory != null) {
+        String requestedCategory = initialCategory != null
+                ? initialCategory : CausticaMenuUsage.INSTANCE.lastCategory();
+        if (requestedCategory != null) {
             try {
-                this.category = Category.valueOf(initialCategory.toUpperCase(Locale.ROOT));
+                this.category = Category.valueOf(requestedCategory.toUpperCase(Locale.ROOT));
             } catch (IllegalArgumentException ignored) {
                 this.category = Category.OVERVIEW;
             }
@@ -110,9 +123,14 @@ public class CausticaSettingsScreen extends Screen {
         saved = false;
         toneResets.clear();
         usageLabels.clear();
+        usageCategories.clear();
+        controlCategories.clear();
         dropdowns.clear();
         quickHeadings.clear();
         collectedSearchResults.clear();
+        bodyScrollArea = null;
+        targetWidget = null;
+        flashWidget = null;
         int paneLeft = MARGIN + RAIL_WIDTH + 8;
         int availableWidth = Math.max(180, width - paneLeft - MARGIN - 8);
         contentWidth = Math.min(MAX_CONTENT_WIDTH, availableWidth);
@@ -138,23 +156,13 @@ public class CausticaSettingsScreen extends Screen {
             addRenderableWidget(button);
             railY += CONTROL_HEIGHT + 3;
         }
-        addQuickLinks(railY + 4);
-
         body = new CategoryLayout(contentWidth, 4);
+        indexControlCategories();
+        addQuickLinks(railY + 4);
         if (!searchQuery.isBlank()) {
             addSearchResults();
         } else {
-            switch (category) {
-                case OVERVIEW -> addOverview();
-                case OUTPUT -> addOutput();
-                case RECONSTRUCTION -> addReconstruction();
-                case LIGHTING -> addLighting();
-                case EXPOSURE -> addExposure();
-                case GEOMETRY -> addGeometry();
-                case SHARC -> addSharc();
-                case VIEW -> addView();
-                case DIAGNOSTICS -> addDiagnostics();
-            }
+            addCategory(category);
         }
         body.addChild(SpacerElement.height(8));
 
@@ -165,21 +173,55 @@ public class CausticaSettingsScreen extends Screen {
         bodyScroll.setMinWidth(contentWidth);
         bodyScroll.setX(paneLeft);
         bodyScroll.setY(bodyTop);
-        bodyScroll.visitWidgets(this::addRenderableWidget);
+        bodyScroll.visitWidgets(widget -> {
+            if (widget instanceof AbstractScrollArea scrollArea) bodyScrollArea = scrollArea;
+            addRenderableWidget(widget);
+        });
 
         ActionButton done = new ActionButton(110, () -> Component.translatable("gui.done"), this::onClose, true);
         done.setRectangle(110, CONTROL_HEIGHT, paneLeft + contentWidth - 110,
                 height - MARGIN - CONTROL_HEIGHT);
         addRenderableWidget(done);
         repositionElements();
-        setInitialFocus(searchBox);
+        restorePositionOrRevealTarget(bodyTop);
+        setInitialFocus(targetWidget != null ? targetWidget : searchBox);
     }
 
     private void selectCategory(Category target) {
         if (category == target && searchQuery.isBlank()) return;
+        rememberMenuPosition();
         category = target;
         searchQuery = "";
-        rebuild();
+        rebuildScreen();
+    }
+
+    private void addCategory(Category target) {
+        buildingCategory = target;
+        switch (target) {
+            case OVERVIEW -> addOverview();
+            case OUTPUT -> addOutput();
+            case RECONSTRUCTION -> addReconstruction();
+            case LIGHTING -> addLighting();
+            case EXPOSURE -> addExposure();
+            case GEOMETRY -> addGeometry();
+            case SHARC -> addSharc();
+            case VIEW -> addView();
+            case DIAGNOSTICS -> addDiagnostics();
+        }
+    }
+
+    private void indexControlCategories() {
+        indexingControls = true;
+        collectingSearchResults = true;
+        for (Category value : Category.values()) addCategory(value);
+        collectingSearchResults = false;
+        indexingControls = false;
+        collectedSearchResults.clear();
+        toneResets.clear();
+        dropdowns.clear();
+        usageLabels.clear();
+        usageCategories.clear();
+        buildingCategory = category;
     }
 
     private void addOverview() {
@@ -248,22 +290,19 @@ public class CausticaSettingsScreen extends Screen {
 
     private void searchChanged(String value) {
         if (value.equals(searchQuery)) return;
+        rememberMenuPosition();
         searchQuery = value;
-        rebuild();
+        rebuildScreen();
     }
 
     private void addSearchResults() {
         collectingSearchResults = true;
         collectedSearchResults.clear();
-        addOutput();
-        addReconstruction();
-        addLighting();
-        addExposure();
-        addGeometry();
-        addSharc();
-        addView();
-        addDiagnostics();
+        for (Category value : Category.values()) {
+            if (value != Category.OVERVIEW) addCategory(value);
+        }
         collectingSearchResults = false;
+        buildingCategory = category;
         searchContext = "";
 
         addHeader("Search results", collectedSearchResults.size() + " matching controls");
@@ -276,7 +315,7 @@ public class CausticaSettingsScreen extends Screen {
 
     private void addQuickLinks(int top) {
         int available = height - FOOTER_HEIGHT - MARGIN - top;
-        int itemLimit = Math.clamp((available - 24) / 40, 0, 3);
+        int itemLimit = Math.clamp((available - 28) / 40, 0, 8);
         if (itemLimit == 0) return;
 
         List<CausticaMenuUsage.Item> recent = CausticaMenuUsage.INSTANCE.recent(itemLimit);
@@ -292,7 +331,7 @@ public class CausticaSettingsScreen extends Screen {
         int y = top + 12;
         for (CausticaMenuUsage.Item item : items) {
             ActionButton button = new ActionButton(RAIL_WIDTH,
-                    () -> Component.literal(item.label()), () -> searchFor(item.label()), false);
+                    () -> Component.literal(item.label()), () -> revealControl(item), false);
             button.setRectangle(RAIL_WIDTH, 18, MARGIN, y);
             addRenderableWidget(button);
             y += 20;
@@ -300,9 +339,27 @@ public class CausticaSettingsScreen extends Screen {
         return y + 4;
     }
 
-    private void searchFor(String label) {
-        searchQuery = label;
-        rebuild();
+    private void revealControl(CausticaMenuUsage.Item item) {
+        Category target = null;
+        if (item.category() != null && !item.category().isBlank()) {
+            try {
+                target = Category.valueOf(item.category());
+            } catch (IllegalArgumentException ignored) {
+                // Older or externally edited history falls through to the live control index.
+            }
+        }
+        if (target == null) target = controlCategories.get(item.id());
+        if (target == null) {
+            rememberMenuPosition();
+            searchQuery = item.label();
+            rebuildScreen();
+            return;
+        }
+        rememberMenuPosition();
+        category = target;
+        searchQuery = "";
+        pendingTargetId = item.id();
+        rebuildScreen();
     }
 
     private void addOutput() {
@@ -698,9 +755,20 @@ public class CausticaSettingsScreen extends Screen {
 
     private void registerControls(List<? extends AbstractWidget> controls) {
         for (AbstractWidget control : controls) {
+            boolean trackable = control instanceof LabeledControl || toneResets.containsKey(control);
+            String label = trackable ? controlLabel(control) : null;
+            String id = trackable ? CausticaMenuUsage.normalize(label) : null;
+            if (indexingControls) {
+                if (trackable) controlCategories.putIfAbsent(id, buildingCategory);
+                continue;
+            }
             if (control instanceof Dropdown<?> dropdown) dropdowns.add(dropdown);
-            if (control instanceof LabeledControl || toneResets.containsKey(control)) {
-                usageLabels.put(control, controlLabel(control));
+            if (!trackable) continue;
+            usageLabels.put(control, label);
+            usageCategories.put(control, buildingCategory);
+            controlCategories.putIfAbsent(id, buildingCategory);
+            if (pendingTargetId != null && pendingTargetId.equals(id) && buildingCategory == category) {
+                targetWidget = control;
             }
         }
     }
@@ -802,8 +870,32 @@ public class CausticaSettingsScreen extends Screen {
     }
 
     private void rebuild() {
+        rememberMenuPosition();
+        rebuildScreen();
+    }
+
+    private void rebuildScreen() {
         clearWidgets();
         init();
+    }
+
+    private void rememberMenuPosition() {
+        if (bodyScrollArea != null && searchQuery.isBlank()) {
+            CausticaMenuUsage.INSTANCE.setMenuPosition(category.name(), bodyScrollArea.scrollAmount());
+        }
+    }
+
+    private void restorePositionOrRevealTarget(int bodyTop) {
+        if (bodyScrollArea == null) return;
+        if (targetWidget != null) {
+            double targetScroll = Math.max(0.0, targetWidget.getY() - bodyTop - CONTROL_HEIGHT);
+            bodyScrollArea.setScrollAmount(targetScroll);
+            flashWidget = targetWidget;
+            flashUntilMillis = System.currentTimeMillis() + TARGET_FLASH_MILLIS;
+            pendingTargetId = null;
+        } else if (searchQuery.isBlank()) {
+            bodyScrollArea.setScrollAmount(CausticaMenuUsage.INSTANCE.scrollPosition(category.name()));
+        }
     }
 
     protected void repositionElements() {
@@ -828,10 +920,30 @@ public class CausticaSettingsScreen extends Screen {
                 height - FOOTER_HEIGHT - MARGIN + 1, 0x50FFFFFF);
         g.text(font, Component.literal("Shift+click a control to restore its default"),
                 paneLeft + 2, height - FOOTER_HEIGHT + 3, CausticaWidgets.MUTED);
+        extractTargetFlash(g);
         super.extractRenderState(g, mouseX, mouseY, partialTick);
         for (Dropdown<?> dropdown : dropdowns) {
             dropdown.extractOverlay(g, mouseX, mouseY, height);
         }
+    }
+
+    private void extractTargetFlash(GuiGraphicsExtractor g) {
+        if (flashWidget == null) return;
+        long remaining = flashUntilMillis - System.currentTimeMillis();
+        if (remaining <= 0L) {
+            flashWidget = null;
+            return;
+        }
+        int alpha = ((remaining / 140L) & 1L) == 0L ? 0xE0 : 0x70;
+        int color = (alpha << 24) | (CausticaWidgets.ACCENT & 0x00FFFFFF);
+        int left = flashWidget.getX() - 2;
+        int top = flashWidget.getY() - 2;
+        int right = flashWidget.getRight() + 2;
+        int bottom = flashWidget.getBottom() + 2;
+        g.fill(left, top, right, top + 2, color);
+        g.fill(left, bottom - 2, right, bottom, color);
+        g.fill(left, top + 2, left + 2, bottom - 2, color);
+        g.fill(right - 2, top + 2, right, bottom - 2, color);
     }
 
     @Override
@@ -893,7 +1005,7 @@ public class CausticaSettingsScreen extends Screen {
             if (closed) return true;
             if (!searchQuery.isBlank()) {
                 searchQuery = "";
-                rebuild();
+                rebuildScreen();
                 return true;
             }
         }
@@ -914,6 +1026,7 @@ public class CausticaSettingsScreen extends Screen {
 
     private void saveAll() {
         if (saved) return;
+        rememberMenuPosition();
         saved = true;
         CausticaMenuUsage.INSTANCE.save();
         CausticaConfig.save();
@@ -922,7 +1035,8 @@ public class CausticaSettingsScreen extends Screen {
 
     private void recordControl(AbstractWidget widget) {
         String label = usageLabels.get(widget);
-        if (label != null) CausticaMenuUsage.INSTANCE.record(label);
+        Category owner = usageCategories.getOrDefault(widget, category);
+        if (label != null) CausticaMenuUsage.INSTANCE.record(label, owner.name());
     }
 
     private record QuickHeading(String label, int y) {
