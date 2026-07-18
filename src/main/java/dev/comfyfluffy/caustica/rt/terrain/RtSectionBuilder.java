@@ -29,7 +29,26 @@ final class RtSectionBuilder {
                                    RtAccel.OpacityMicromapInput ommInput,
                                    long key, int sox, int soy, int soz) {
         RtMaterialAbi.requireTriangleParity(packed.material().length, packed.indices().length);
+        if (packed.positions().length % 3 != 0 || packed.indices().length % 3 != 0) {
+            throw new IllegalArgumentException("terrain positions/indices are not triangle aligned");
+        }
         int vertCount = packed.positions().length / 3;
+        long bucketIndexCount = 0L;
+        for (int triangles : packed.bucketTris()) {
+            if (triangles < 0) throw new IllegalArgumentException("negative terrain bucket triangle count");
+            bucketIndexCount += (long) triangles * 3L;
+        }
+        if (bucketIndexCount != packed.indices().length) {
+            throw new IllegalArgumentException("terrain bucket/index mismatch: buckets=" + bucketIndexCount
+                    + " indices=" + packed.indices().length);
+        }
+        for (int i = 0; i < packed.indices().length; i++) {
+            int index = packed.indices()[i];
+            if (index < 0 || index >= vertCount) {
+                throw new IllegalArgumentException("terrain index " + index + " at " + i
+                        + " outside [0," + vertCount + ")");
+            }
+        }
         int asInput = org.lwjgl.vulkan.KHRAccelerationStructure
                 .VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
         int storage = VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
