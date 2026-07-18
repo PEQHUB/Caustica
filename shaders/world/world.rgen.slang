@@ -46,6 +46,7 @@
 #define CAUSTICA_SER 0
 #endif
 import world_common;
+import world_sky_lut;
 
 #if CAUSTICA_SHARC_UPDATE || CAUSTICA_SHARC_QUERY
 #define SHARC_UPDATE CAUSTICA_SHARC_UPDATE
@@ -303,6 +304,7 @@ void payloadSetTraceState(bool showCelestial, bool filterSky, bool primaryRay,
             | (filterSky ? PAYLOAD_FILTER_SKY : 0u)
             | (primaryRay ? PAYLOAD_PRIMARY_RAY : 0u);
     payload.rayCone = packHalf2(float2(rayConeWidth, rayConeSpread));
+    payload.chunkFade = 1.0;
 }
 
 static const float PI = 3.14159265359;
@@ -1278,6 +1280,7 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
     // would be a double-counted firefly. Reset true on every specular/water bounce, false on a diffuse one.
     bool showCelestial = true;
     float primaryHitDistance = -1.0;
+    float primaryChunkFade = 1.0;
     int maxPathSegments = maxBounces + maxMirrorDepth + MAX_OPTICAL_INTERFACE_DEPTH + 1;
     for (int segment = 0; segment < maxPathSegments; segment++) {
         beginBounce(sampler, uint(segment));
@@ -1303,6 +1306,7 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
 
         if (segment == 0 && payload.hitT >= 0.0) {
             primaryHitDistance = payload.hitT;
+            primaryChunkFade = payload.chunkFade;
         }
 
         // The direction is captured when the first scattering vertex spawns its diffuse continuation.
@@ -1973,12 +1977,23 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
 #if !CAUSTICA_SHARC_UPDATE
     // Border fog is a camera-space presentation boundary, not participating media in path transport.
     // Apply it once to the completed camera path so secondary rays retain their physical contribution,
-    // while the visible surface converges into Minecraft's dimension fog before finite RT residency ends.
-    if (primaryHitDistance >= 0.0) {
-        float fogStart = pc.borderFogParams.x;
+    // while the visible surface converges into the light-conditioned atmosphere before RT residency ends.
+    // Vanilla's chunk-section fade applies to the newly published section itself. Reveal it from the
+    // same physical atmosphere that conceals the residency boundary, without changing secondary rays.
+    if (primaryHitDistance >= 0.0 && primaryChunkFade < 1.0) {
+        L = lerp(atmosphericBoundaryFog(rd, pc), L, primaryChunkFade);
+    }
+    float fogStart = pc.borderFogParams.x;
+    if (primaryHitDistance > fogStart) {
         float fogEnd = max(pc.borderFogParams.y, fogStart + 1.0);
-        float fogWeight = smoothstep(fogStart, fogEnd, primaryHitDistance);
-        L = lerp(L, max(pc.borderFogColor.xyz, float3(0.0)), fogWeight);
+        float fogProgress = clamp((primaryHitDistance - fogStart) / (fogEnd - fogStart), 0.0, 1.0);
+        // A quadratic optical-depth curtain stays unobtrusive at its inner edge but reaches 99.75%
+        // extinction before residency ends. New-section age handles arrivals inside this boundary.
+        float opticalDepth = 6.0 * fogProgress * fogProgress;
+        float fogWeight = 1.0 - exp(-opticalDepth);
+        // Attenuate the completed camera path once, then replace the lost radiance with the same
+        // light-conditioned atmosphere used by visible sky misses. This does not enter path transport.
+        L = lerp(L, atmosphericBoundaryFog(rd, pc), fogWeight);
     }
 #endif
     return L;
@@ -2216,7 +2231,6 @@ void main() {
             gv_animatedGuide = 1.0;
         }
     }
-
     // The existing reflection-motion trace also performs PSR for exact mirrors, so run it before ordinary
     // depth/motion are derived from the potentially replaced virtual surface.
     float2 specMotion = float2(0.0, 0.0);

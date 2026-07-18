@@ -1684,7 +1684,10 @@ public final class RtComposite {
                     sky.skyState(),
                     sky.skyLighting(),
                     sky.borderFogColor(),
-                    sky.borderFogParams()
+                    sky.borderFogParams(),
+                    new Float4(RtTerrain.fadeClockSeconds(),
+                            Minecraft.getInstance().options.chunkSectionFadeInTime().get().floatValue(),
+                            0.0f, 0.0f)
             ).write(push);
             if (skyViewPipeline != null && skyViewLut != null) {
                 if (!skyTransmittanceReady) {
@@ -2036,7 +2039,9 @@ public final class RtComposite {
         Float4 borderFogColor = linearBt2020FromPackedRgb(
                 probe.getValue(EnvironmentAttributes.FOG_COLOR, partial));
         int renderDistanceChunks = Math.max(1, mc.options.getEffectiveRenderDistance());
-        float borderFogStart = Math.max(0.0f, (renderDistanceChunks - 3.0f) * 16.0f);
+        // Keep the ordinary view clear. The final three chunk rings form a dense, physically sky-colored
+        // residency curtain; actual late arrivals inside it are handled independently by section age.
+        float borderFogStart = Math.max(0.0f, (renderDistanceChunks - 3.5f) * 16.0f);
         float borderFogEnd = Math.max(borderFogStart + 16.0f,
                 (renderDistanceChunks - 0.5f) * 16.0f);
         Float4 borderFogParams = new Float4(borderFogStart, borderFogEnd, 0.0f, 0.0f);

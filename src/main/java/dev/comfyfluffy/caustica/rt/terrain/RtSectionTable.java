@@ -19,7 +19,7 @@ import java.util.concurrent.ConcurrentLinkedQueue;
  * registry, and published static-instance list here while {@link RtTerrain} retains publication order.
  */
 final class RtSectionTable {
-    private static final int SECTION_ENTRY_BYTES = 32;
+    private static final int SECTION_ENTRY_BYTES = 48;
     RtBuffer buffer;
     int capacity;
     int nextSlot;
@@ -169,6 +169,8 @@ final class RtSectionTable {
         MemoryUtil.memPutInt(base + 20, geom.triBase[1]);
         MemoryUtil.memPutInt(base + 24, geom.triBase[2]);
         MemoryUtil.memPutInt(base + 28, geom.triBase[3]);
+        MemoryUtil.memPutFloat(base + 32, geom.publishedTime);
+        MemoryUtil.memSet(base + 36, 0, 12);
         markDirty(offset, SECTION_ENTRY_BYTES);
     }
 
@@ -203,11 +205,12 @@ final class RtSectionTable {
         final int sx;
         final int sy;
         final int sz;
+        final float publishedTime;
         int slot = -1;
         int instanceIndex = -1;
 
         SectionGeom(long key, RtBuffer uvs, RtBuffer material,
-                    RtAccel blas, int[] triBase, int sx, int sy, int sz) {
+                    RtAccel blas, int[] triBase, int sx, int sy, int sz, float publishedTime) {
             this.key = key;
             this.uvs = uvs;
             this.material = material;
@@ -216,6 +219,7 @@ final class RtSectionTable {
             this.sx = sx;
             this.sy = sy;
             this.sz = sz;
+            this.publishedTime = publishedTime;
         }
 
         void destroy() {

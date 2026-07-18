@@ -90,6 +90,11 @@ import dev.comfyfluffy.caustica.rt.terrain.RtSectionTable.SectionGeom;
  * are retired against graphics timeline completion (no {@code waitIdle} on the hot path).
  */
 public final class RtTerrain {
+    private static final long FADE_CLOCK_EPOCH_NANOS = System.nanoTime();
+
+    public static float fadeClockSeconds() {
+        return (float) ((System.nanoTime() - FADE_CLOCK_EPOCH_NANOS) / 1.0e9);
+    }
     // The render thread snapshots and publishes; workers mesh, allocate/fill, prepare BLAS/OMM objects,
     // and enqueue builds. The streaming pass is bounded so render-thread bookkeeping stays flat.
     private static int asyncDispatchPerPass() {
@@ -1401,8 +1406,10 @@ public final class RtTerrain {
         }
 
         for (PreparedSection ps : prepared) {
+            SectionGeom previous = resident.get(ps.key());
+            float publishedTime = previous != null ? previous.publishedTime : fadeClockSeconds();
             SectionGeom g = new SectionGeom(ps.key(), ps.uvs(), ps.material(),
-                    ps.blas().accel, ps.triBase(), ps.sx(), ps.sy(), ps.sz());
+                    ps.blas().accel, ps.triBase(), ps.sx(), ps.sy(), ps.sz(), publishedTime);
             if (!desired.contains(ps.key())) {
                 // Left the window while its batched BLAS build was in flight (window sync keeps running
                 // during builds). Never published — retire the fresh, unreferenced geometry.

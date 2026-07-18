@@ -101,6 +101,7 @@ public struct WorldPush {
     [vk::offset(608)] public float4 skyLighting;
     [vk::offset(624)] public float4 borderFogColor;
     [vk::offset(640)] public float4 borderFogParams; // start distance, end distance, reserved, reserved
+    [vk::offset(656)] public float4 chunkFade; // clock seconds, vanilla fade duration, reserved, reserved
 };
 
 // Radiance-ray payload (location 0). Member order and types are a cross-stage ABI.
@@ -116,6 +117,7 @@ public struct Payload {
     public uint   iorTransmission; // packHalf2x16(IOR, transmission factor)
     public uint   rayCone;     // packHalf2x16(width, spread)
     public float3 geometricNormal;
+    public float chunkFade;
 };
 
 public static const uint PAYLOAD_SHOW_CELESTIAL = 4u;
@@ -209,6 +211,12 @@ public struct Section {
     public uint64_t primAddr;
     public uint64_t uvAddr;
     public uint triBase[4]; // fixed bucket order: solid/cutout/translucent/water
+    public float publishedTime;
+    // Keep these scalar: a trailing float3 has 16-byte alignment and silently changes this BDA array's
+    // stride from the CPU-authored 48 bytes to 64 bytes.
+    public float reserved0;
+    public float reserved1;
+    public float reserved2;
 };
 
 // Entity geometry record: packed buffer addresses, motion, and per-geometry triangle bases. Entity BLAS
