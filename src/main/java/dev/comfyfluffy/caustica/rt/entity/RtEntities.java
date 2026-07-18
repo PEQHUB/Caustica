@@ -564,7 +564,21 @@ public final class RtEntities {
         final MotionArena motion = new MotionArena();
         final ArrayList<EntitySlot> usedEntitySlots = new ArrayList<>(entityListCapacity());
         final ArrayList<BeEntry> usedBlockEntities = new ArrayList<>();
+        // Instance transforms escape into the TLAS instance list until this frame slot retires. Keep their
+        // backing arrays with the same timeline-gated owner instead of allocating one float[12] per entity.
+        final ArrayList<float[]> transforms = new ArrayList<>(entityListCapacity());
+        int transformCursor;
         long lastGraphicsUse;
+
+        float[] acquireTransform() {
+            if (transformCursor == transforms.size()) {
+                transforms.add(new float[12]);
+                RtFrameStats.FRAME.count("entityTransformPoolAllocations", 1);
+            } else {
+                RtFrameStats.FRAME.count("entityTransformPoolReuses", 1);
+            }
+            return transforms.get(transformCursor++);
+        }
 
         void reset() {
             instances.clear();
@@ -575,6 +589,7 @@ public final class RtEntities {
             usedEntitySlots.clear();
             usedBlockEntities.clear();
             motion.reset();
+            transformCursor = 0;
         }
 
         void releaseDeferred() {
@@ -598,6 +613,7 @@ public final class RtEntities {
 
         void destroyPersistent() {
             motion.destroy();
+            transforms.clear();
         }
     }
 
@@ -840,7 +856,7 @@ public final class RtEntities {
             }
             if (!reused) {
                 appendCapture(ctx, build, motion, key, ENTITY_BIT, mask,
-                        translationTransform(ix - rbx, iy - rby, iz - rbz));
+                        translationTransform(ctx, build, ix - rbx, iy - rby, iz - rbz));
             }
             build.logicalCount++;
             RtFrameStats.FRAME.count("entitiesCaptured", 1);
@@ -879,7 +895,7 @@ public final class RtEntities {
         boolean reused = appendRigidReuse(ctx, build, motion, key, mask, x - rbx, y - rby, z - rbz);
         if (!reused) {
             appendCapture(ctx, build, motion, key, ENTITY_BIT, mask,
-                    translationTransform(x - rbx, y - rby, z - rbz));
+                    translationTransform(ctx, build, x - rbx, y - rby, z - rbz));
         }
         build.logicalCount++;
         RtFrameStats.FRAME.count("entitiesCaptured", 1);
@@ -1523,7 +1539,7 @@ public final class RtEntities {
         build.lists.usedEntitySlots.add(ea.refSlot);
         writeTableEntry(build, ea.refPrimAddr, ea.refIndexAddr, ea.refUvAddr,
                 motion.dispAddr, motion.rigidX, motion.rigidY, motion.rigidZ, ea.refBucketTris);
-        build.instances.add(new RtAccel.Instance(placeTransform(localTransform, placeX, placeY, placeZ),
+        build.instances.add(new RtAccel.Instance(placeTransform(build, localTransform, placeX, placeY, placeZ),
                 ea.refAccel,
                 ENTITY_BIT | (build.count & 0x3FFFFF), mask, RtAccel.SBT_ENTITY_OFFSET));
         build.count++;
@@ -1588,18 +1604,30 @@ public final class RtEntities {
         return true;
     }
 
-    private static float[] translationTransform(float x, float y, float z) {
-        return new float[] {1, 0, 0, x, 0, 1, 0, y, 0, 0, 1, z};
+    private void writeTranslationTransform(float[] out, float x, float y, float z) {
+        out[0] = 1; out[1] = 0; out[2] = 0; out[3] = x;
+        out[4] = 0; out[5] = 1; out[6] = 0; out[7] = y;
+        out[8] = 0; out[9] = 0; out[10] = 1; out[11] = z;
     }
 
-    private static float[] placeTransform(float[] local, float x, float y, float z) {
+    private float[] translationTransform(RtContext ctx, FrameBuild build, float x, float y, float z) {
+        beginBuildIfNeeded(ctx, build);
+        float[] out = build.lists.acquireTransform();
+        writeTranslationTransform(out, x, y, z);
+        return out;
+    }
+
+    private float[] placeTransform(FrameBuild build, float[] local, float x, float y, float z) {
         if (local == IDENTITY) {
-            return translationTransform(x, y, z);
+            float[] out = build.lists.acquireTransform();
+            writeTranslationTransform(out, x, y, z);
+            return out;
         }
-        return new float[] {
-                local[0], local[1], local[2], local[3] + x,
-                local[4], local[5], local[6], local[7] + y,
-                local[8], local[9], local[10], local[11] + z};
+        float[] out = build.lists.acquireTransform();
+        out[0] = local[0]; out[1] = local[1]; out[2] = local[2]; out[3] = local[3] + x;
+        out[4] = local[4]; out[5] = local[5]; out[6] = local[6]; out[7] = local[7] + y;
+        out[8] = local[8]; out[9] = local[9]; out[10] = local[10]; out[11] = local[11] + z;
+        return out;
     }
 
     /**

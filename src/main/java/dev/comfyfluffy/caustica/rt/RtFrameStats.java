@@ -88,6 +88,7 @@ public final class RtFrameStats {
                     "entityDirectRejectNamespace", "entityDirectRejectTopology", "entityDirectRejectCachedTopology",
                     "entitySpecializedCuboids", "entityGenericCuboids",
                     "entityParityChecks", "entityVmaBufferCreates", "entityGeometryBufferReuses",
+                    "entityTransformPoolAllocations", "entityTransformPoolReuses",
                     "entityScratchBufferReuses", "entityUploadBytes", "entityMotionUploadBytes",
                     "entityPackedBytes", "entityPackedPaddingBytes", "entityRetainedGeometryBytes",
                     "entityPackOrderedFastPaths", "entityPackReorderedPaths",
