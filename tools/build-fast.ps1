@@ -84,6 +84,7 @@ Write-Host "Gradle tasks:     $($tasks -join ' ')"
 
 if ($Mode -eq 'Deploy') {
     Remove-Item -LiteralPath "$deployedJar.tmp" -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath "$deployedJar.bak" -Force -ErrorAction SilentlyContinue
     $live = Get-LiveMinecraftProcess
     if ($live) {
         throw "Refusing to replace a JAR under live Minecraft PID $($live.ProcessId). Shut it down through tools\caustica-debug-bridge.ps1 first."
@@ -107,11 +108,15 @@ try {
             throw "Prism mods directory is missing: $mods"
         }
         $temporary = "$deployedJar.tmp"
+        $backup = "$deployedJar.bak"
         Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $backup -Force -ErrorAction SilentlyContinue
         try {
             Copy-Item -LiteralPath $builtJar -Destination $temporary
             if (Test-Path -LiteralPath $deployedJar -PathType Leaf) {
-                [System.IO.File]::Replace($temporary, $deployedJar, $null, $true)
+                # File.Replace requires a legal backup path on Windows. Keep the previous deployed JAR
+                # recoverable until the new artifact's hash has been verified below.
+                [System.IO.File]::Replace($temporary, $deployedJar, $backup, $true)
             } else {
                 Move-Item -LiteralPath $temporary -Destination $deployedJar
             }
@@ -122,6 +127,7 @@ try {
         if ($deployedHash -ne $builtHash) {
             throw "Deployment hash mismatch: built=$builtHash deployed=$deployedHash"
         }
+        Remove-Item -LiteralPath $backup -Force -ErrorAction SilentlyContinue
         Write-Host "Deployed JAR:       $deployedJar"
         Write-Host "Deployed SHA-256:   $deployedHash"
     }
