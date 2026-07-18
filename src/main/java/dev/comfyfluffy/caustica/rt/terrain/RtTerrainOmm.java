@@ -207,7 +207,9 @@ final class RtTerrainOmm {
 
     private static int opacityMicromapSubdivisionLevel() {
         int max = Math.max(0, RtDeviceBringup.maxOpacity4StateSubdivisionLevel());
-        return Math.min(ommSubdivision(), max);
+        // One conservative refinement level beyond the texel grid resolves alpha-boundary
+        // micro-triangles that level 4 must leave on the divergent any-hit path.
+        return Math.min(ommSubdivision() + 1, max);
     }
 
     private record OmmMicroCounts(int opaque, int transparent, int mixed, int unsafe) {}
