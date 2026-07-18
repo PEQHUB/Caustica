@@ -47,10 +47,14 @@ final class PathSamplingContractTest {
     }
 
     @Test
-    void liveContinuationRoulettePrecedesExpensiveLobeSamplingAndRemainsUnbiased() throws Exception {
+    void liveContinuationRoulettePrecedesCurrentVertexLightingAndRemainsUnbiased() throws Exception {
         String raygen = Files.readString(Path.of("shaders/world/world.rgen.slang"));
-        int roulette = raygen.indexOf("Roulette owns only the not-yet-sampled continuation");
+        int roulette = raygen.indexOf("Standard path roulette owns the complete opaque vertex");
+        int emissive = raygen.indexOf("All emissive materials retain the legacy base radiance");
+        int nee = raygen.indexOf("NEE: direct light from the dominant celestial body");
         int lobeSampling = raygen.indexOf("Indirect continuation: importance-sample");
+        assertTrue(emissive > roulette);
+        assertTrue(nee > roulette);
         assertTrue(roulette >= 0);
         assertTrue(lobeSampling > roulette);
         assertTrue(raygen.contains("int rrStart = 1;"));

@@ -1633,6 +1633,19 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
             continue;
         }
 
+        // Standard path roulette owns the complete opaque vertex at indirect depths. Terminated paths
+        // skip emissive evaluation, NEE/visibility and continuation construction; survivors carry the
+        // exact reciprocal probability, so every current-vertex and future contribution stays unbiased.
+#if !CAUSTICA_SHARC_UPDATE && !CAUSTICA_SHARC_QUERY
+        if (scatteringDepth >= rrStart) {
+            float q = clamp(max(throughput.r, max(throughput.g, throughput.b)), 0.02, 1.0);
+            if (rndf(sampler) > q) {
+                break;
+            }
+            throughput /= q;
+        }
+#endif
+
         // All emissive materials retain the legacy base radiance. Only BaseTorchBlock-family primitives
         // receive the player-controlled boost; their authored _s map remains the normalized texel mask.
         float emission = payloadEmission();
@@ -1808,19 +1821,6 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
         if (scatteringDepth >= maxBounces) {
             break;
         }
-
-        // Roulette owns only the not-yet-sampled continuation. Emission and NEE at this vertex are already
-        // accumulated above, so terminating here is unbiased. Running it before EON/GGX lobe construction
-        // avoids paying that substantial arithmetic for paths which will not launch another ray.
-#if !CAUSTICA_SHARC_UPDATE && !CAUSTICA_SHARC_QUERY
-        if (scatteringDepth >= rrStart) {
-            float q = clamp(max(throughput.r, max(throughput.g, throughput.b)), 0.02, 1.0);
-            if (rndf(sampler) > q) {
-                break;
-            }
-            throughput /= q;
-        }
-#endif
 
         // Indirect continuation: importance-sample the diffuse OR the GGX specular lobe, chosen by their
         // relative reflectance. With PBR off, use the cosine-weighted Lambertian fallback.
