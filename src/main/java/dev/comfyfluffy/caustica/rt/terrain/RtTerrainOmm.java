@@ -207,9 +207,10 @@ final class RtTerrainOmm {
 
     private static int opacityMicromapSubdivisionLevel() {
         int max = Math.max(0, RtDeviceBringup.maxOpacity4StateSubdivisionLevel());
-        // One conservative refinement level beyond the texel grid resolves alpha-boundary
-        // micro-triangles that level 4 must leave on the divergent any-hit path.
-        return Math.min(ommSubdivision() + 1, max);
+        // Respect the configured level exactly. Each increment quadruples the micro-triangle count;
+        // silently refining beyond the requested level can turn initial terrain publication into a very
+        // large OMM/BLAS burst and has produced NVIDIA READ_INVALID device faults in that build workload.
+        return Math.min(ommSubdivision(), max);
     }
 
     private record OmmMicroCounts(int opaque, int transparent, int mixed, int unsafe) {}
