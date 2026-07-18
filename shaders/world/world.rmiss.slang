@@ -32,8 +32,8 @@ static const float SKY_SATURATION = 1.2;
 static const float SUN_DISC_HALF_ANGLE  = 0.29146; // atan(30/100), vanilla sun size
 static const float MOON_DISC_HALF_ANGLE = 0.19740; // atan(20/100), vanilla moon size
 // Faint night-sky ambient so the night isn't pure black where the atmosphere in-scatter falls to zero.
-static const float3 NIGHT_ZENITH  = float3(0.004, 0.008, 0.022) / 2.0;
-static const float3 NIGHT_HORIZON = float3(0.015, 0.022, 0.045) / 2.0;
+static const float3 NIGHT_ZENITH  = float3(0.004, 0.008, 0.022) / 4.0;
+static const float3 NIGHT_HORIZON = float3(0.015, 0.022, 0.045) / 4.0;
 
 // ---- Physically-based atmosphere (Nishita / O'Neil single scattering + ozone absorption). A view ray
 // is marched through the atmospheric shell; at each step the transmittance toward the sun is integrated

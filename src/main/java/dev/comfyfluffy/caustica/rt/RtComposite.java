@@ -1043,7 +1043,7 @@ public final class RtComposite {
             atmosphereTransmittance(moonX, moonY, moonZ, trans);
             float moonStrength = smoothstep(0.04f, 0.22f, -sunY);
             float litFraction = 1.0f - Math.abs(moonPhase - 4.0f) / 4.0f; // 0 new .. 1 full
-            float moonPeak = 0.30f * (0.15f + 0.85f * litFraction);
+            float moonPeak = 0.20f * (0.15f + 0.85f * litFraction);
             lx = moonX; ly = moonY; lz = moonZ;
             rr = 0.30f * moonPeak * moonStrength * trans[0];
             rg = 0.36f * moonPeak * moonStrength * trans[1];
