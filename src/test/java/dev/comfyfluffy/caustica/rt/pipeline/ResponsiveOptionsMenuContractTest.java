@@ -15,10 +15,17 @@ final class ResponsiveOptionsMenuContractTest {
         String usage = source("src/main/java/dev/comfyfluffy/caustica/client/CausticaMenuUsage.java");
 
         assertTrue(entry.contains("extends CausticaSettingsScreen"));
-        assertTrue(workstation.contains("OVERVIEW(\"Overview\")"));
+        assertTrue(workstation.contains("OVERVIEW(CategoryGroup.ESSENTIALS, \"Overview\")"));
+        assertTrue(workstation.contains("IMAGE(\"Image Pipeline\")"));
+        assertTrue(workstation.contains("WORLD(\"World\")"));
+        assertTrue(workstation.contains("ADVANCED(\"Advanced\")"));
         assertTrue(workstation.contains("MAX_CONTENT_WIDTH = 1600"));
         assertTrue(workstation.contains("TARGET_CELL_WIDTH = 180"));
         assertTrue(workstation.contains("MAX_GRID_COLUMNS = 8"));
+        assertTrue(workstation.contains("computeRailWidth()"));
+        assertTrue(workstation.contains("widest + 32"));
+        assertTrue(workstation.contains("columnsFor(controls)"));
+        assertTrue(workstation.contains("font.width(control.getMessage())"));
         assertTrue(workstation.contains("new EditBox"));
         assertTrue(workstation.contains("setResponder(this::searchChanged)"));
         assertTrue(workstation.contains("setInitialFocus(targetWidget != null ? targetWidget : searchBox)"));
@@ -27,12 +34,15 @@ final class ResponsiveOptionsMenuContractTest {
         assertTrue(workstation.contains("addQuickLinks"));
         assertTrue(workstation.contains("recent(itemLimit)"));
         assertTrue(workstation.contains("frequent(itemLimit, recent)"));
-        assertTrue(workstation.contains("Math.clamp((available - 28) / 40, 0, 8)"));
+        assertTrue(workstation.contains("Math.clamp((available - 32) / 36, 0, 8)"));
+        assertTrue(workstation.contains("selectedCategoryButton"));
+        assertTrue(workstation.contains("lineLeft"));
         assertTrue(workstation.contains("revealControl(item)"));
         assertTrue(workstation.contains("pendingTargetId"));
         assertTrue(workstation.contains("TARGET_FLASH_MILLIS"));
         assertTrue(workstation.contains("bodyScrollArea.setScrollAmount"));
         assertTrue(workstation.contains("usageCategories"));
+        assertTrue(workstation.contains("ordered(controls, 0, 6, 1, 7, 2, 3, 8, 4, 5)"));
         assertTrue(usage.contains("FREQUENCY_HALF_LIFE_DAYS = 30.0"));
         assertTrue(usage.contains("caustica-menu-usage.json"));
         assertTrue(usage.contains("lastCategory"));

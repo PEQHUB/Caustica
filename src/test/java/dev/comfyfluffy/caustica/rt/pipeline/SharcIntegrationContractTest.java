@@ -82,7 +82,7 @@ final class SharcIntegrationContractTest {
         String categoryLayout = read("src/main/java/dev/comfyfluffy/caustica/client/ui/CategoryLayout.java");
         String gridLayout = read("src/main/java/dev/comfyfluffy/caustica/client/ui/WidgetGridLayout.java");
         assertTrue(entry.contains("extends CausticaSettingsScreen"));
-        assertTrue(screen.contains("SHARC(\"SHaRC\")"));
+        assertTrue(screen.contains("SHARC(CategoryGroup.ADVANCED, \"SHaRC\")"));
         assertTrue(screen.contains("new ScrollableLayout"));
         assertTrue(screen.contains("Math.clamp((contentWidth + GRID_GAP)"));
         assertTrue(screen.contains("restoreSharcParityDefaults"));

@@ -44,7 +44,8 @@ public class CausticaSettingsScreen extends Screen {
     private static final int MARGIN = 6;
     private static final int HEADER_HEIGHT = 28;
     private static final int FOOTER_HEIGHT = 28;
-    private static final int RAIL_WIDTH = 104;
+    private static final int MIN_RAIL_WIDTH = 132;
+    private static final int MAX_RAIL_WIDTH = 220;
     private static final int GRID_GAP = 3;
     private static final int CONTROL_HEIGHT = 20;
     private static final int MAX_CONTENT_WIDTH = 1600;
@@ -84,19 +85,37 @@ public class CausticaSettingsScreen extends Screen {
     private boolean saved;
     private int contentWidth;
     private int gridColumns;
+    private int railWidth;
     private Category category = Category.OVERVIEW;
     private Category buildingCategory = Category.OVERVIEW;
     private String pendingTargetId;
     private AbstractWidget targetWidget;
     private AbstractWidget flashWidget;
+    private AbstractWidget selectedCategoryButton;
     private long flashUntilMillis;
 
-    private enum Category {
-        OVERVIEW("Overview"), OUTPUT("Display & Latency"), RECONSTRUCTION("Reconstruction"),
-        LIGHTING("Lighting & Sky"), EXPOSURE("Exposure & Tone Mapping"), GEOMETRY("Geometry & Effects"),
-        SHARC("SHaRC"), VIEW("View"), DIAGNOSTICS("Diagnostics");
+    private enum CategoryGroup {
+        ESSENTIALS("Essentials"), IMAGE("Image Pipeline"), WORLD("World"), ADVANCED("Advanced");
         final String label;
-        Category(String label) { this.label = label; }
+        CategoryGroup(String label) { this.label = label; }
+    }
+
+    private enum Category {
+        OVERVIEW(CategoryGroup.ESSENTIALS, "Overview"),
+        OUTPUT(CategoryGroup.IMAGE, "Display & Latency"),
+        RECONSTRUCTION(CategoryGroup.IMAGE, "Reconstruction"),
+        EXPOSURE(CategoryGroup.IMAGE, "Exposure & Tone Mapping"),
+        LIGHTING(CategoryGroup.WORLD, "Lighting & Sky"),
+        GEOMETRY(CategoryGroup.WORLD, "Geometry & Effects"),
+        VIEW(CategoryGroup.WORLD, "View"),
+        SHARC(CategoryGroup.ADVANCED, "SHaRC"),
+        DIAGNOSTICS(CategoryGroup.ADVANCED, "Diagnostics");
+        final CategoryGroup group;
+        final String label;
+        Category(CategoryGroup group, String label) {
+            this.group = group;
+            this.label = label;
+        }
     }
 
     public CausticaSettingsScreen(Screen previous, Options options) {
@@ -131,13 +150,15 @@ public class CausticaSettingsScreen extends Screen {
         bodyScrollArea = null;
         targetWidget = null;
         flashWidget = null;
-        int paneLeft = MARGIN + RAIL_WIDTH + 8;
+        selectedCategoryButton = null;
+        railWidth = computeRailWidth();
+        int paneLeft = MARGIN + railWidth + 8;
         int availableWidth = Math.max(180, width - paneLeft - MARGIN - 8);
         contentWidth = Math.min(MAX_CONTENT_WIDTH, availableWidth);
         gridColumns = Math.clamp((contentWidth + GRID_GAP) / (TARGET_CELL_WIDTH + GRID_GAP),
                 1, MAX_GRID_COLUMNS);
 
-        searchBox = new EditBox(font, MARGIN, MARGIN + 3, RAIL_WIDTH, 20,
+        searchBox = new EditBox(font, MARGIN, MARGIN + 3, railWidth, 20,
                 Component.translatable("caustica.options.search"));
         searchBox.setMaxLength(80);
         searchBox.setHint(Component.translatable("caustica.options.search.hint"));
@@ -147,18 +168,24 @@ public class CausticaSettingsScreen extends Screen {
         addRenderableWidget(searchBox);
 
         int railY = MARGIN + HEADER_HEIGHT + 6;
+        CategoryGroup currentGroup = null;
         for (Category value : Category.values()) {
+            if (value.group != currentGroup) {
+                currentGroup = value.group;
+                quickHeadings.add(new QuickHeading(currentGroup.label, railY));
+                railY += 12;
+            }
             Category target = value;
-            ActionButton button = new ActionButton(RAIL_WIDTH,
-                    () -> Component.literal((category == target ? "\u25b8  " : "   ") + target.label),
-                    () -> selectCategory(target), category == target);
-            button.setRectangle(RAIL_WIDTH, CONTROL_HEIGHT, MARGIN, railY);
+            ActionButton button = new ActionButton(railWidth,
+                    () -> Component.literal(target.label), () -> selectCategory(target), false);
+            button.setRectangle(railWidth, 17, MARGIN, railY);
             addRenderableWidget(button);
-            railY += CONTROL_HEIGHT + 3;
+            if (category == target) selectedCategoryButton = button;
+            railY += 18;
         }
         body = new CategoryLayout(contentWidth, 4);
         indexControlCategories();
-        addQuickLinks(railY + 4);
+        addQuickLinks(railY + 2);
         if (!searchQuery.isBlank()) {
             addSearchResults();
         } else {
@@ -247,6 +274,7 @@ public class CausticaSettingsScreen extends Screen {
         rendering.add(new Dropdown<>(180, Component.translatable("caustica.options.rt.fg.reflex"),
                 List.of("off", "on", "boost"), this::reflexMode, this::setReflexMode,
                 value -> Component.translatable("caustica.options.rt.fg.reflex." + value), null));
+        rendering = ordered(rendering, 0, 3, 4, 1, 2, 5, 6, 7);
         addGrid(rendering);
 
         addHeader("Scene & image", "Lighting, presentation, and view controls kept one click away");
@@ -281,6 +309,7 @@ public class CausticaSettingsScreen extends Screen {
         scene.add(toggle(Component.translatable("caustica.options.rt.firstPerson.enabled"),
                 CausticaConfig.Rt.FirstPerson.ENABLED));
         scene.add(toggle(Component.translatable("caustica.options.rt.sharc"), CausticaConfig.Rt.Sharc.ENABLED));
+        scene = ordered(scene, 4, 6, 5, 7, 0, 1, 2, 3, 8, 9);
         addGrid(scene);
 
         addInfo(() -> CausticaConfig.Rt.Hdr.pendingRestart()
@@ -315,7 +344,7 @@ public class CausticaSettingsScreen extends Screen {
 
     private void addQuickLinks(int top) {
         int available = height - FOOTER_HEIGHT - MARGIN - top;
-        int itemLimit = Math.clamp((available - 28) / 40, 0, 8);
+        int itemLimit = Math.clamp((available - 32) / 36, 0, 8);
         if (itemLimit == 0) return;
 
         List<CausticaMenuUsage.Item> recent = CausticaMenuUsage.INSTANCE.recent(itemLimit);
@@ -330,11 +359,11 @@ public class CausticaSettingsScreen extends Screen {
         quickHeadings.add(new QuickHeading(heading, top));
         int y = top + 12;
         for (CausticaMenuUsage.Item item : items) {
-            ActionButton button = new ActionButton(RAIL_WIDTH,
+            ActionButton button = new ActionButton(railWidth,
                     () -> Component.literal(item.label()), () -> revealControl(item), false);
-            button.setRectangle(RAIL_WIDTH, 18, MARGIN, y);
+            button.setRectangle(railWidth, 16, MARGIN, y);
             addRenderableWidget(button);
-            y += 20;
+            y += 18;
         }
         return y + 4;
     }
@@ -404,6 +433,7 @@ public class CausticaSettingsScreen extends Screen {
                 CausticaConfig.Rt.DlssRr.QUALITY::configuredValue, CausticaConfig.Rt.DlssRr.QUALITY::set,
                 value -> Component.translatable("caustica.options.rt.dlssQuality." + value), null)
                 .activeWhen(CausticaConfig.Rt.DlssRr.ENABLED::configuredValue));
+        controls = ordered(controls, 0, 2, 1);
         addGrid(controls);
     }
 
@@ -456,6 +486,7 @@ public class CausticaSettingsScreen extends Screen {
                 .tooltip(Component.translatable("caustica.options.rt.torchIntensity.tooltip"))
                 .resetOnShift(() -> CausticaConfig.Rt.Composite.TORCH_EMISSION_MULTIPLIER.set(
                         CausticaConfig.Rt.Composite.TORCH_EMISSION_MULTIPLIER.defaultValue())));
+        controls = ordered(controls, 0, 6, 1, 7, 2, 3, 8, 4, 5);
         addGrid(controls);
     }
 
@@ -749,8 +780,34 @@ public class CausticaSettingsScreen extends Screen {
 
     private void addGridDirect(List<? extends AbstractWidget> controls) {
         if (controls.isEmpty()) return;
-        body.addChild(new WidgetGridLayout(contentWidth, gridColumns, GRID_GAP, GRID_GAP,
+        body.addChild(new WidgetGridLayout(contentWidth, columnsFor(controls), GRID_GAP, GRID_GAP,
                 CONTROL_HEIGHT, controls));
+    }
+
+    private int columnsFor(List<? extends AbstractWidget> controls) {
+        int requiredWidth = TARGET_CELL_WIDTH;
+        for (AbstractWidget control : controls) {
+            int padding = control instanceof Dropdown<?> ? 34 : 18;
+            requiredWidth = Math.max(requiredWidth, font.width(control.getMessage()) + padding);
+        }
+        requiredWidth = Math.min(contentWidth, requiredWidth);
+        return Math.clamp((contentWidth + GRID_GAP) / (requiredWidth + GRID_GAP), 1, gridColumns);
+    }
+
+    private int computeRailWidth() {
+        int widest = font.width("Search...");
+        for (Category value : Category.values()) widest = Math.max(widest, font.width(value.label));
+        List<CausticaMenuUsage.Item> recent = CausticaMenuUsage.INSTANCE.recent(8);
+        List<CausticaMenuUsage.Item> frequent = CausticaMenuUsage.INSTANCE.frequent(8, recent);
+        for (CausticaMenuUsage.Item item : recent) widest = Math.max(widest, font.width(item.label()));
+        for (CausticaMenuUsage.Item item : frequent) widest = Math.max(widest, font.width(item.label()));
+        int available = Math.max(104, Math.min(MAX_RAIL_WIDTH, width / 4));
+        return Math.min(available, Math.max(MIN_RAIL_WIDTH, widest + 32));
+    }
+
+    private static <T> List<T> ordered(List<T> items, int... order) {
+        if (items.size() != order.length) throw new IllegalArgumentException("Incomplete menu order");
+        return IntStream.of(order).mapToObj(items::get).toList();
     }
 
     private void registerControls(List<? extends AbstractWidget> controls) {
@@ -904,10 +961,10 @@ public class CausticaSettingsScreen extends Screen {
 
     @Override
     public void extractRenderState(GuiGraphicsExtractor g, int mouseX, int mouseY, float partialTick) {
-        int paneLeft = MARGIN + RAIL_WIDTH + 8;
+        int paneLeft = MARGIN + railWidth + 8;
         int paneRight = paneLeft + contentWidth;
         int railBottom = height - FOOTER_HEIGHT - MARGIN;
-        g.fill(MARGIN + RAIL_WIDTH + 4, MARGIN, MARGIN + RAIL_WIDTH + 5,
+        g.fill(MARGIN + railWidth + 4, MARGIN, MARGIN + railWidth + 5,
                 railBottom, 0x70FFFFFF);
         g.fill(MARGIN, MARGIN + HEADER_HEIGHT, paneRight,
                 MARGIN + HEADER_HEIGHT + 1, 0x50FFFFFF);
@@ -915,6 +972,9 @@ public class CausticaSettingsScreen extends Screen {
                 paneLeft + 2, MARGIN + 5, CausticaWidgets.ACCENT);
         for (QuickHeading heading : quickHeadings) {
             g.text(font, Component.literal(heading.label()), MARGIN + 2, heading.y(), CausticaWidgets.MUTED);
+            int lineLeft = MARGIN + 8 + font.width(heading.label());
+            int lineRight = MARGIN + railWidth - 4;
+            if (lineLeft < lineRight) g.fill(lineLeft, heading.y() + 4, lineRight, heading.y() + 5, 0x40777777);
         }
         g.fill(paneLeft, height - FOOTER_HEIGHT - MARGIN, paneRight,
                 height - FOOTER_HEIGHT - MARGIN + 1, 0x50FFFFFF);
@@ -922,6 +982,11 @@ public class CausticaSettingsScreen extends Screen {
                 paneLeft + 2, height - FOOTER_HEIGHT + 3, CausticaWidgets.MUTED);
         extractTargetFlash(g);
         super.extractRenderState(g, mouseX, mouseY, partialTick);
+        if (selectedCategoryButton != null) {
+            g.fill(selectedCategoryButton.getX(), selectedCategoryButton.getY(),
+                    selectedCategoryButton.getX() + 2, selectedCategoryButton.getBottom(),
+                    CausticaWidgets.ACCENT);
+        }
         for (Dropdown<?> dropdown : dropdowns) {
             dropdown.extractOverlay(g, mouseX, mouseY, height);
         }
