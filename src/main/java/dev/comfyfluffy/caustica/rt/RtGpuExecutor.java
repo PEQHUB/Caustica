@@ -190,7 +190,7 @@ public final class RtGpuExecutor {
         // Stop and join first: waiting idle before the executor stops leaves a race where it can
         // submit immediately after vkDeviceWaitIdle returns. The idle wait also makes graphics-side
         // timeline semaphore use complete before those semaphores are destroyed below.
-        RtContext.check(VK10.vkDeviceWaitIdle(ctx.vk()), "vkDeviceWaitIdle(RT GPU executor shutdown)");
+        ctx.waitIdle();
         Throwable failure = null;
         try {
             flushDestroysAfterDeviceIdle();
@@ -380,8 +380,10 @@ public final class RtGpuExecutor {
             VkSubmitInfo2.Buffer submit = VkSubmitInfo2.calloc(1, stack).sType$Default()
                     .pCommandBufferInfos(command).pSignalSemaphoreInfos(signal);
             VulkanDiagnostics.noteQueueSubmission(computeQueue.vkQueue(), "Caustica compute queue");
-            RtContext.check(org.lwjgl.vulkan.KHRSynchronization2.vkQueueSubmit2KHR(
-                    computeQueue.vkQueue(), submit, 0L), "vkQueueSubmit2KHR(RT GPU executor)");
+            synchronized (ctx.deviceQueueHostLock()) {
+                RtContext.check(org.lwjgl.vulkan.KHRSynchronization2.vkQueueSubmit2KHR(
+                        computeQueue.vkQueue(), submit, 0L), "vkQueueSubmit2KHR(RT GPU executor)");
+            }
             submitted = true;
             VulkanDiagnostics.setInFlight("async-compute",
                     "submitted builds=" + firstValue + ".." + signalValue + " batch=" + batch.size());

@@ -54,6 +54,8 @@ public final class RtContext {
     private final long vma;
     private final VulkanQueue graphicsQueue;
     private final VulkanQueue computeQueue;
+    /** Serializes device-wide host waits against submissions from the Caustica compute thread. */
+    private final Object deviceQueueHostLock = new Object();
     private final RtGpuExecutor gpuExecutor;
     private final int shaderGroupHandleSize;
     private final int shaderGroupBaseAlignment;
@@ -150,6 +152,10 @@ public final class RtContext {
 
     VulkanQueue computeQueue() {
         return computeQueue;
+    }
+
+    Object deviceQueueHostLock() {
+        return deviceQueueHostLock;
     }
 
     public int shaderGroupHandleSize() {
@@ -384,7 +390,10 @@ public final class RtContext {
     }
 
     public void waitIdle() {
-        check(VK10.vkDeviceWaitIdle(vk), "vkDeviceWaitIdle");
+        // vkDeviceWaitIdle is externally synchronized against every queue owned by the device.
+        synchronized (deviceQueueHostLock) {
+            check(VK10.vkDeviceWaitIdle(vk), "vkDeviceWaitIdle");
+        }
     }
 
     public void destroy() {
