@@ -1258,6 +1258,15 @@ public final class CausticaConfig {
          * advertise it. The nit values drive the scene-HDR → display mapping: SDR paper white maps to
          * {@code paperWhiteNits}, and highlights roll off toward {@code peakNits}.
          */
+        /** Optional heavy vendor crash instrumentation; ordinary device-fault reporting stays enabled. */
+        public static final class Diagnostics {
+            public static final BooleanSetting HEAVY_CRASH_DIAGNOSTICS =
+                    bool("caustica.rt.heavyCrashDiagnostics", "diagnostics.heavy-crash-diagnostics", false);
+
+            private Diagnostics() {
+            }
+        }
+
         public static final class Hdr {
             public static final String TONEMAP_EETF = "eetf";
             public static final String TONEMAP_CAUSTICA = "caustica";

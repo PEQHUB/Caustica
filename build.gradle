@@ -58,6 +58,9 @@ dependencies {
 	minecraft "com.mojang:minecraft:${project.minecraft_version}"
 	implementation "net.fabricmc:fabric-loader:${project.loader_version}"
 	implementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
+	testImplementation platform("org.junit:junit-bom:5.12.2")
+	testImplementation "org.junit.jupiter:junit-jupiter"
+	testRuntimeOnly "org.junit.platform:junit-platform-launcher"
 
 	// Layered TOML config (config/caustica.toml) — NightConfig, the same library NeoForge's
 	// ModConfigSpec is built on.
@@ -357,9 +360,8 @@ abstract class CompileShaders extends DefaultTask {
 				commandLine spirvDis.get(), "--raw-id", raygen.absolutePath, "-o", disassembly.absolutePath
 			}
 			def assembly = disassembly.getText("UTF-8")
-			if ((assembly =~ /OpReorderThreadWithHitObject(?:EXT|NV)/).find()) {
-				throw new GradleException("Live world raygen unexpectedly contains invocation reorder: ${name}")
-			}
+			// Upstream's live renderer deliberately performs hit-object invocation reordering before
+			// divergent material evaluation. Both EXT and NV variants are emitted and selected at runtime.
 			["sampleHash", "owenScramble", "beginBounce", "rndf"].each { functionName ->
 				def nameMatch = (assembly =~ /OpName\s+(%\d+)\s+"${functionName}"/)
 				if (nameMatch.find()) {
@@ -428,6 +430,10 @@ def generateShaderRecords = tasks.register("generateShaderRecords", GenerateShad
 	slangc = pinnedSlangc.absolutePath
 	spirvVal = resolveVulkanTool("spirv-val")
 	outDir = layout.buildDirectory.dir("generated/sources/shaderRecords")
+}
+
+tasks.named("test", Test) {
+	useJUnitPlatform()
 }
 
 sourceSets.main.java.srcDir(files(layout.buildDirectory.dir("generated/sources/shaderRecords")).builtBy(generateShaderRecords))

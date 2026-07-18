@@ -1,7 +1,7 @@
 package dev.comfyfluffy.caustica.rt.entity;
 
 import com.mojang.blaze3d.vertex.VertexConsumer;
-import dev.comfyfluffy.caustica.rt.material.RtMaterials;
+import dev.comfyfluffy.caustica.rt.accel.RtAccel;
 import it.unimi.dsi.fastutil.floats.FloatArrayList;
 import it.unimi.dsi.fastutil.ints.IntArrayList;
 import net.minecraft.client.resources.model.geometry.BakedQuad;
@@ -16,7 +16,7 @@ import org.joml.Vector3fc;
  * {@code model.renderToBuffer(pose, this, …)}.
  *
  * <p>Accumulators use the same layout as terrain's {@code SectionMesh} (positions, indices, atlas UV,
- * per-prim {@code {normal.xyz, emission}, {tint.rgb, texSlot}, {rough, metal, 0, 0}}) so entities
+ * per-prim {@code {normal.xyz, reserved}, {tint.rgb, albedoSlot}, {materialId, flags, aux0, aux1}}) so entities
  * share the terrain upload + BLAS path verbatim.
  */
 public final class RtEntityCapture implements VertexConsumer {
@@ -28,27 +28,25 @@ public final class RtEntityCapture implements VertexConsumer {
     final FloatArrayList verts = new FloatArrayList(DEFAULT_VERTEX_CAPACITY * 3);   // 3 floats/vertex (capture-space position)
     final IntArrayList idx = new IntArrayList(indexCapacity(DEFAULT_VERTEX_CAPACITY)); // 3 indices/triangle
     final FloatArrayList uvList = new FloatArrayList(DEFAULT_VERTEX_CAPACITY * 2);  // 2 floats/vertex (entity-texture UV)
-    final FloatArrayList prim = new FloatArrayList(primCapacity(DEFAULT_VERTEX_CAPACITY)); // 12 floats/triangle: normal.xyz+0, tint.rgb+texSlot, mat.{rough,metal,0,0}
+    final FloatArrayList prim = new FloatArrayList(primCapacity(DEFAULT_VERTEX_CAPACITY)); // 12 floats/triangle
+    // One classification per triangle in capture order. The upload path repacks indices + primitive
+    // records into fixed {opaque, any-hit} BLAS geometries while positions/UVs stay shared. Keeping
+    // capture order here preserves glow meshes, parity checks and motion topology.
+    final IntArrayList alphaBuckets = new IntArrayList(indexCapacity(DEFAULT_VERTEX_CAPACITY) / 3);
+    private final IntArrayList packedIdx = new IntArrayList(indexCapacity(DEFAULT_VERTEX_CAPACITY));
+    private final FloatArrayList packedPrim = new FloatArrayList(primCapacity(DEFAULT_VERTEX_CAPACITY));
+    private final int[] packedBucketTris = new int[RtAccel.ENTITY_BUCKETS];
 
     // Bindless texture slot for the geometry currently being submitted (set by the collector per
     // submitModel, so body + feature layers get their own texture). Stored per-prim in tint.w;
-    // the hit shader samples entityTex[texSlot].
+    // the hit shader samples entityAlbedoTex[texSlot].
     int currentTexSlot;
-    // Whether the current submission's bindless slot has a LabPBR _s / _n map (→ prim mat.z/mat.w).
-    // Set by the collector per submission; mobs (per-type textures) may have them, atlas-sourced quads don't.
-    boolean currentHasS;
-    boolean currentHasN;
-    // Block-atlas geometry (dropped/held block items, falling blocks, contained block displays) samples the
-    // BLOCK atlas, so its LabPBR _s/_n live in the terrain parallel atlases (blockSpecAtlas/blockNormalAtlas)
-    // — NOT the per-type bindless arrays. When set, currentHasS/currentHasN refer to those: emitQuad encodes
-    // mat.z/mat.w as 2 (block atlas) instead of 1 (bindless entity), so world.rchit samples the right atlas.
-    boolean currentBlockAtlas;
-    // Whether the current submission is an alpha-blended (translucent) render type — slime / sulfur-cube
-    // shells, ghosts, … Stored per-prim in the otherwise-unused entity emission lane (normal.w); world.rahit
-    // reads it and does stochastic transparency for those surfaces instead of a binary cutout, so the inner
-    // content (slime core, the sulfur cube's contained block) shows through the shell. Set by the collector
-    // per submission (model bodies only — block/item/particle paths force it false).
-    boolean currentTranslucent;
+    // Canonical MaterialHeader ID for this submission. Entity, block-entity and block-atlas geometry all
+    // use the same table; albedo remains a separate bindless slot in tint.w.
+    int currentMaterialId;
+    // Conservative default: unknown submissions retain alpha testing instead of incorrectly becoming
+    // opaque. RtEntityCollector assigns this from the RenderPipeline before every known submission.
+    int currentAlphaBucket = RtAccel.ENTITY_BUCKET_ANY_HIT;
     // Decal-stacking rank for the current submission (0 = no offset). Set by the collector from
     // SubmitNodeCollector#order(int) — see emitQuad's coincident-layer push.
     int currentOrder;
@@ -77,13 +75,14 @@ public final class RtEntityCapture implements VertexConsumer {
         idx.clear();
         uvList.clear();
         prim.clear();
+        alphaBuckets.clear();
+        packedIdx.clear();
+        packedPrim.clear();
         ensureVertexCapacity(expectedVertices);
         n = 0;
         currentTexSlot = 0;
-        currentHasS = false;
-        currentHasN = false;
-        currentBlockAtlas = false;
-        currentTranslucent = false;
+        currentMaterialId = 0;
+        currentAlphaBucket = RtAccel.ENTITY_BUCKET_ANY_HIT;
         currentOrder = 0;
         uvRemap = false;
     }
@@ -96,6 +95,9 @@ public final class RtEntityCapture implements VertexConsumer {
         idx.ensureCapacity(indexCapacity(vertexCount));
         uvList.ensureCapacity(vertexCount * 2);
         prim.ensureCapacity(primCapacity(vertexCount));
+        alphaBuckets.ensureCapacity(indexCapacity(vertexCount) / 3);
+        packedIdx.ensureCapacity(indexCapacity(vertexCount));
+        packedPrim.ensureCapacity(primCapacity(vertexCount));
     }
 
     /** Reserve room for an upcoming direct-model submission without changing any logical sizes. */
@@ -132,10 +134,8 @@ public final class RtEntityCapture implements VertexConsumer {
     /** Copy the per-submission material/UV state into a second capture used by the parity harness. */
     void copySubmissionStateTo(RtEntityCapture target) {
         target.currentTexSlot = currentTexSlot;
-        target.currentHasS = currentHasS;
-        target.currentHasN = currentHasN;
-        target.currentBlockAtlas = currentBlockAtlas;
-        target.currentTranslucent = currentTranslucent;
+        target.currentMaterialId = currentMaterialId;
+        target.currentAlphaBucket = currentAlphaBucket;
         target.currentOrder = currentOrder;
         target.uvRemap = uvRemap;
         target.uvU0 = uvU0;
@@ -163,6 +163,20 @@ public final class RtEntityCapture implements VertexConsumer {
                 reference.uvList.elements(), reference.uvList.size(), label);
         assertFloatRange("primitives", prim.elements(), primStart, prim.size() - primStart,
                 reference.prim.elements(), reference.prim.size(), label);
+        int triangleStart = idxStart / 3;
+        int triangleCount = (idx.size() - idxStart) / 3;
+        if (triangleCount != reference.alphaBuckets.size()) {
+            throw new IllegalStateException(label + " alpha bucket size mismatch: actual=" + triangleCount
+                    + ", reference=" + reference.alphaBuckets.size());
+        }
+        for (int i = 0; i < triangleCount; i++) {
+            int actual = alphaBuckets.getInt(triangleStart + i);
+            int expected = reference.alphaBuckets.getInt(i);
+            if (actual != expected) {
+                throw new IllegalStateException(label + " alpha bucket[" + i + "] mismatch: actual="
+                        + actual + ", reference=" + expected);
+            }
+        }
     }
 
     private static void assertFloatRange(String component, float[] actual, int actualStart, int actualSize,
@@ -203,6 +217,51 @@ public final class RtEntityCapture implements VertexConsumer {
 
     public boolean isEmpty() {
         return idx.isEmpty();
+    }
+
+    /**
+     * Repack triangles into the fixed entity BLAS geometry order. PrimitiveIndex restarts at zero for
+     * each Vulkan geometry, so the returned counts also define the triangle bases written to EntityGeom.
+     */
+    PackedGeometry packGeometry() {
+        int triangleCount = idx.size() / 3;
+        if (alphaBuckets.size() != triangleCount || prim.size() != triangleCount * 12) {
+            throw new IllegalStateException("Malformed entity capture: triangles=" + triangleCount
+                    + ", alphaBuckets=" + alphaBuckets.size() + ", primFloats=" + prim.size());
+        }
+        packedIdx.clear();
+        packedPrim.clear();
+        java.util.Arrays.fill(packedBucketTris, 0);
+        packedIdx.ensureCapacity(idx.size());
+        packedPrim.ensureCapacity(prim.size());
+        int[] indices = idx.elements();
+        float[] primitives = prim.elements();
+        for (int bucket = 0; bucket < RtAccel.ENTITY_BUCKETS; bucket++) {
+            for (int tri = 0; tri < triangleCount; tri++) {
+                if (alphaBuckets.getInt(tri) != bucket) {
+                    continue;
+                }
+                int indexBase = tri * 3;
+                packedIdx.add(indices[indexBase]);
+                packedIdx.add(indices[indexBase + 1]);
+                packedIdx.add(indices[indexBase + 2]);
+                int primBase = tri * 12;
+                for (int lane = 0; lane < 12; lane++) {
+                    packedPrim.add(primitives[primBase + lane]);
+                }
+                packedBucketTris[bucket]++;
+            }
+        }
+        if (packedIdx.size() != idx.size() || packedPrim.size() != prim.size()) {
+            throw new IllegalStateException("Entity capture contains an invalid alpha bucket");
+        }
+        return new PackedGeometry(packedIdx, packedPrim, packedBucketTris);
+    }
+
+    record PackedGeometry(IntArrayList indices, FloatArrayList primitives, int[] bucketTris) {
+        int[] copyBucketTris() {
+            return bucketTris.clone();
+        }
     }
 
     @Override
@@ -246,7 +305,7 @@ public final class RtEntityCapture implements VertexConsumer {
     }
 
     private void emitQuad() {
-        appendQuad(qx, qy, qz, null, qu, qv, qnx[0], qny[0], qnz[0], qcol[0], false);
+        appendQuad(qx, qy, qz, null, qu, qv, qnx[0], qny[0], qnz[0], qcol[0], false, 0f);
     }
 
     /**
@@ -256,17 +315,32 @@ public final class RtEntityCapture implements VertexConsumer {
      */
     void addDirectQuad(float[] x, float[] y, float[] z, float[] u, float[] v,
                        float nx, float ny, float nz, int color) {
-        appendQuad(x, y, z, null, u, v, nx, ny, nz, color, uvRemap);
+        addDirectQuad(x, y, z, u, v, nx, ny, nz, color, 0f);
+    }
+
+    /** Append a direct quad with an explicit per-primitive emission strength. */
+    void addDirectQuad(float[] x, float[] y, float[] z, float[] u, float[] v,
+                       float nx, float ny, float nz, int color, float emission) {
+        appendQuad(x, y, z, null, u, v, nx, ny, nz, color, uvRemap, emission);
+    }
+
+    /** Fail fast before a later submission can accidentally complete a malformed custom-geometry quad. */
+    void requireCompleteQuads(String label) {
+        if (n != 0) {
+            int incomplete = n;
+            n = 0;
+            throw new IllegalStateException(label + " left an incomplete quad (" + incomplete + " vertices)");
+        }
     }
 
     /** Append a face whose positions reference a transformed eight-corner cube template. */
     void addIndexedDirectQuad(float[] x, float[] y, float[] z, int[] corners, float[] u, float[] v,
                               float nx, float ny, float nz, int color) {
-        appendQuad(x, y, z, corners, u, v, nx, ny, nz, color, uvRemap);
+        appendQuad(x, y, z, corners, u, v, nx, ny, nz, color, uvRemap, 0f);
     }
 
     private void appendQuad(float[] x, float[] y, float[] z, int[] corners, float[] u, float[] v,
-                            float nx, float ny, float nz, int color, boolean remapUv) {
+                            float nx, float ny, float nz, int color, boolean remapUv, float emission) {
         // Authored model normal (pose-transformed by compile); planar quad, so vertex 0's normal is the
         // face normal. Baked quads (items/blocks) pass no normal → fall back to a geometric one from the
         // quad edges. The closest-hit flips it toward the viewer, as for terrain. Computed BEFORE the
@@ -320,20 +394,16 @@ public final class RtEntityCapture implements VertexConsumer {
             prim.add(nx);
             prim.add(ny);
             prim.add(nz);
-            // normal.w: entities don't carry block-light emission, so this lane flags an alpha-blended
-            // (translucent) surface → world.rahit does stochastic transparency instead of a binary cutout.
-            prim.add(currentTranslucent ? 1f : 0f);
+            prim.add(emission);
             prim.add(tr);
             prim.add(tg);
             prim.add(tb);
             prim.add((float) currentTexSlot); // tint.w = bindless texture slot
-            prim.add(RtMaterials.ENTITY_ROUGH); // entities default to a matte dielectric
-            prim.add(0f);                       // metalness
-            // mat.z / mat.w: LabPBR _s / _n presence + source. 0 = none, 1 = per-type bindless entity atlas,
-            // 2 = block atlas (block-like entities; sampled from the terrain _s/_n atlases).
-            float matSource = currentBlockAtlas ? 2f : 1f;
-            prim.add(currentHasS ? matSource : 0f); // mat.z
-            prim.add(currentHasN ? matSource : 0f); // mat.w
+            prim.add(Float.intBitsToFloat(currentMaterialId));
+            prim.add(0f); // flags
+            prim.add(0f); // aux0
+            prim.add(0f); // aux1
+            alphaBuckets.add(currentAlphaBucket);
         }
     }
 

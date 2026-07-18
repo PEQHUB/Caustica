@@ -33,6 +33,7 @@
 		"VulkanDeviceMixin",
 		"VulkanGpuSurfaceMixin",
 		"VulkanInstanceMixin",
+		"VulkanUtilsMixin",
 		"VulkanGpuTextureAccessor"
 	],
 	"injectors": {

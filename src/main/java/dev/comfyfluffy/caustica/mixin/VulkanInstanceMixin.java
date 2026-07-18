@@ -3,16 +3,15 @@ package dev.comfyfluffy.caustica.mixin;
 import com.llamalad7.mixinextras.sugar.Local;
 import com.mojang.blaze3d.vulkan.VulkanInstance;
 import dev.comfyfluffy.caustica.CausticaMod;
-import dev.comfyfluffy.caustica.streamline.StreamlineRuntime;
-import org.lwjgl.PointerBuffer;
-import org.lwjgl.vulkan.VkAllocationCallbacks;
-import org.lwjgl.vulkan.VkInstanceCreateInfo;
+import dev.comfyfluffy.caustica.rt.VulkanDiagnostics;
 import java.util.Set;
+import org.lwjgl.vulkan.VkInstanceCreateInfo;
 import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
+import org.spongepowered.asm.mixin.injection.ModifyArg;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 /**
@@ -35,21 +34,6 @@ public abstract class VulkanInstanceMixin {
 	@Final
 	private Set<String> enabledExtensions;
 
-	@Inject(method = "<init>(IZZ)V", at = @At("HEAD"))
-	private static void caustica$initializeStreamline(int debugVerbosity, boolean wantsDebugLabels, boolean validation,
-			CallbackInfo ci) {
-		// Streamline's manual-hooking preference must be established before the first Vulkan API call.
-		StreamlineRuntime.initializeForVulkan();
-	}
-
-	@org.spongepowered.asm.mixin.injection.Redirect(method = "<init>(IZZ)V",
-			at = @At(value = "INVOKE",
-					target = "Lorg/lwjgl/vulkan/VK12;vkCreateInstance(Lorg/lwjgl/vulkan/VkInstanceCreateInfo;Lorg/lwjgl/vulkan/VkAllocationCallbacks;Lorg/lwjgl/PointerBuffer;)I"))
-	private int caustica$createInstanceThroughStreamline(VkInstanceCreateInfo createInfo,
-			VkAllocationCallbacks allocator, PointerBuffer instanceOut) {
-		return StreamlineRuntime.vkCreateInstance(createInfo, allocator, instanceOut);
-	}
-
 	@Inject(method = "<init>", at = @At(value = "INVOKE", target = "Ljava/util/Set;size()I"))
 	private void caustica$addColorSpaceExtension(int debugVerbosity, boolean wantsDebugLabels, boolean validation,
 			CallbackInfo ci, @Local(ordinal = 0) Set<String> availableExtensions) {
@@ -60,5 +44,14 @@ public abstract class VulkanInstanceMixin {
 		} else {
 			CausticaMod.LOGGER.warn("Instance extension {} unavailable; HDR color spaces will not be queryable on this platform", SWAPCHAIN_COLORSPACE);
 		}
+	}
+
+	@ModifyArg(
+			method = "<init>",
+			at = @At(value = "INVOKE", target = "Lorg/lwjgl/vulkan/VK12;vkCreateInstance(Lorg/lwjgl/vulkan/VkInstanceCreateInfo;Lorg/lwjgl/vulkan/VkAllocationCallbacks;Lorg/lwjgl/PointerBuffer;)I"),
+			index = 0)
+	private VkInstanceCreateInfo caustica$logInstanceLayers(VkInstanceCreateInfo createInfo) {
+		VulkanDiagnostics.logInstanceLayers(createInfo);
+		return createInfo;
 	}
 }

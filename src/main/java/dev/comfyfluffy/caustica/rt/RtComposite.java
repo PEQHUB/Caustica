@@ -12,7 +12,7 @@ import dev.comfyfluffy.caustica.CausticaMod;
 import dev.comfyfluffy.caustica.client.CausticaJitter;
 import dev.comfyfluffy.caustica.client.OfflineGroundTruth;
 import dev.comfyfluffy.caustica.mixin.CommandEncoderAccessor;
-import dev.comfyfluffy.caustica.rt.gen.PushAddrData;
+import dev.comfyfluffy.caustica.rt.gen.WorldPushConstantsData;
 import dev.comfyfluffy.caustica.rt.gen.SharcPushAddrData;
 import dev.comfyfluffy.caustica.rt.gen.WorldPushData;
 import dev.comfyfluffy.caustica.rt.gen.WorldPushData.BreakEntry;
@@ -56,7 +56,9 @@ import dev.comfyfluffy.caustica.rt.accel.RtImage;
 import dev.comfyfluffy.caustica.rt.entity.RtEntities;
 import dev.comfyfluffy.caustica.rt.entity.RtEntityTextures;
 import dev.comfyfluffy.caustica.rt.material.RtBlockMaterials;
-import dev.comfyfluffy.caustica.rt.material.RtEntityMaterials;
+import dev.comfyfluffy.caustica.rt.material.RtEmissionSemantics;
+import dev.comfyfluffy.caustica.rt.material.RtMaterialOverrides;
+import dev.comfyfluffy.caustica.rt.material.RtMaterialRegistry;
 import dev.comfyfluffy.caustica.rt.pipeline.RtDisplayPipeline;
 import dev.comfyfluffy.caustica.rt.pipeline.RtDlssFg;
 import dev.comfyfluffy.caustica.rt.pipeline.RtDlssdDisocclusionPipeline;
@@ -451,6 +453,17 @@ public final class RtComposite {
         return this.failed;
     }
 
+    /** Keep vanilla rendering alive while a new material/descriptor epoch is not trace-ready. */
+    public boolean requiresVanillaWorldFallback() {
+        if (worldPipeline == null || !materialBindingsReady) return true;
+        if (RtEntityTextures.maxTextures() > bindlessTextureCapacity) return true;
+        if (reloadRebindRequested) {
+            long atlas = blockAtlasView();
+            return atlas == 0L || atlas == boundAtlasHandle;
+        }
+        return false;
+    }
+
     /**
      * Clear the failure latch on an explicit render-state invalidation (F3+A, dimension change) so RT
      * re-arms after a transient error instead of staying on vanilla until restart. A deterministic
@@ -746,7 +759,7 @@ public final class RtComposite {
             bindlessTextureCapacity = RtEntityTextures.maxTextures();
             worldPipeline = RtPipeline.create(ctx, RtDeviceBringup.worldRaygenShader(),
                     new String[]{"world.rmiss.spv", "world_guide.rmiss.spv"}, "world.rchit.spv", "world.rahit.spv",
-                    PushAddrData.BYTE_SIZE, true, GUIDE_COUNT, bindlessTextureCapacity, true, true);
+                    WorldPushConstantsData.BYTE_SIZE, true, GUIDE_COUNT, bindlessTextureCapacity, true, true);
             // Per-frame push data lives in this BDA ring; the pipeline only pushes its address.
             if (pushRing == null) {
                 pushRing = new RtBuffer[PUSH_RING];
@@ -763,7 +776,6 @@ public final class RtComposite {
                 bindGuideImages();
             }
             bindWorldTextures(ctx);
-            worldPipeline.setSkyViewLut(skyViewLut.view);
             reloadRebindRequested = false;
         }
         // The TLAS is rebuilt and bound per frame in recordFrame since dynamic entity content animates
@@ -777,7 +789,7 @@ public final class RtComposite {
         if (offlinePipeline == null) {
             offlinePipeline = RtPipeline.create(ctx, RtDeviceBringup.offlineWorldRaygenShader(),
                     new String[]{"world.rmiss.spv", "world_guide.rmiss.spv"}, "world.rchit.spv", "world.rahit.spv",
-                    PushAddrData.BYTE_SIZE, true, GUIDE_COUNT, bindlessTextureCapacity, true, true);
+                    WorldPushConstantsData.BYTE_SIZE, true, GUIDE_COUNT, bindlessTextureCapacity, true, true);
             pathSampleSequence = RtPathSampleSequence.create(ctx);
             if (output != null) {
                 offlinePipeline.setStorageImage(output.view);
@@ -1023,29 +1035,24 @@ public final class RtComposite {
         long sampler = atlasSampler(ctx);
         long atlasView = blockAtlasView();
         boundAtlasHandle = atlasView; // remember what we bound so a reload can detect the new atlas
-        for (RtPipeline pipeline : worldPipelines()) if (pipeline != null) pipeline.setAtlasSampler(atlasView, sampler);
+        for (RtPipeline pipeline : worldPipelines()) if (pipeline != null) pipeline.setBlockAlbedoAtlas(atlasView, sampler);
         // Bindless slot 0 = fallback texture (the block atlas) so an entity whose texture can't be
         // resolved samples something defined rather than an unbound (partially-bound) descriptor.
+        RtBlockMaterials.INSTANCE.reset();
+        RtMaterialOverrides materialOverrides = RtMaterialOverrides.load();
+        RtEmissionSemantics emissionSemantics = RtEmissionSemantics.analyze();
+        RtBlockMaterials.INSTANCE.prepareAll(ctx, bindlessTextureCapacity, emissionSemantics, materialOverrides);
         RtEntityTextures.INSTANCE.reset(bindlessTextureCapacity);
-        for (RtPipeline pipeline : worldPipelines()) if (pipeline != null)
-            pipeline.setBindlessTexture(0, 0, atlasView, sampler); // binding 0 (albedo), slot 0 fallback
+        for (RtPipeline pipeline : worldPipelines()) if (pipeline != null) {
+            pipeline.setEntityAlbedoTexture(0, atlasView, sampler);
+            RtBlockMaterials.INSTANCE.bindPages(pipeline, sampler);
+        }
+        RtMaterialRegistry.INSTANCE.rebuild(ctx, RtBlockMaterials.INSTANCE, materialOverrides);
         // LabPBR _s + _n parallel atlases. Bind the (block-atlas-sized) atlases; their pixels fill
         // lazily as terrain extraction encounters sprites and refresh via flush(). Fall back to the block
         // atlas view if an atlas didn't initialize so bindings 9/10 always hold a valid descriptor —
         // the shader only samples them when a prim is flagged (mat.z/mat.w), so the fallback is never read.
-        if (worldPipeline.hasBlockMaterialAtlases()) {
-            RtBlockMaterials.INSTANCE.reset();
-            // Build the full _s/_n atlases now (parallel decode + blit), before terrain tessellates, so
-            // ensure() is a pure lookup on the build path instead of decoding each sprite's maps lazily.
-            RtBlockMaterials.INSTANCE.prepareAll();
-            long specView = RtBlockMaterials.INSTANCE.viewS();
-            long normalView = RtBlockMaterials.INSTANCE.viewN();
-            for (RtPipeline pipeline : worldPipelines()) if (pipeline != null) {
-                pipeline.setBlockSpecAtlas(specView != 0L ? specView : atlasView, sampler);
-                pipeline.setBlockNormalAtlas(normalView != 0L ? normalView : atlasView, sampler);
-            }
-            materialBindingsReady = true;
-        }
+        materialBindingsReady = true;
         // Bind the real vanilla celestials atlas (sun + moon phases). Pipeline creation is gated on this
         // view, so an upload race cannot silently turn the block atlas into the sky atlas for the session.
         long celView = celestialsAtlasView();
@@ -1056,22 +1063,16 @@ public final class RtComposite {
                 pipeline.setSkyAtlas(celView, sampler);
         }
         setCelestialUvAtlas(celView);
-        RtTerrain.markAllDirty();
+        RtTerrain.requestFullClear();
     }
 
     /** Bind the existing stable texture registry into one newly-created specialized pipeline. */
     private void bindPipelineTextures(RtContext ctx, RtPipeline pipeline) {
         long sampler = atlasSampler(ctx);
         long atlasView = blockAtlasView();
-        pipeline.setAtlasSampler(atlasView, sampler);
-        if (skyViewLut != null) pipeline.setSkyViewLut(skyViewLut.view);
-        pipeline.setBindlessTexture(0, 0, atlasView, sampler);
-        if (pipeline.hasBlockMaterialAtlases()) {
-            long specView = RtBlockMaterials.INSTANCE.viewS();
-            long normalView = RtBlockMaterials.INSTANCE.viewN();
-            pipeline.setBlockSpecAtlas(specView != 0L ? specView : atlasView, sampler);
-            pipeline.setBlockNormalAtlas(normalView != 0L ? normalView : atlasView, sampler);
-        }
+        pipeline.setBlockAlbedoAtlas(atlasView, sampler);
+        pipeline.setEntityAlbedoTexture(0, atlasView, sampler);
+        RtBlockMaterials.INSTANCE.bindPages(pipeline, sampler);
         if (pipeline.hasSkyAtlas()) {
             long celestialView = celestialsAtlasView();
             if (celestialView == 0L) throw new IllegalStateException("celestials atlas unavailable during pipeline binding");
@@ -1646,8 +1647,6 @@ public final class RtComposite {
                 RtEntityTextures.INSTANCE.uploadPending(atlasSampler(ctx), worldPipelines());
             // Re-upload the LabPBR _s atlas if extraction added sprites since the last frame (the
             // view handle is stable, so no re-bind needed). Before the trace records, like uploadPending.
-                RtBlockMaterials.INSTANCE.flush();
-                RtEntityMaterials.INSTANCE.flushAll(); // block-entity parallel _s/_n blitted during capture
             }
             // Build the entity BLAS this frame, then the TLAS that references them (+ the already-built
             // terrain BLAS), then the trace — each separated by a barrier. The frame TLAS is retired
@@ -1664,7 +1663,7 @@ public final class RtComposite {
             RtAccel.PreparedTlas frameTlas = offlineGroundTruth ? offlineTlas : null;
             if (frameTlas == null) {
                 try (RtFrameStats.Scope ignored = RtFrameStats.FRAME.stage("frame.prepareTlas")) {
-                    frameTlas = RtAccel.prepareTlas(ctx, fe.instances(), tlasRing);
+                    frameTlas = RtAccel.prepareTlas(ctx, fe.baseInstances(), fe.dynamicInstances(), tlasRing);
                 }
             }
             for (RtPipeline pipeline : worldPipelines()) if (pipeline != null) pipeline.setTlas(frameTlas.accel.handle);
@@ -1721,7 +1720,8 @@ public final class RtComposite {
                 }
                 ByteBuffer sharcPush = stack.malloc(SharcPushAddrData.BYTE_SIZE);
                 new SharcPushAddrData(pushBuf.deviceAddress, terrain.tableAddress(), fe.geomTableAddr(),
-                        (int) frameCounter, sharcFrame.address()).write(sharcPush);
+                        RtMaterialRegistry.INSTANCE.tableAddress(), (int) frameCounter, worldDebugView,
+                        sharcFrame.address()).write(sharcPush);
                 boolean sharcDiagnostics = CausticaConfig.Rt.Sharc.DETAILED_STATS.value()
                         || (worldDebugView >= 9 && worldDebugView <= 16);
                 boolean sharcPrimaryMode = CausticaConfig.Rt.Sharc.PRIMARY_DIFFUSE_REUSE.value()
@@ -1758,9 +1758,9 @@ public final class RtComposite {
                 }
                 if (traceGpuProfiler != null) traceGpuProfiler.queryEnd(cmd);
             } else {
-                ByteBuffer pushAddr = stack.malloc(PushAddrData.BYTE_SIZE);
-                new PushAddrData(pushBuf.deviceAddress, terrain.tableAddress(), fe.geomTableAddr(),
-                        (int) frameCounter).write(pushAddr);
+                ByteBuffer pushAddr = stack.malloc(WorldPushConstantsData.BYTE_SIZE);
+                new WorldPushConstantsData(pushBuf.deviceAddress, terrain.tableAddress(), fe.geomTableAddr(),
+                        RtMaterialRegistry.INSTANCE.tableAddress(), (int) frameCounter, worldDebugView).write(pushAddr);
                 try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "world trace");
                      RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.trace")) {
                     active.trace(cmd, renderW, renderH, pushAddr);

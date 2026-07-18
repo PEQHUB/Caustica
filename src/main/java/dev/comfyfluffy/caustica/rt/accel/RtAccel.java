@@ -13,6 +13,7 @@ import org.lwjgl.vulkan.VkAccelerationStructureDeviceAddressInfoKHR;
 import org.lwjgl.vulkan.VkAccelerationStructureGeometryKHR;
 import org.lwjgl.vulkan.VkAccelerationStructureInstanceKHR;
 import org.lwjgl.vulkan.VkCommandBuffer;
+import org.lwjgl.vulkan.VkCopyAccelerationStructureInfoKHR;
 import org.lwjgl.vulkan.VkDependencyInfo;
 import org.lwjgl.vulkan.VkDevice;
 import org.lwjgl.vulkan.VkMemoryBarrier2;
@@ -21,12 +22,14 @@ import org.lwjgl.vulkan.VkMicromapBuildSizesInfoEXT;
 import org.lwjgl.vulkan.VkMicromapCreateInfoEXT;
 import org.lwjgl.vulkan.VkMicromapTriangleEXT;
 import org.lwjgl.vulkan.VkMicromapUsageEXT;
+import org.lwjgl.vulkan.VkQueryPoolCreateInfo;
 
 import dev.comfyfluffy.caustica.rt.RtContext;
 import dev.comfyfluffy.caustica.rt.RtDebugLabels;
 
 import java.util.List;
 
+import static org.lwjgl.vulkan.EXTOpacityMicromap.VK_ACCESS_2_MICROMAP_READ_BIT_EXT;
 import static org.lwjgl.vulkan.EXTOpacityMicromap.VK_ACCESS_2_MICROMAP_WRITE_BIT_EXT;
 import static org.lwjgl.vulkan.EXTOpacityMicromap.VK_BUFFER_USAGE_MICROMAP_BUILD_INPUT_READ_ONLY_BIT_EXT;
 import static org.lwjgl.vulkan.EXTOpacityMicromap.VK_BUFFER_USAGE_MICROMAP_STORAGE_BIT_EXT;
@@ -43,22 +46,28 @@ import static org.lwjgl.vulkan.KHRAccelerationStructure.VK_ACCELERATION_STRUCTUR
 import static org.lwjgl.vulkan.KHRAccelerationStructure.VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
 import static org.lwjgl.vulkan.KHRAccelerationStructure.VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
 import static org.lwjgl.vulkan.KHRAccelerationStructure.VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;
+import static org.lwjgl.vulkan.KHRAccelerationStructure.VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_COMPACTION_BIT_KHR;
 import static org.lwjgl.vulkan.KHRRayTracingPositionFetch.VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_DATA_ACCESS_BIT_KHR;
 import static org.lwjgl.vulkan.KHRAccelerationStructure.VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
 import static org.lwjgl.vulkan.KHRAccelerationStructure.VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR;
 import static org.lwjgl.vulkan.KHRAccelerationStructure.VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
+import static org.lwjgl.vulkan.KHRAccelerationStructure.VK_COPY_ACCELERATION_STRUCTURE_MODE_COMPACT_KHR;
 import static org.lwjgl.vulkan.KHRAccelerationStructure.VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR;
 import static org.lwjgl.vulkan.KHRAccelerationStructure.VK_GEOMETRY_NO_DUPLICATE_ANY_HIT_INVOCATION_BIT_KHR;
 import static org.lwjgl.vulkan.KHRAccelerationStructure.VK_GEOMETRY_OPAQUE_BIT_KHR;
 import static org.lwjgl.vulkan.KHRAccelerationStructure.VK_GEOMETRY_TYPE_INSTANCES_KHR;
 import static org.lwjgl.vulkan.KHRAccelerationStructure.VK_GEOMETRY_TYPE_TRIANGLES_KHR;
 import static org.lwjgl.vulkan.KHRAccelerationStructure.VK_INDEX_TYPE_NONE_KHR;
+import static org.lwjgl.vulkan.KHRAccelerationStructure.VK_QUERY_TYPE_ACCELERATION_STRUCTURE_COMPACTED_SIZE_KHR;
 import static org.lwjgl.vulkan.KHRAccelerationStructure.vkCmdBuildAccelerationStructuresKHR;
+import static org.lwjgl.vulkan.KHRAccelerationStructure.vkCmdCopyAccelerationStructureKHR;
+import static org.lwjgl.vulkan.KHRAccelerationStructure.vkCmdWriteAccelerationStructuresPropertiesKHR;
 import static org.lwjgl.vulkan.KHRAccelerationStructure.vkCreateAccelerationStructureKHR;
 import static org.lwjgl.vulkan.KHRAccelerationStructure.vkDestroyAccelerationStructureKHR;
 import static org.lwjgl.vulkan.KHRAccelerationStructure.vkGetAccelerationStructureBuildSizesKHR;
 import static org.lwjgl.vulkan.KHRAccelerationStructure.vkGetAccelerationStructureDeviceAddressKHR;
 import static org.lwjgl.vulkan.KHRSynchronization2.VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+import static org.lwjgl.vulkan.KHRSynchronization2.VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
 import static org.lwjgl.vulkan.KHRSynchronization2.VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR;
 import static org.lwjgl.vulkan.KHRSynchronization2.vkCmdPipelineBarrier2KHR;
 
@@ -92,7 +101,8 @@ public final class RtAccel {
 
     private final RtBuffer backing;
     private final boolean ownsBacking;
-    private final OpacityMicromap opacityMicromap;
+    private OpacityMicromap opacityMicromap;
+    private long compactionQueryPool;
     private final VkDevice vk;
     private boolean destroyed;
 
@@ -123,12 +133,23 @@ public final class RtAccel {
         }
         if (opacityMicromap != null) {
             opacityMicromap.destroy();
+            opacityMicromap = null;
+        }
+        if (compactionQueryPool != 0L) {
+            VK10.vkDestroyQueryPool(vk, compactionQueryPool, null);
+            compactionQueryPool = 0L;
         }
         // An entity BLAS's backing is caller-owned (released via releaseEntityBlas, not destroyed here).
         if (ownsBacking) {
             backing.destroy();
         }
         destroyed = true;
+    }
+
+    private OpacityMicromap detachOpacityMicromap() {
+        OpacityMicromap result = opacityMicromap;
+        opacityMicromap = null;
+        return result;
     }
 
     /** CPU-generated opacity micromap input for one terrain geometry's triangle order. */
@@ -250,20 +271,23 @@ public final class RtAccel {
         // VK_GEOMETRY_OPAQUE_BIT. The fixed geometry indices are also SBT material indices: radiance rays
         // use closest-hit-only records for solid/translucent/water and an any-hit record for true cutout;
         // shadow rays use any-hit records for cutout/translucent/water.
-        // terrainSplit == false ⇒ the single-geometry path (entities / refit) keyed on triangleCount.
+        // Both split flags false ⇒ the legacy single-geometry path keyed on triangleCount.
         private final boolean terrainSplit;
         private final int[] terrainTris; // per-bucket triangle counts in TERRAIN_BUCKETS order (null if !terrainSplit)
+        private final boolean entitySplit;
+        private final int[] entityTris; // opaque/any-hit counts (null if !entitySplit)
         private final OpacityMicromap opacityMicromap; // optional, terrain cutout bucket only
 
         private PreparedBlas(RtAccel accel, RtBuffer scratch, RtBuffer externalBacking, long vertexAddr, long indexAddr,
                              int maxVertex, int triangleCount, boolean opaque, String label, boolean updatable, boolean update) {
             this(accel, scratch, externalBacking, vertexAddr, indexAddr, maxVertex, triangleCount, opaque, label,
-                    updatable, update, false, null, null);
+                    updatable, update, false, null, false, null, null);
         }
 
         private PreparedBlas(RtAccel accel, RtBuffer scratch, RtBuffer externalBacking, long vertexAddr, long indexAddr,
                              int maxVertex, int triangleCount, boolean opaque, String label, boolean updatable, boolean update,
-                             boolean terrainSplit, int[] terrainTris, OpacityMicromap opacityMicromap) {
+                             boolean terrainSplit, int[] terrainTris, boolean entitySplit, int[] entityTris,
+                             OpacityMicromap opacityMicromap) {
             this.accel = accel;
             this.scratch = scratch;
             this.externalBacking = externalBacking;
@@ -277,6 +301,8 @@ public final class RtAccel {
             this.update = update;
             this.terrainSplit = terrainSplit;
             this.terrainTris = terrainTris;
+            this.entitySplit = entitySplit;
+            this.entityTris = entityTris;
             this.opacityMicromap = opacityMicromap;
         }
 
@@ -288,7 +314,16 @@ public final class RtAccel {
                 total += t;
             }
             return new PreparedBlas(accel, scratch, externalBacking, vertexAddr, indexAddr, maxVertex,
-                    total, false, label, false, false, true, terrainTris, opacityMicromap);
+                    total, false, label, false, false, true, terrainTris, false, null, opacityMicromap);
+        }
+
+        static PreparedBlas entity(RtAccel accel, RtBuffer scratch, RtBuffer externalBacking, long vertexAddr,
+                                   long indexAddr, int maxVertex, int[] entityTris, String label,
+                                   boolean updatable, boolean update) {
+            int total = 0;
+            for (int t : entityTris) total += t;
+            return new PreparedBlas(accel, scratch, externalBacking, vertexAddr, indexAddr, maxVertex,
+                    total, false, label, updatable, update, false, null, true, entityTris, null);
         }
 
         private void freeTransientBuildResources() {
@@ -305,6 +340,10 @@ public final class RtAccel {
     public static final int BUCKET_TRANSLUCENT = 2;
     public static final int BUCKET_WATER = 3;
     public static final int TERRAIN_BUCKETS = 4;
+    /** Entity BLAS geometries: opaque bypasses any-hit; everything else shares one any-hit geometry. */
+    public static final int ENTITY_BUCKET_OPAQUE = 0;
+    public static final int ENTITY_BUCKET_ANY_HIT = 1;
+    public static final int ENTITY_BUCKETS = 2;
     public static final int SBT_RAY_RADIANCE = 0;
     public static final int SBT_RAY_SHADOW = 1;
     public static final int SBT_TERRAIN_RADIANCE_OFFSET = SBT_RAY_RADIANCE * TERRAIN_BUCKETS;
@@ -328,6 +367,10 @@ public final class RtAccel {
      * cached geometry such as block entities.
      */
     public record PersistentBuild(PreparedBlas op, RtAccel accel, RtBuffer backing, RtBuffer scratch) {
+    }
+
+    /** Source and destination of the second, compact-copy phase of a terrain BLAS build. */
+    public record PreparedTerrainCompaction(PreparedBlas source, PreparedBlas compacted) {
     }
 
     /** Allocate a BLAS (AS + backing + scratch) and query sizes, deferring the build to {@link #recordBlasBuilds}. */
@@ -369,15 +412,70 @@ public final class RtAccel {
                     debugLabel + " backing");
             scratch = createScratchBuffer(ctx, sizes.buildScratchSize(), debugLabel + " build scratch");
             accel = createBlasOn(ctx, stack, backing, sizes.accelerationStructureSize(), true, debugLabel, opacityMicromap);
+            VkQueryPoolCreateInfo queryCi = VkQueryPoolCreateInfo.calloc(stack).sType$Default()
+                    .queryType(VK_QUERY_TYPE_ACCELERATION_STRUCTURE_COMPACTED_SIZE_KHR).queryCount(1);
+            java.nio.LongBuffer pQueryPool = stack.mallocLong(1);
+            RtContext.check(VK10.vkCreateQueryPool(vk, queryCi, null, pQueryPool),
+                    "vkCreateQueryPool(terrain BLAS compacted size)");
+            accel.compactionQueryPool = pQueryPool.get(0);
+            RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_QUERY_POOL, accel.compactionQueryPool,
+                    debugLabel + " compacted-size query");
             return PreparedBlas.terrain(accel, scratch, null, positions.deviceAddress, indices.deviceAddress, vertexCount - 1,
                     bucketTris, opacityMicromap, debugLabel);
         } catch (Throwable t) {
             if (accel != null) {
                 accel.destroy();
+                if (scratch != null) scratch.destroy();
             } else {
                 if (scratch != null) scratch.destroy();
                 if (backing != null) backing.destroy();
                 if (opacityMicromap != null) opacityMicromap.destroy();
+            }
+            throw t;
+        }
+    }
+
+    /**
+     * Read a completed terrain build's compacted-size query and allocate its compact-copy destination.
+     * Called only after the compute timeline confirms the build/query submission completed.
+     */
+    public static PreparedTerrainCompaction prepareTerrainCompaction(RtContext ctx, PreparedBlas source) {
+        if (!source.terrainSplit || source.accel.compactionQueryPool == 0L) {
+            throw new IllegalArgumentException("terrain BLAS has no pending compaction query");
+        }
+        long compactedSize;
+        try (MemoryStack stack = MemoryStack.stackPush()) {
+            java.nio.LongBuffer result = stack.mallocLong(1);
+            RtContext.check(VK10.vkGetQueryPoolResults(ctx.vk(), source.accel.compactionQueryPool,
+                    0, 1, result, Long.BYTES, VK10.VK_QUERY_RESULT_64_BIT),
+                    "vkGetQueryPoolResults(terrain BLAS compacted size)");
+            compactedSize = result.get(0);
+        }
+        VK10.vkDestroyQueryPool(ctx.vk(), source.accel.compactionQueryPool, null);
+        source.accel.compactionQueryPool = 0L;
+        if (compactedSize <= 0L) {
+            throw new IllegalStateException("terrain BLAS compacted size is " + compactedSize);
+        }
+
+        RtBuffer backing = null;
+        RtAccel compactedAccel = null;
+        try (MemoryStack stack = MemoryStack.stackPush()) {
+            backing = ctx.createAsyncBuffer(compactedSize,
+                    VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR, false,
+                    source.label + " compacted backing");
+            compactedAccel = createBlasOn(ctx, stack, backing, compactedSize, true,
+                    source.label + " compacted");
+            OpacityMicromap opacityMicromap = source.accel.detachOpacityMicromap();
+            compactedAccel.opacityMicromap = opacityMicromap;
+            PreparedBlas compacted = PreparedBlas.terrain(compactedAccel, source.scratch, null,
+                    source.vertexAddr, source.indexAddr, source.maxVertex, source.terrainTris,
+                    opacityMicromap, source.label);
+            return new PreparedTerrainCompaction(source, compacted);
+        } catch (Throwable t) {
+            if (compactedAccel != null) {
+                compactedAccel.destroy();
+            } else if (backing != null) {
+                backing.destroy();
             }
             throw t;
         }
@@ -468,11 +566,35 @@ public final class RtAccel {
         }
     }
 
+    /** Multi-geometry entity BLAS: packed indices are ordered opaque, then any-hit. */
+    public static PreparedBlas prepareEntityBlas(RtContext ctx, long vertexAddr, int vertexCount,
+                                                 long indexAddr, int[] bucketTris, String label) {
+        requireEntityBuckets(bucketTris);
+        VkDevice vk = ctx.vk();
+        String debugLabel = labelOr(label, "entity BLAS");
+        try (MemoryStack stack = MemoryStack.stackPush()) {
+            VkAccelerationStructureBuildSizesInfoKHR sizes = queryEntityBlasSizes(vk, stack, vertexAddr,
+                    indexAddr, vertexCount, bucketTris, false);
+            RtBuffer backing = ctx.createBuffer(sizes.accelerationStructureSize(),
+                    VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR, false, debugLabel + " backing");
+            RtBuffer scratch = createScratchBuffer(ctx, sizes.buildScratchSize(), debugLabel + " build scratch");
+            RtAccel accel = createBlasOn(ctx, stack, backing, sizes.accelerationStructureSize(), false, debugLabel);
+            return PreparedBlas.entity(accel, scratch, backing, vertexAddr, indexAddr, vertexCount - 1,
+                    bucketTris.clone(), debugLabel, false, false);
+        }
+    }
+
     /** Prepare a non-updatable persistent BLAS over packed caller-owned geometry. */
     public static PersistentBuild preparePersistentBlasBuild(RtContext ctx, long vertexAddr, int vertexCount,
                                                              long indexAddr, int indexCount, boolean opaque,
                                                              String label) {
         PreparedBlas op = prepareEntityBlas(ctx, vertexAddr, vertexCount, indexAddr, indexCount, opaque, label);
+        return new PersistentBuild(op, op.accel, op.externalBacking, op.scratch);
+    }
+
+    public static PersistentBuild preparePersistentEntityBlasBuild(RtContext ctx, long vertexAddr, int vertexCount,
+                                                                   long indexAddr, int[] bucketTris, String label) {
+        PreparedBlas op = prepareEntityBlas(ctx, vertexAddr, vertexCount, indexAddr, bucketTris, label);
         return new PersistentBuild(op, op.accel, op.externalBacking, op.scratch);
     }
 
@@ -508,6 +630,25 @@ public final class RtAccel {
         }
     }
 
+    public static UpdatableBuild prepareUpdatableEntityBlasBuild(RtContext ctx, long vertexAddr, int vertexCount,
+                                                                 long indexAddr, int[] bucketTris, String label) {
+        requireEntityBuckets(bucketTris);
+        VkDevice vk = ctx.vk();
+        String debugLabel = labelOr(label, "updatable entity BLAS");
+        try (MemoryStack stack = MemoryStack.stackPush()) {
+            VkAccelerationStructureBuildSizesInfoKHR sizes = queryEntityBlasSizes(vk, stack, vertexAddr,
+                    indexAddr, vertexCount, bucketTris, true);
+            long accelSize = sizes.accelerationStructureSize();
+            RtBuffer backing = ctx.createBuffer(accelSize,
+                    VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR, false, debugLabel + " backing");
+            RtBuffer scratch = createScratchBuffer(ctx, sizes.buildScratchSize(), debugLabel + " build scratch");
+            RtAccel accel = createBlasOn(ctx, stack, backing, accelSize, false, debugLabel);
+            PreparedBlas op = PreparedBlas.entity(accel, scratch, backing, vertexAddr, indexAddr,
+                    vertexCount - 1, bucketTris.clone(), debugLabel, true, false);
+            return new UpdatableBuild(op, accel, backing, scratch, sizes.updateScratchSize());
+        }
+    }
+
     /**
      * Prepare an in-place refit (UPDATE) of an existing updatable BLAS with new vertex data of the SAME
      * topology. {@code scratch} (sized {@code updateScratchSize}) and the mesh buffers are caller-owned
@@ -519,6 +660,13 @@ public final class RtAccel {
         String debugLabel = labelOr(label, "BLAS refit");
         return new PreparedBlas(accel, scratch, null, vertexAddr, indexAddr, vertexCount - 1, indexCount / 3,
                 opaque, debugLabel, true, true);
+    }
+
+    public static PreparedBlas refitEntityUpdate(RtAccel accel, RtBuffer scratch, long vertexAddr, long indexAddr,
+                                                 int vertexCount, int[] bucketTris, String label) {
+        requireEntityBuckets(bucketTris);
+        return PreparedBlas.entity(accel, scratch, null, vertexAddr, indexAddr, vertexCount - 1,
+                bucketTris.clone(), labelOr(label, "entity BLAS refit"), true, true);
     }
 
     /** Reclaim a transient entity BLAS: destroy its AS handle, then its backing + scratch buffers. */
@@ -554,6 +702,15 @@ public final class RtAccel {
         vkGetAccelerationStructureBuildSizesKHR(vk, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
                 build.get(0), stack.ints(indexCount / 3), sizes);
         return sizes;
+    }
+
+    private static void requireEntityBuckets(int[] bucketTris) {
+        if (bucketTris == null || bucketTris.length != ENTITY_BUCKETS) {
+            throw new IllegalArgumentException("Expected " + ENTITY_BUCKETS + " entity bucket counts");
+        }
+        for (int count : bucketTris) {
+            if (count < 0) throw new IllegalArgumentException("Negative entity triangle count");
+        }
     }
 
     private static int buildFlags(boolean allowUpdate) {
@@ -606,6 +763,50 @@ public final class RtAccel {
                 .maxVertex(vertexCount - 1).indexType(VK10.VK_INDEX_TYPE_UINT32);
         tri.vertexData().deviceAddress(vertexAddr);
         tri.indexData().deviceAddress(indexAddr);
+    }
+
+    /** Fixed entity geometry order; empty buckets remain present so GeometryIndex/SBT routing is stable. */
+    private static VkAccelerationStructureGeometryKHR.Buffer entityGeometries(MemoryStack stack, long vertexAddr,
+                                                                               long indexAddr, int vertexCount) {
+        VkAccelerationStructureGeometryKHR.Buffer geometries =
+                VkAccelerationStructureGeometryKHR.calloc(ENTITY_BUCKETS, stack);
+        for (int bucket = 0; bucket < ENTITY_BUCKETS; bucket++) {
+            fillTriangleGeometry(geometries.get(bucket), vertexAddr, indexAddr, vertexCount,
+                    bucket == ENTITY_BUCKET_OPAQUE);
+        }
+        return geometries;
+    }
+
+    private static VkAccelerationStructureBuildRangeInfoKHR.Buffer entityBuildRanges(MemoryStack stack,
+                                                                                      int[] bucketTris) {
+        VkAccelerationStructureBuildRangeInfoKHR.Buffer ranges =
+                VkAccelerationStructureBuildRangeInfoKHR.calloc(ENTITY_BUCKETS, stack);
+        int triangleBase = 0;
+        for (int bucket = 0; bucket < ENTITY_BUCKETS; bucket++) {
+            int count = bucketTris[bucket];
+            ranges.get(bucket).primitiveCount(count)
+                    .primitiveOffset(triangleBase * 3 * Integer.BYTES)
+                    .firstVertex(0).transformOffset(0);
+            triangleBase += count;
+        }
+        return ranges;
+    }
+
+    private static VkAccelerationStructureBuildSizesInfoKHR queryEntityBlasSizes(VkDevice vk, MemoryStack stack,
+                                                                                  long vertexAddr, long indexAddr,
+                                                                                  int vertexCount, int[] bucketTris,
+                                                                                  boolean allowUpdate) {
+        VkAccelerationStructureGeometryKHR.Buffer geometries = entityGeometries(stack, vertexAddr, indexAddr, vertexCount);
+        VkAccelerationStructureBuildGeometryInfoKHR.Buffer build = VkAccelerationStructureBuildGeometryInfoKHR.calloc(1, stack);
+        build.get(0).sType$Default().type(VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR)
+                .flags(buildFlags(allowUpdate)).mode(VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR)
+                .geometryCount(geometries.capacity()).pGeometries(geometries);
+        java.nio.IntBuffer maxPrims = stack.mallocInt(ENTITY_BUCKETS);
+        maxPrims.put(bucketTris).flip();
+        VkAccelerationStructureBuildSizesInfoKHR sizes = VkAccelerationStructureBuildSizesInfoKHR.calloc(stack).sType$Default();
+        vkGetAccelerationStructureBuildSizesKHR(vk, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
+                build.get(0), maxPrims, sizes);
+        return sizes;
     }
 
     private static VkMicromapUsageEXT.Buffer micromapUsage(MemoryStack stack, int triangleCount, int subdivisionLevel) {
@@ -683,7 +884,7 @@ public final class RtAccel {
                 vertexCount, bucketTris, opacityMicromap);
         VkAccelerationStructureBuildGeometryInfoKHR.Buffer build = VkAccelerationStructureBuildGeometryInfoKHR.calloc(1, stack);
         build.sType$Default().type(VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR)
-                .flags(buildFlags(false))
+                .flags(buildFlags(false) | VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_COMPACTION_BIT_KHR)
                 .mode(VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR).geometryCount(geom.capacity()).pGeometries(geom);
         java.nio.IntBuffer maxPrims = stack.mallocInt(geom.capacity());
         for (int tris : bucketTris) {
@@ -700,7 +901,8 @@ public final class RtAccel {
      * A TLAS instance: a 3x4 row-major transform, the device address of its BLAS, the 24-bit
      * {@code instanceCustomIndex} the hit shaders read, the 8-bit visibility {@code mask} (ANDed with the
      * trace cull mask), and the base SBT hit-record offset. Terrain uses offset 0 so geometry index selects
-     * the material bucket; entities use {@link #SBT_ENTITY_OFFSET} so their single geometry keeps any-hit.
+     * the material bucket. Entities use {@link #SBT_ENTITY_OFFSET}; their fixed geometry index then selects
+     * opaque or any-hit; the remaining two records in each four-record entity SBT block stay unused.
      */
     public record Instance(float[] transform3x4, long blasDeviceAddress, int customIndex, int mask, int sbtRecordOffset) {
         public Instance(float[] transform3x4, long blasDeviceAddress, int customIndex) {
@@ -780,7 +982,14 @@ public final class RtAccel {
      * result: the ring owns the resources.
      */
     public static PreparedTlas prepareTlas(RtContext ctx, List<Instance> instances, TlasRing ring) {
-        int count = instances.size();
+        return prepareTlas(ctx, instances, List.of(), ring);
+    }
+
+    /** Pack terrain and dynamic instances as two contiguous ranges without a composite-list get per item. */
+    public static PreparedTlas prepareTlas(RtContext ctx, List<Instance> baseInstances,
+                                           List<Instance> dynamicInstances, TlasRing ring) {
+        int baseCount = baseInstances.size();
+        int count = Math.addExact(baseCount, dynamicInstances.size());
         TlasRing.Slot slot = ring.slots[ring.cursor];
         if (slot == null || count > slot.capacity) {
             // Outgrown (or first use). The slot's previous use is RING frames behind — off all queues by
@@ -800,25 +1009,31 @@ public final class RtAccel {
             slot.updatesSinceBuild = 0;
         }
 
-        try (MemoryStack stack = MemoryStack.stackPush()) {
-            // Reuse a single record + transform buffer across all instances: allocating per-instance
-            // on the MemoryStack (64 KB/thread) overflows it once there are hundreds of sections.
-            VkAccelerationStructureInstanceKHR rec = VkAccelerationStructureInstanceKHR.calloc(stack);
-            java.nio.FloatBuffer xform = stack.mallocFloat(12);
-            for (int i = 0; i < count; i++) {
-                Instance inst = instances.get(i);
-                xform.clear();
-                xform.put(inst.transform3x4()).flip();
-                rec.transform().matrix(xform);
-                rec.instanceCustomIndex(inst.customIndex()).mask(inst.mask()).instanceShaderBindingTableRecordOffset(inst.sbtRecordOffset())
-                        .flags(0x00000001) // VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR
-                        .accelerationStructureReference(inst.blasDeviceAddress());
-                MemoryUtil.memCopy(rec.address(), slot.instanceBuffer.mapped + (long) i * VkAccelerationStructureInstanceKHR.SIZEOF,
-                        VkAccelerationStructureInstanceKHR.SIZEOF);
-            }
+        writeTlasInstances(baseInstances, slot.instanceBuffer.mapped, 0);
+        writeTlasInstances(dynamicInstances, slot.instanceBuffer.mapped, baseCount);
+        if (count > 0) {
+            slot.instanceBuffer.flush(0L, (long) count * VkAccelerationStructureInstanceKHR.SIZEOF);
         }
         return new PreparedTlas(slot.accel, slot.instanceBuffer, slot.scratch, count, update,
                 "frame TLAS " + count + " instances");
+    }
+
+    // Pack directly into the mapped Vulkan array to keep this per-instance TLAS hot path allocation-free.
+    private static void writeTlasInstances(List<Instance> instances, long mapped, int firstInstance) {
+        final int facingCullDisable = 0x00000001;
+        for (int i = 0, count = instances.size(); i < count; i++) {
+            Instance instance = instances.get(i);
+            long dst = mapped + (long) (firstInstance + i) * VkAccelerationStructureInstanceKHR.SIZEOF;
+            float[] transform = instance.transform3x4();
+            for (int component = 0; component < 12; component++) {
+                MemoryUtil.memPutFloat(dst + (long) component * Float.BYTES, transform[component]);
+            }
+            MemoryUtil.memPutInt(dst + 48L,
+                    (instance.customIndex() & 0x00FF_FFFF) | ((instance.mask() & 0xFF) << 24));
+            MemoryUtil.memPutInt(dst + 52L,
+                    (instance.sbtRecordOffset() & 0x00FF_FFFF) | (facingCullDisable << 24));
+            MemoryUtil.memPutLong(dst + 56L, instance.blasDeviceAddress());
+        }
     }
 
     /** Create one ring slot sized for {@code capacity} instances (instance buffer + AS + backing + scratch). */
@@ -893,6 +1108,33 @@ public final class RtAccel {
         }
     }
 
+    /** Record the compact copy after {@link #prepareTerrainCompaction} has sized its destination. */
+    public static void recordTerrainCompaction(RtContext ctx, VkCommandBuffer cmd,
+                                               PreparedTerrainCompaction compaction) {
+        try (MemoryStack stack = MemoryStack.stackPush();
+             RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd,
+                     compaction.source.label + " compact")) {
+            accelerationStructureBuildBarrier(cmd, stack);
+            VkCopyAccelerationStructureInfoKHR copy = VkCopyAccelerationStructureInfoKHR.calloc(stack)
+                    .sType$Default()
+                    .src(compaction.source.accel.handle)
+                    .dst(compaction.compacted.accel.handle)
+                    .mode(VK_COPY_ACCELERATION_STRUCTURE_MODE_COMPACT_KHR);
+            vkCmdCopyAccelerationStructureKHR(cmd, copy);
+        }
+    }
+
+    /** Release the uncompacted source after the compact copy reaches timeline completion. */
+    public static void finishTerrainCompaction(PreparedTerrainCompaction compaction) {
+        compaction.source.accel.destroy();
+    }
+
+    /** Release both AS allocations after a failed compact-copy phase. Geometry buffers remain caller-owned. */
+    public static void destroyTerrainCompaction(PreparedTerrainCompaction compaction) {
+        compaction.compacted.accel.destroy();
+        compaction.source.accel.destroy();
+    }
+
     private static void recordTlasBuildRaw(RtContext ctx, VkCommandBuffer cmd, PreparedTlas tlas) {
         try (MemoryStack stack = MemoryStack.stackPush()) {
             VkAccelerationStructureBuildGeometryInfoKHR.Buffer build = tlasBuildInfo(stack, tlas.instanceBuffer.deviceAddress);
@@ -924,6 +1166,10 @@ public final class RtAccel {
             recordTerrainBlasBuild(ctx, cmd, stack, b);
             return;
         }
+        if (b.entitySplit) {
+            recordEntityBlasBuild(ctx, cmd, stack, b);
+            return;
+        }
         VkAccelerationStructureGeometryKHR.Buffer geom = triangleGeometry(stack, b.vertexAddr, b.indexAddr, b.maxVertex + 1, b.opaque);
         VkAccelerationStructureBuildGeometryInfoKHR.Buffer build = VkAccelerationStructureBuildGeometryInfoKHR.calloc(1, stack);
         build.sType$Default().type(VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR)
@@ -943,9 +1189,34 @@ public final class RtAccel {
         vkCmdBuildAccelerationStructuresKHR(cmd, build, ppRange);
     }
 
+    /** Record the fixed opaque/any-hit entity geometries as one BUILD or in-place UPDATE. */
+    private static void recordEntityBlasBuild(RtContext ctx, VkCommandBuffer cmd, MemoryStack stack,
+                                              PreparedBlas b) {
+        VkAccelerationStructureGeometryKHR.Buffer geometries = entityGeometries(stack, b.vertexAddr,
+                b.indexAddr, b.maxVertex + 1);
+        VkAccelerationStructureBuildGeometryInfoKHR.Buffer build = VkAccelerationStructureBuildGeometryInfoKHR.calloc(1, stack);
+        build.get(0).sType$Default().type(VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR)
+                .flags(buildFlags(b.updatable))
+                .mode(b.update ? VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR
+                        : VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR)
+                .geometryCount(geometries.capacity()).pGeometries(geometries)
+                .dstAccelerationStructure(b.accel.handle);
+        if (b.update) {
+            build.get(0).srcAccelerationStructure(b.accel.handle);
+        }
+        build.get(0).scratchData().deviceAddress(scratchAddress(ctx, b.scratch));
+        VkAccelerationStructureBuildRangeInfoKHR.Buffer ranges = entityBuildRanges(stack, b.entityTris);
+        PointerBuffer ppRanges = stack.mallocPointer(1).put(0, ranges.address());
+        vkCmdBuildAccelerationStructuresKHR(cmd, build, ppRanges);
+    }
+
     /** Record a terrain section's two-geometry (opaque + alpha) BUILD. Always a fresh BUILD — terrain
      *  sections are never refit in place (re-extraction allocates a new BLAS), so no UPDATE branch. */
     private static void recordTerrainBlasBuild(RtContext ctx, VkCommandBuffer cmd, MemoryStack stack, PreparedBlas b) {
+        if (b.accel.compactionQueryPool == 0L) {
+            throw new IllegalStateException("terrain BLAS has no compaction query pool");
+        }
+        VK10.vkCmdResetQueryPool(cmd, b.accel.compactionQueryPool, 0, 1);
         if (b.opacityMicromap != null) {
             recordMicromapBuild(cmd, stack, b.opacityMicromap);
             micromapBuildBarrier(cmd, stack);
@@ -954,7 +1225,7 @@ public final class RtAccel {
                 b.maxVertex + 1, b.terrainTris, b.opacityMicromap);
         VkAccelerationStructureBuildGeometryInfoKHR.Buffer build = VkAccelerationStructureBuildGeometryInfoKHR.calloc(1, stack);
         build.sType$Default().type(VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR)
-                .flags(buildFlags(false))
+                .flags(buildFlags(false) | VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_COMPACTION_BIT_KHR)
                 .mode(VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR)
                 .geometryCount(geom.capacity()).pGeometries(geom)
                 .dstAccelerationStructure(b.accel.handle);
@@ -962,6 +1233,10 @@ public final class RtAccel {
         VkAccelerationStructureBuildRangeInfoKHR.Buffer range = terrainBuildRanges(stack, b.terrainTris);
         PointerBuffer ppRange = stack.mallocPointer(1).put(0, range.address());
         vkCmdBuildAccelerationStructuresKHR(cmd, build, ppRange);
+        accelerationStructureBuildBarrier(cmd, stack);
+        vkCmdWriteAccelerationStructuresPropertiesKHR(cmd, stack.longs(b.accel.handle),
+                VK_QUERY_TYPE_ACCELERATION_STRUCTURE_COMPACTED_SIZE_KHR,
+                b.accel.compactionQueryPool, 0);
     }
 
     private static void recordMicromapBuild(VkCommandBuffer cmd, MemoryStack stack, OpacityMicromap opacityMicromap) {
@@ -977,6 +1252,17 @@ public final class RtAccel {
         barrier.get(0).sType$Default()
                 .srcStageMask(VK_PIPELINE_STAGE_2_MICROMAP_BUILD_BIT_EXT)
                 .srcAccessMask(VK_ACCESS_2_MICROMAP_WRITE_BIT_EXT)
+                .dstStageMask(VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR)
+                .dstAccessMask(VK_ACCESS_2_MICROMAP_READ_BIT_EXT);
+        VkDependencyInfo dep = VkDependencyInfo.calloc(stack).sType$Default().pMemoryBarriers(barrier);
+        vkCmdPipelineBarrier2KHR(cmd, dep);
+    }
+
+    private static void accelerationStructureBuildBarrier(VkCommandBuffer cmd, MemoryStack stack) {
+        VkMemoryBarrier2.Buffer barrier = VkMemoryBarrier2.calloc(1, stack);
+        barrier.get(0).sType$Default()
+                .srcStageMask(VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR)
+                .srcAccessMask(VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR)
                 .dstStageMask(VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR)
                 .dstAccessMask(VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR);
         VkDependencyInfo dep = VkDependencyInfo.calloc(stack).sType$Default().pMemoryBarriers(barrier);

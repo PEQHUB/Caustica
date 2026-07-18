@@ -1,30 +1,26 @@
 package dev.comfyfluffy.caustica.rt.entity;
 
-import com.mojang.blaze3d.platform.NativeImage;
 import com.mojang.blaze3d.textures.GpuTextureView;
 import com.mojang.blaze3d.vulkan.VulkanGpuTextureView;
 import dev.comfyfluffy.caustica.CausticaConfig;
 import dev.comfyfluffy.caustica.CausticaMod;
 import dev.comfyfluffy.caustica.mixin.RenderSetupAccessor;
 import dev.comfyfluffy.caustica.mixin.RenderTypeAccessor;
-import dev.comfyfluffy.caustica.rt.material.RtEntityMaterials;
-import dev.comfyfluffy.caustica.rt.material.RtParallelAtlas;
+import dev.comfyfluffy.caustica.rt.material.RtMaterialRegistry;
 import dev.comfyfluffy.caustica.rt.pipeline.RtPipeline;
+import com.mojang.blaze3d.platform.NativeImage;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.rendertype.PreparedRenderType;
 import net.minecraft.client.renderer.rendertype.RenderType;
 import net.minecraft.client.renderer.texture.DynamicTexture;
 import net.minecraft.client.renderer.texture.TextureAtlas;
 import net.minecraft.resources.Identifier;
-import net.minecraft.server.packs.resources.Resource;
 
-import java.io.InputStream;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.WeakHashMap;
 
 /**
@@ -48,8 +44,7 @@ public final class RtEntityTextures {
         return CausticaConfig.Rt.EntityTextures.MAX_TEXTURES.value();
     }
 
-    /** Resolve + bind per-type LabPBR {@code _n}/{@code _s} for entities. Toggle off to skip entity material
-     *  branches (prim flags stay 0). {@code -Dcaustica.rt.entityPbr}. */
+    /** Enable pack-compiled entity materials; disabled entities use the canonical neutral header. */
     public static boolean entityPbr() {
         return CausticaConfig.Rt.EntityTextures.PBR.value();
     }
@@ -62,6 +57,7 @@ public final class RtEntityTextures {
     // lets those dead identities be collected instead of accumulating; stable singletons (zombie.png, …)
     // stay cached and skip the costly RenderType.prepare().
     private final Map<RenderType, Long> viewCache = new WeakHashMap<>();
+    private final Map<RenderType, Identifier> locationCache = new WeakHashMap<>();
     // Resolved image-view handle → bindless slot. The slot identifies a *texture*, not a RenderType, so
     // many render types that differ only by a texture transform we don't replicate (the swirl's scroll)
     // collapse to ONE slot — instead of leaking a slot per frame until the array exhausts and everything
@@ -71,29 +67,22 @@ public final class RtEntityTextures {
     // Atlas-location → bindless slot, for items/blocks (which texture from an atlas, not a per-type
     // file). Seeded with the block atlas = slot 0 (also the fallback). Items use a separate item atlas.
     private final Map<Identifier, Integer> atlasSlotCache = new HashMap<>();
-    private final List<Pending> pending = new ArrayList<>(); // slots resolved this frame, awaiting upload
-    private final List<Pending> bound = new ArrayList<>(); // complete registry for newly-created pipelines
-    // Atlas slots whose parallel LabPBR _s/_n (RtEntityMaterials, for block entities) have been bound into
-    // bindless bindings 1/2 — bind once per atlas slot. Cleared on reset (the bindless set is recreated).
-    private final java.util.Set<Integer> atlasMaterialBound = new java.util.HashSet<>();
+    private final List<Pending> pending = new ArrayList<>(); // albedo slots awaiting descriptor upload
+    private final List<Pending> bound = new ArrayList<>();
     // Descriptor array capacity of the currently alive world pipeline. A higher config value applies after
     // reset/recreate; a lower value stops allocating new slots immediately without invalidating old ones.
     private int capacity = maxTextures();
     private int nextSlot = 1;
     private boolean loggedFailure;
     private boolean loggedMaterialFailure;
+    // 1x1 solid-white DynamicTexture for untextured geometry (leash/line ribbons); see whiteSlot().
+    private static final Identifier WHITE_LOCATION = Identifier.fromNamespaceAndPath("caustica", "rt_white");
+    private boolean whiteRegistered;
 
-    // Entity LabPBR: per-type _n/_s textures cached by resource Identifier (null = known-missing), closed
-    // on reset(). Per-slot presence (→ prim mat.w/mat.z) + a guard so a slot's _n/_s are resolved once
-    // (slots can be re-seen via the same shared texture handle every frame).
-    private final Map<Identifier, DynamicTexture> materialCache = new HashMap<>();
-    private boolean[] slotHasN = new boolean[capacity];
-    private boolean[] slotHasS = new boolean[capacity];
-    private boolean[] materialResolved = new boolean[capacity];
     // Cached RenderSetup.TextureBinding#location() (the class is package-private, the method public).
     private Method locationMethod;
 
-    private record Pending(int binding, int slot, long view) {
+    private record Pending(int slot, long view) {
     }
 
     private RtEntityTextures() {
@@ -108,44 +97,13 @@ public final class RtEntityTextures {
         if (renderType == null) {
             return 0;
         }
-        int slot = slotForView(resolveView(renderType));
-        // Resolve this per-type texture's LabPBR _n/_s siblings into the parallel bindless arrays the
-        // first time the slot is seen (slots can recur every frame via the same shared handle). Marked
-        // resolved up front so a one-off resolution miss isn't retried every frame.
-        if (entityPbr() && slot > 0 && slot < materialResolved.length && !materialResolved[slot]) {
-            materialResolved[slot] = true;
-            resolveEntityMaterials(slot, renderType);
-        }
-        return slot;
+        return slotForView(resolveView(renderType));
     }
 
-    /** Whether the slot has a LabPBR {@code _n} (normal) map bound → the entity prim's {@code mat.w}. */
-    public boolean slotHasNormal(int slot) {
-        return slot > 0 && slot < slotHasN.length && slotHasN[slot];
-    }
-
-    /** Whether the slot has a LabPBR {@code _s} (specular) map bound → the entity prim's {@code mat.z}. */
-    public boolean slotHasSpec(int slot) {
-        return slot > 0 && slot < slotHasS.length && slotHasS[slot];
-    }
-
-    /** Load the per-type {@code _n}/{@code _s} siblings of {@code renderType}'s texture into bindless
-     *  bindings 1/2 at {@code slot}, recording presence for the prim flags. Render-thread (GPU upload). */
-    private void resolveEntityMaterials(int slot, RenderType renderType) {
-        Identifier loc = textureLocation(renderType);
-        if (loc == null) {
-            return;
-        }
-        long nView = loadMaterialView(loc, "_n");
-        if (nView != 0L) {
-            queueDescriptor(1, slot, nView);
-            slotHasN[slot] = true;
-        }
-        long sView = loadMaterialView(loc, "_s");
-        if (sView != 0L) {
-            queueDescriptor(2, slot, sView);
-            slotHasS[slot] = true;
-        }
+    /** Canonical material ID for a full entity texture, or the neutral runtime-texture fallback. */
+    public int materialIdFor(RenderType renderType, boolean stochasticAlpha) {
+        if (!entityPbr()) return RtMaterialRegistry.INSTANCE.entityFallbackId(stochasticAlpha);
+        return RtMaterialRegistry.INSTANCE.resolveEntityTexture(textureLocation(renderType), stochasticAlpha);
     }
 
     /**
@@ -177,30 +135,22 @@ public final class RtEntityTextures {
     }
 
     /**
-     * Like {@link #slotForAtlas}, but for a <b>block-entity</b> sprite atlas (chest/sign/bed/…): also binds
-     * that atlas's parallel LabPBR {@code _s}/{@code _n} ({@link RtEntityMaterials}) into bindless bindings
-     * 1/2 at the same slot, so the hit shader's per-type material path samples them at the captured atlas
-     * UV. Bound once per slot (the parallel-atlas view handle is stable; later sprite blits flush into the
-     * same texture). Retried each frame until the source atlas is ready. Block-atlas geometry uses the
-     * fixed terrain atlases instead, so callers route the block atlas elsewhere — never here.
+     * Bindless slot of a solid-white 1x1 texture, for untextured geometry (leashes, custom line
+     * ribbons) whose colour comes entirely from the per-prim tint. Slot 0 (the block atlas) is NOT a
+     * substitute: the hit shader multiplies albedo by the sampled texel, and UV (0,0) lands on
+     * whatever sprite is stitched at the atlas origin. The texture is registered with the
+     * TextureManager on first use and then resolved/cached by the ordinary atlas-slot path, so it
+     * survives {@link #reset} like any other atlas. Falls back to slot 0 if registration fails.
      */
-    public int slotForBlockEntityAtlas(Identifier atlasLocation) {
-        int slot = slotForAtlas(atlasLocation);
-        if (entityPbr() && slot > 0 && !atlasMaterialBound.contains(slot)) {
-            RtParallelAtlas pa = RtEntityMaterials.INSTANCE.atlasFor(atlasLocation);
-            if (pa != null) {
-                atlasMaterialBound.add(slot);
-                long nView = pa.viewN();
-                long sView = pa.viewS();
-                if (nView != 0L) {
-                    queueDescriptor(1, slot, nView);
-                }
-                if (sView != 0L) {
-                    queueDescriptor(2, slot, sView);
-                }
-            }
+    public int whiteSlot() {
+        if (!whiteRegistered) {
+            whiteRegistered = true; // one attempt; on failure slotForAtlas caches the slot-0 fallback
+            NativeImage image = new NativeImage(1, 1, false);
+            image.setPixel(0, 0, 0xFFFFFFFF);
+            Minecraft.getInstance().getTextureManager()
+                    .register(WHITE_LOCATION, new DynamicTexture(() -> "caustica RT white", image));
         }
-        return slot;
+        return slotForAtlas(WHITE_LOCATION);
     }
 
     /**
@@ -222,43 +172,41 @@ public final class RtEntityTextures {
         }
         int slot = nextSlot++;
         viewSlotCache.put(view, slot);
-        queueDescriptor(0, slot, view); // binding 0 = albedo
+        Pending descriptor = new Pending(slot, view);
+        pending.add(descriptor);
+        bound.add(descriptor);
         return slot;
     }
 
-    private void queueDescriptor(int binding, int slot, long view) {
-        Pending descriptor = new Pending(binding, slot, view);
-        pending.add(descriptor);
-        bound.add(descriptor);
-    }
-
     /** Write any newly-registered entity textures into the pipeline's bindless set (before the trace). */
-    public void uploadPending(long sampler, RtPipeline... pipelines) {
+    public void uploadPending(RtPipeline pipeline, long sampler) {
         if (pending.isEmpty()) {
             return;
         }
         for (Pending p : pending) {
+            pipeline.setEntityAlbedoTexture(p.slot(), p.view(), sampler);
+        }
+        pending.clear();
+    }
+
+    /** Publish new stable entity slots to every specialized world pipeline before tracing. */
+    public void uploadPending(long sampler, RtPipeline... pipelines) {
+        if (pending.isEmpty()) return;
+        for (Pending p : pending) {
             for (RtPipeline pipeline : pipelines) {
-                if (pipeline != null) pipeline.setBindlessTexture(p.binding(), p.slot(), p.view(), sampler);
+                if (pipeline != null) pipeline.setEntityAlbedoTexture(p.slot(), p.view(), sampler);
             }
         }
         pending.clear();
     }
 
-    /** Populate a new mode/diagnostic pipeline without invalidating stable entity texture slots. */
     public void bindAll(long sampler, RtPipeline pipeline) {
-        for (Pending descriptor : bound) {
-            pipeline.setBindlessTexture(descriptor.binding(), descriptor.slot(), descriptor.view(), sampler);
-        }
+        for (Pending p : bound) pipeline.setEntityAlbedoTexture(p.slot(), p.view(), sampler);
     }
 
-    public int usedSlots() {
-        return nextSlot - 1;
-    }
+    public int usedSlots() { return nextSlot - 1; }
 
-    public int pendingUploads() {
-        return pending.size();
-    }
+    public int pendingUploads() { return pending.size(); }
 
     /** Drop the registry (call when the world pipeline / bindless set is recreated, or textures reload). */
     public void reset() {
@@ -269,61 +217,25 @@ public final class RtEntityTextures {
     public void reset(int descriptorCapacity) {
         capacity = Math.max(1, descriptorCapacity);
         viewCache.clear();
+        locationCache.clear();
         viewSlotCache.clear();
         atlasSlotCache.clear();
         atlasSlotCache.put(TextureAtlas.LOCATION_BLOCKS, 0); // block atlas = the slot-0 fallback
-        atlasMaterialBound.clear();
-        RtEntityMaterials.INSTANCE.reset(); // block-entity parallel _s/_n atlases are slot-bound → rebuild in lockstep
         pending.clear();
         bound.clear();
         nextSlot = 1;
-        for (DynamicTexture dt : materialCache.values()) {
-            if (dt != null) {
-                dt.close();
-            }
-        }
-        materialCache.clear();
-        slotHasN = new boolean[capacity];
-        slotHasS = new boolean[capacity];
-        materialResolved = new boolean[capacity];
     }
 
     private int slotLimit() {
         return Math.min(capacity, maxTextures());
     }
 
-    /**
-     * The {@code _n}/{@code _s} sibling of an entity texture, loaded as a {@link DynamicTexture} and cached
-     * by Identifier (a null cache entry marks a known-missing file). Returns its vk image-view handle, or 0
-     * if the resource doesn't exist / can't load.
-     */
-    private long loadMaterialView(Identifier albedoLoc, String suffix) {
-        String path = albedoLoc.getPath();
-        String base = path.endsWith(".png") ? path.substring(0, path.length() - 4) : path;
-        Identifier loc = Identifier.fromNamespaceAndPath(albedoLoc.getNamespace(), base + suffix + ".png");
-        if (materialCache.containsKey(loc)) {
-            DynamicTexture cached = materialCache.get(loc);
-            return cached != null ? vkImageView(cached.getTextureView()) : 0L;
-        }
-        DynamicTexture dt = null;
-        try {
-            Optional<Resource> res = Minecraft.getInstance().getResourceManager().getResource(loc);
-            if (res.isPresent()) {
-                try (InputStream in = res.get().open()) {
-                    // DynamicTexture takes ownership of the NativeImage (closes it) + uploads immediately.
-                    dt = new DynamicTexture(loc::toString, NativeImage.read(in));
-                }
-            }
-        } catch (Throwable t) {
-            warnMaterialOnce("RT entity material load failed for " + loc, t);
-        }
-        materialCache.put(loc, dt); // null = known-missing
-        return dt != null ? vkImageView(dt.getTextureView()) : 0L;
-    }
-
     /** Recover the resource Identifier of {@code renderType}'s primary texture (Sampler0), or null. The
      *  {@code RenderSetup.TextureBinding} class is package-private, so {@code location()} is reflective. */
     private Identifier textureLocation(RenderType renderType) {
+        if (renderType == null) return null;
+        if (locationCache.containsKey(renderType)) return locationCache.get(renderType);
+        Identifier result = null;
         try {
             // RenderSetup is final, so the accessor cast must go through Object (the interface is only
             // mixed in at runtime); RenderType is non-final so its cast is fine directly.
@@ -331,17 +243,19 @@ public final class RtEntityTextures {
             Map<String, ?> textures = ((RenderSetupAccessor) setup).caustica$textures();
             Object binding = textures.get("Sampler0");
             if (binding == null) {
+                locationCache.put(renderType, null);
                 return null;
             }
             if (locationMethod == null) {
                 locationMethod = binding.getClass().getMethod("location");
                 locationMethod.setAccessible(true);
             }
-            return (Identifier) locationMethod.invoke(binding);
+            result = (Identifier) locationMethod.invoke(binding);
         } catch (Throwable t) {
             warnMaterialOnce("RT entity texture Identifier resolution failed for " + renderType, t);
-            return null;
         }
+        locationCache.put(renderType, result);
+        return result;
     }
 
     private void warnMaterialOnce(String msg, Throwable t) {

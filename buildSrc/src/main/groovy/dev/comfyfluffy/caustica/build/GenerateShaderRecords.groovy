@@ -199,15 +199,6 @@ abstract class GenerateShaderRecords extends DefaultTask {
         sb.toString()
     }
 
-    private static Map reflectedArrayRecord(Map reflection, String parameterName, String expectedType) {
-        def parameter = reflection.parameters.find { it.name == parameterName }
-        def probeArray = parameter?.type?.resultType?.fields?.find { it.name == "values" }
-        if (probeArray?.type?.kind != "array" || probeArray.type.elementType?.name != expectedType) {
-            throw new GradleException("unexpected ${expectedType} reflection probe shape")
-        }
-        [type: probeArray.type.elementType as Map, byteSize: probeArray.type.uniformStride as int]
-    }
-
     @TaskAction
     void generate() {
         def reflectionFile = new File(temporaryDir, "shader-records-reflection.json")
@@ -223,16 +214,44 @@ abstract class GenerateShaderRecords extends DefaultTask {
         }
 
         def reflection = new JsonSlurper().parse(reflectionFile)
-        def world = reflectedArrayRecord(reflection, "worldPushLayoutProbe", "WorldPush")
-        def sharcFrame = reflectedArrayRecord(reflection, "sharcFrameLayoutProbe", "SharcFrame")
-        def sharcPushAddr = reflectedArrayRecord(reflection, "sharcPushAddrLayoutProbe", "SharcPushAddr")
-
-        def pushParameter = reflection.parameters.find { it.name == "pushAddrLayoutProbe" }
-        if (pushParameter?.type?.elementType?.name != "PushAddr") {
-            throw new GradleException("Slang reflection omitted pushAddrLayoutProbe")
+        def parameter = reflection.parameters.find { it.name == "worldPushLayoutProbe" }
+        def probeArray = parameter?.type?.resultType?.fields?.find { it.name == "values" }
+        if (probeArray?.type?.kind != "array" || probeArray.type.elementType?.name != "WorldPush") {
+            throw new GradleException("unexpected WorldPush reflection probe shape")
         }
-        Map pushAddrType = pushParameter.type.elementType as Map
-        int pushAddrByteSize = pushParameter.type.elementVarLayout.binding.size as int
+        Map worldType = probeArray.type.elementType as Map
+        int worldByteSize = probeArray.type.uniformStride as int
+
+        def materialParameter = reflection.parameters.find { it.name == "materialHeaderLayoutProbe" }
+        def materialProbeArray = materialParameter?.type?.resultType?.fields?.find { it.name == "values" }
+        if (materialProbeArray?.type?.kind != "array" || materialProbeArray.type.elementType?.name != "MaterialHeader") {
+            throw new GradleException("unexpected MaterialHeader reflection probe shape")
+        }
+        Map materialHeaderType = materialProbeArray.type.elementType as Map
+        int materialHeaderByteSize = materialProbeArray.type.uniformStride as int
+
+        def sharcFrameParameter = reflection.parameters.find { it.name == "sharcFrameLayoutProbe" }
+        def sharcFrameArray = sharcFrameParameter?.type?.resultType?.fields?.find { it.name == "values" }
+        if (sharcFrameArray?.type?.kind != "array" || sharcFrameArray.type.elementType?.name != "SharcFrame") {
+            throw new GradleException("unexpected SharcFrame reflection probe shape")
+        }
+        Map sharcFrameType = sharcFrameArray.type.elementType as Map
+        int sharcFrameByteSize = sharcFrameArray.type.uniformStride as int
+
+        def sharcPushParameter = reflection.parameters.find { it.name == "sharcPushAddrLayoutProbe" }
+        def sharcPushArray = sharcPushParameter?.type?.resultType?.fields?.find { it.name == "values" }
+        if (sharcPushArray?.type?.kind != "array" || sharcPushArray.type.elementType?.name != "SharcPushAddr") {
+            throw new GradleException("unexpected SharcPushAddr reflection probe shape")
+        }
+        Map sharcPushType = sharcPushArray.type.elementType as Map
+        int sharcPushByteSize = sharcPushArray.type.uniformStride as int
+
+        def pushParameter = reflection.parameters.find { it.name == "pushConstantsLayoutProbe" }
+        if (pushParameter?.type?.elementType?.name != "WorldPushConstants") {
+            throw new GradleException("Slang reflection omitted pushConstantsLayoutProbe")
+        }
+        Map pushConstantsType = pushParameter.type.elementType as Map
+        int pushConstantsByteSize = pushParameter.type.elementVarLayout.binding.size as int
 
         def generatedRoot = outDir.get().asFile
         if (generatedRoot.exists() && !generatedRoot.deleteDir()) {
@@ -241,12 +260,14 @@ abstract class GenerateShaderRecords extends DefaultTask {
         def packageDir = new File(generatedRoot, "dev/comfyfluffy/caustica/rt/gen")
         packageDir.mkdirs()
         new File(packageDir, "WorldPushData.java").setText(
-                generateJava(world.type as Map, world.byteSize as int, "WorldPushData"), "UTF-8")
-        new File(packageDir, "PushAddrData.java").setText(
-                generateJava(pushAddrType, pushAddrByteSize, "PushAddrData"), "UTF-8")
+                generateJava(worldType, worldByteSize, "WorldPushData"), "UTF-8")
+        new File(packageDir, "WorldPushConstantsData.java").setText(
+                generateJava(pushConstantsType, pushConstantsByteSize, "WorldPushConstantsData"), "UTF-8")
         new File(packageDir, "SharcFrameData.java").setText(
-                generateJava(sharcFrame.type as Map, sharcFrame.byteSize as int, "SharcFrameData"), "UTF-8")
+                generateJava(sharcFrameType, sharcFrameByteSize, "SharcFrameData"), "UTF-8")
         new File(packageDir, "SharcPushAddrData.java").setText(
-                generateJava(sharcPushAddr.type as Map, sharcPushAddr.byteSize as int, "SharcPushAddrData"), "UTF-8")
+                generateJava(sharcPushType, sharcPushByteSize, "SharcPushAddrData"), "UTF-8")
+        new File(packageDir, "MaterialHeaderData.java").setText(
+                generateJava(materialHeaderType, materialHeaderByteSize, "MaterialHeaderData"), "UTF-8")
     }
 }
