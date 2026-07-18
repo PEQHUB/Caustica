@@ -920,16 +920,14 @@ public final class RtAccel {
         private final RtBuffer instanceBuffer;
         private final RtBuffer scratch;
         private final int instanceCount;
-        private final boolean update;
         private final String label;
 
         private PreparedTlas(RtAccel accel, RtBuffer instanceBuffer, RtBuffer scratch, int instanceCount,
-                             boolean update, String label) {
+                             String label) {
             this.accel = accel;
             this.instanceBuffer = instanceBuffer;
             this.scratch = scratch;
             this.instanceCount = instanceCount;
-            this.update = update;
             this.label = label;
         }
     }
@@ -955,8 +953,6 @@ public final class RtAccel {
             RtBuffer instanceBuffer;
             RtBuffer scratch;
             int capacity;
-            int builtCount = -1;
-            int updatesSinceBuild;
 
             void destroy() {
                 accel.destroy();
@@ -1001,20 +997,12 @@ public final class RtAccel {
             ring.slots[ring.cursor] = slot;
         }
         ring.cursor = (ring.cursor + 1) % TlasRing.RING;
-        boolean update = slot.builtCount == count && slot.updatesSinceBuild < 120;
-        if (update) {
-            slot.updatesSinceBuild++;
-        } else {
-            slot.builtCount = count;
-            slot.updatesSinceBuild = 0;
-        }
-
         writeTlasInstances(baseInstances, slot.instanceBuffer.mapped, 0);
         writeTlasInstances(dynamicInstances, slot.instanceBuffer.mapped, baseCount);
         if (count > 0) {
             slot.instanceBuffer.flush(0L, (long) count * VkAccelerationStructureInstanceKHR.SIZEOF);
         }
-        return new PreparedTlas(slot.accel, slot.instanceBuffer, slot.scratch, count, update,
+        return new PreparedTlas(slot.accel, slot.instanceBuffer, slot.scratch, count,
                 "frame TLAS " + count + " instances");
     }
 
@@ -1061,8 +1049,7 @@ public final class RtAccel {
             RtContext.check(vkCreateAccelerationStructureKHR(vk, ci, null, pAs), "vkCreateAccelerationStructureKHR");
             long handle = pAs.get(0);
             RtDebugLabels.nameAccelerationStructure(ctx, handle, label);
-            slot.scratch = createScratchBuffer(ctx, Math.max(sizes.buildScratchSize(), sizes.updateScratchSize()),
-                    label + " build/update scratch");
+            slot.scratch = createScratchBuffer(ctx, sizes.buildScratchSize(), label + " build scratch");
             VkAccelerationStructureDeviceAddressInfoKHR addrInfo = VkAccelerationStructureDeviceAddressInfoKHR.calloc(stack)
                     .sType$Default().accelerationStructure(handle);
             long deviceAddress = vkGetAccelerationStructureDeviceAddressKHR(vk, addrInfo);
@@ -1078,8 +1065,7 @@ public final class RtAccel {
         geom.geometry().instances().data().deviceAddress(instanceBufferAddr);
         VkAccelerationStructureBuildGeometryInfoKHR.Buffer build = VkAccelerationStructureBuildGeometryInfoKHR.calloc(1, stack);
         build.sType$Default().type(VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR)
-                .flags(VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR
-                        | VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR)
+                .flags(VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR)
                 .mode(VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR).geometryCount(1).pGeometries(geom);
         return build;
     }
@@ -1138,13 +1124,7 @@ public final class RtAccel {
     private static void recordTlasBuildRaw(RtContext ctx, VkCommandBuffer cmd, PreparedTlas tlas) {
         try (MemoryStack stack = MemoryStack.stackPush()) {
             VkAccelerationStructureBuildGeometryInfoKHR.Buffer build = tlasBuildInfo(stack, tlas.instanceBuffer.deviceAddress);
-            build.get(0)
-                    .mode(tlas.update ? VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR
-                            : VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR)
-                    .dstAccelerationStructure(tlas.accel.handle);
-            if (tlas.update) {
-                build.get(0).srcAccelerationStructure(tlas.accel.handle);
-            }
+            build.get(0).dstAccelerationStructure(tlas.accel.handle);
             build.get(0).scratchData().deviceAddress(scratchAddress(ctx, tlas.scratch));
             VkAccelerationStructureBuildRangeInfoKHR.Buffer range = VkAccelerationStructureBuildRangeInfoKHR.calloc(1, stack);
             range.get(0).primitiveCount(tlas.instanceCount).primitiveOffset(0).firstVertex(0).transformOffset(0);
@@ -1155,8 +1135,7 @@ public final class RtAccel {
 
     /** Record a labelled TLAS build into the command buffer. */
     public static void recordTlasBuild(RtContext ctx, VkCommandBuffer cmd, PreparedTlas tlas) {
-        try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd,
-                tlas.label + (tlas.update ? " update" : " build"))) {
+        try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, tlas.label + " build")) {
             recordTlasBuildRaw(ctx, cmd, tlas);
         }
     }
