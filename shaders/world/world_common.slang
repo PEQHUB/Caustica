@@ -99,6 +99,8 @@ public struct WorldPush {
     [vk::offset(576)] public float4 environmentSky;
     [vk::offset(592)] public float4 skyState;
     [vk::offset(608)] public float4 skyLighting;
+    [vk::offset(624)] public float4 borderFogColor;
+    [vk::offset(640)] public float4 borderFogParams; // start distance, end distance, reserved, reserved
 };
 
 // Radiance-ray payload (location 0). Member order and types are a cross-stage ABI.
@@ -137,6 +139,9 @@ public static const uint PAYLOAD_SHARC_DYNAMIC = 1u << 8u;
 #endif
 public static const uint PAYLOAD_TORCH_EMITTER = 1u << 9u;
 public static const uint PAYLOAD_FILTER_SKY = 1u << 10u;
+// Camera visibility is allowed to conceal the finite RT terrain boundary with fog. Transport rays keep
+// the conservative dark void so missing geometry cannot become an indirect-light source.
+public static const uint PAYLOAD_PRIMARY_RAY = 1u << 11u;
 
 public static const uint PAYLOAD_MATERIAL_MASK = 3u;
 public static const uint MATERIAL_OPAQUE = 0u;

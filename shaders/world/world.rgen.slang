@@ -296,9 +296,11 @@ float payloadRoughness() { return unpackHalf2(payload.roughMetal).x; }
 float payloadMetalness() { return unpackHalf2(payload.roughMetal).y; }
 float payloadEmission() { return unpackHalf2(payload.emissionSss).x; }
 float payloadSss() { return unpackHalf2(payload.emissionSss).y; }
-void payloadSetTraceState(bool showCelestial, bool filterSky, float rayConeWidth, float rayConeSpread) {
+void payloadSetTraceState(bool showCelestial, bool filterSky, bool primaryRay,
+                          float rayConeWidth, float rayConeSpread) {
     payload.flags = (showCelestial ? PAYLOAD_SHOW_CELESTIAL : 0u)
-            | (filterSky ? PAYLOAD_FILTER_SKY : 0u);
+            | (filterSky ? PAYLOAD_FILTER_SKY : 0u)
+            | (primaryRay ? PAYLOAD_PRIMARY_RAY : 0u);
     payload.rayCone = packHalf2(float2(rayConeWidth, rayConeSpread));
 }
 
@@ -1024,7 +1026,7 @@ float2 recursivePrimarySurfaceReplacement(float3 surfacePos, float3 surfaceNorma
 
     for (uint segment = 0u; segment < PSR_MAX_CONFIGURED_MIRRORS; ++segment) {
         payload.hitT = -1.0;
-        payloadSetTraceState(false, false,
+        payloadSetTraceState(false, false, false,
                 max(travelled * primaryConeSpread, RAY_CONE_MIN_WIDTH),
                 max(primaryConeSpread, RAY_CONE_MIN_SPREAD));
         traceGuide(RAY_FLAG_NONE, offsetRayOrigin(rayOrigin, rayGeometricNormal, rayDir),
@@ -1117,7 +1119,7 @@ float2 specularReflectionMotion(float3 surfacePos, float3 surfaceNormal, float3 
     // cancels the term so the mirror lands exactly on the view ray (static MV = bit-exact zero) WITHOUT
     // zeroing the trace bias the main path tracer needs to avoid surface acne.
     payload.hitT = -1.0;
-    payloadSetTraceState(false, false,
+    payloadSetTraceState(false, false, false,
             max(length(surfacePos - pc.camOffset) * primaryConeSpread, RAY_CONE_MIN_WIDTH),
             max(primaryConeSpread, RAY_CONE_MIN_SPREAD));
     traceGuide(RAY_FLAG_NONE, offsetRayOrigin(surfacePos, surfaceGeometricNormal, specDir),
@@ -1168,7 +1170,7 @@ void opticalGuideHit(float3 surfacePos, float3 transmittedDir, float3 surfaceNor
     // Keep glass at a single required-exit contract, then walk a bounded chain of water interfaces.
     for (uint crossing = 0u; crossing < uint(MAX_OPTICAL_INTERFACE_DEPTH); crossing++) {
         payload.hitT = -1.0;
-        payloadSetTraceState(false, false, rayConeWidth, rayConeSpread);
+        payloadSetTraceState(false, false, false, rayConeWidth, rayConeSpread);
         traceGuide(RAY_FLAG_NONE, ro, RAY_TMIN, direction, 10000.0);
         if (payload.hitT <= 0.0) {
             hitCamRel = (ro + direction * 1.0e6) - pc.camOffset;
@@ -1264,11 +1266,17 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
     // diffuse-sampled continuation rays — those are already covered by the sun NEE, so the tiny disc
     // would be a double-counted firefly. Reset true on every specular/water bounce, false on a diffuse one.
     bool showCelestial = true;
+    float primaryHitDistance = -1.0;
     int maxPathSegments = maxBounces + maxMirrorDepth + MAX_OPTICAL_INTERFACE_DEPTH + 1;
     for (int segment = 0; segment < maxPathSegments; segment++) {
         beginBounce(sampler, uint(segment));
         payload.hitT = -1.0;
-        payloadSetTraceState(showCelestial, exactMirrorDepth > 0, rayConeWidth, rayConeSpread);
+        bool primaryVisibilityRay = segment == 0;
+#if CAUSTICA_SHARC_UPDATE
+        primaryVisibilityRay = false;
+#endif
+        payloadSetTraceState(showCelestial, exactMirrorDepth > 0, primaryVisibilityRay,
+                rayConeWidth, rayConeSpread);
         // Radiance SBT records run any-hit only for true alpha cutout. Translucent/water go straight to
         // closest-hit for dielectric handling. Geometry is double-sided; the chit flips the normal.
         // Primary (bounce 0) is the camera ray (CULL_PRIMARY): sees particles and the first-person body,
@@ -1281,6 +1289,10 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
 #else
         traceRadiance(segment == 0 ? CULL_PRIMARY : CULL_SECONDARY, ro, 0.0, rd, 10000.0);
 #endif
+
+        if (segment == 0 && payload.hitT >= 0.0) {
+            primaryHitDistance = payload.hitT;
+        }
 
         // The direction is captured when bounce 0 spawns its diffuse continuation. This invocation is
         // therefore that ray's first world-space hit; record its distance before any material branch can
@@ -1934,6 +1946,17 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
 #endif
         ++scatteringDepth;
     }
+#if !CAUSTICA_SHARC_UPDATE
+    // Border fog is a camera-space presentation boundary, not participating media in path transport.
+    // Apply it once to the completed camera path so secondary rays retain their physical contribution,
+    // while the visible surface converges into Minecraft's dimension fog before finite RT residency ends.
+    if (primaryHitDistance >= 0.0) {
+        float fogStart = pc.borderFogParams.x;
+        float fogEnd = max(pc.borderFogParams.y, fogStart + 1.0);
+        float fogWeight = smoothstep(fogStart, fogEnd, primaryHitDistance);
+        L = lerp(L, max(pc.borderFogColor.xyz, float3(0.0)), fogWeight);
+    }
+#endif
     return L;
 }
 

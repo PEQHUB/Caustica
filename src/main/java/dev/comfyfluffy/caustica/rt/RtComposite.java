@@ -1623,7 +1623,9 @@ public final class RtComposite {
                             ? pathSampleSequence.deviceAddress() : blueNoiseSequence.deviceAddress(),
                     sky.environmentSky(),
                     sky.skyState(),
-                    sky.skyLighting()
+                    sky.skyLighting(),
+                    sky.borderFogColor(),
+                    sky.borderFogParams()
             ).write(push);
             if (skyViewPipeline != null && skyViewLut != null) {
                 if (!skyTransmittanceReady) {
@@ -1915,7 +1917,8 @@ public final class RtComposite {
 
     private record SkyPush(Float4 sunDir, Float4 lightDir, Float4 lightRadiance, Float4 moonDir,
                            Float4 celestial, Float4 sunUv, Float4 moonUv, Float4 environmentSky,
-                           Float4 skyState, Float4 skyLighting) {}
+                           Float4 skyState, Float4 skyLighting, Float4 borderFogColor,
+                           Float4 borderFogParams) {}
 
     private record CelestialUv(Float4 sun, Float4 moon) {}
 
@@ -1960,6 +1963,13 @@ public final class RtComposite {
         int fallbackSky = (packedSky & 0x00ffffff) != 0
                 ? packedSky : probe.getValue(EnvironmentAttributes.FOG_COLOR, partial);
         Float4 environmentSky = linearBt2020FromPackedRgb(fallbackSky);
+        Float4 borderFogColor = linearBt2020FromPackedRgb(
+                probe.getValue(EnvironmentAttributes.FOG_COLOR, partial));
+        int renderDistanceChunks = Math.max(1, mc.options.getEffectiveRenderDistance());
+        float borderFogStart = Math.max(0.0f, (renderDistanceChunks - 3.0f) * 16.0f);
+        float borderFogEnd = Math.max(borderFogStart + 16.0f,
+                (renderDistanceChunks - 0.5f) * 16.0f);
+        Float4 borderFogParams = new Float4(borderFogStart, borderFogEnd, 0.0f, 0.0f);
 
         float[] sunTrans = new float[3];
         float[] moonTrans = new float[3];
@@ -2004,7 +2014,8 @@ public final class RtComposite {
                         astronomy.celestialPole()[2], astronomy.siderealAngle()),
                 uv.sun(), uv.moon(), environmentSky,
                 new Float4(dayFactor, twilightFactor, ambientMultiplier, solarEnvelope),
-                new Float4(sunMultiplier, moonMultiplier, airglowMultiplier, litFraction));
+                new Float4(sunMultiplier, moonMultiplier, airglowMultiplier, litFraction),
+                borderFogColor, borderFogParams);
     }
 
     static float vanillaDayFactor(int packedSky) {

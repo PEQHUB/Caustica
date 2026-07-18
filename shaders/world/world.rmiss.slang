@@ -461,6 +461,7 @@ void main(inout Payload payload) {
     float starBrightness = pc.lightRadiance.w;
     bool showCelestial = (payload.flags & PAYLOAD_SHOW_CELESTIAL) != 0u;
     bool filterSky = (payload.flags & PAYLOAD_FILTER_SKY) != 0u;
+    bool primaryRay = (payload.flags & PAYLOAD_PRIMARY_RAY) != 0u;
     bool earthAtmosphere = (pc.flags & (1u << 10u)) != 0u;
 
     // Physically-based in-scattering: blue zenith, bright/desaturated horizon, warm Mie halo + red
@@ -473,8 +474,8 @@ void main(inout Payload payload) {
     bool aboveHorizon = dir.y >= 0.0;
     float belowHorizonFade = exp(min(dir.y, 0.0) * 48.0);
     float3 groundVoid = bt709ToBt2020(float3(0.35, 0.42, 0.55)) * (2.0e-6 * belowHorizonFade);
-    float fallbackGradient = aboveHorizon
-            ? 0.25 + 0.75 * clamp(dir.y * 0.5 + 0.5, 0.0, 1.0) : 0.0;
+    float fallbackGradient = (aboveHorizon || primaryRay)
+            ? 0.25 + 0.75 * clamp(max(dir.y, 0.0) * 0.5 + 0.5, 0.0, 1.0) : 0.0;
     float3 horizonDir = normalize(float3(dir.x + 1.0e-6, 0.0, dir.z));
     float3 skyDir = aboveHorizon ? dir : horizonDir;
     float3 col;
@@ -494,7 +495,13 @@ void main(inout Payload payload) {
     col *= ambientMultiplier;
     // Match the upper-hemisphere value at y=0, then collapse to the bounded void within one
     // thousandth of a direction unit. This removes the seam without opening broad geometry leaks.
-    if (earthAtmosphere && !aboveHorizon) {
+    if (primaryRay && !aboveHorizon) {
+        // Camera rays that escape below the horizon have crossed the finite RT terrain boundary. Continue
+        // the exact horizon value briefly, then converge into the authoritative dimension fog instead of
+        // exposing the transport-only black void. Celestial bodies remain horizon-gated below.
+        float borderWeight = 1.0 - smoothstep(-0.08, 0.0, dir.y);
+        col = lerp(col, max(pc.borderFogColor.xyz, float3(0.0)), borderWeight);
+    } else if (earthAtmosphere && !aboveHorizon) {
         float boundaryWeight = smoothstep(-1.0e-3, 0.0, dir.y);
         col = lerp(groundVoid * ambientMultiplier, col, boundaryWeight);
     }
