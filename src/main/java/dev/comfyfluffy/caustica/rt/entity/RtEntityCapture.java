@@ -248,12 +248,22 @@ public final class RtEntityCapture implements VertexConsumer {
         int[] indices = idx.elements();
         float[] primitives = prim.elements();
         int[] buckets = alphaBuckets.elements();
+        boolean alreadyOrdered = true;
+        int previousBucket = -1;
         for (int tri = 0; tri < triangleCount; tri++) {
             int bucket = buckets[tri];
             if (bucket < 0 || bucket >= RtAccel.ENTITY_BUCKETS) {
                 throw new IllegalStateException("Entity capture contains invalid alpha bucket " + bucket);
             }
             packedBucketTris[bucket]++;
+            alreadyOrdered &= bucket >= previousBucket;
+            previousBucket = bucket;
+        }
+        if (alreadyOrdered) {
+            // Consumers copy these lists synchronously before the capture is reset. Stable partitioning an
+            // already ordered capture is the identity operation, so avoid a second traversal and 15 array
+            // copies per triangle while preserving the exact source bits and bucket-local primitive indices.
+            return new PackedGeometry(idx, prim, packedBucketTris, true);
         }
         int triangleBase = 0;
         for (int bucket = 0; bucket < RtAccel.ENTITY_BUCKETS; bucket++) {
@@ -269,10 +279,11 @@ public final class RtEntityCapture implements VertexConsumer {
             System.arraycopy(indices, tri * 3, outputIndices, outputTriangle * 3, 3);
             System.arraycopy(primitives, tri * 12, outputPrimitives, outputTriangle * 12, 12);
         }
-        return new PackedGeometry(packedIdx, packedPrim, packedBucketTris);
+        return new PackedGeometry(packedIdx, packedPrim, packedBucketTris, false);
     }
 
-    record PackedGeometry(IntArrayList indices, FloatArrayList primitives, int[] bucketTris) {
+    record PackedGeometry(IntArrayList indices, FloatArrayList primitives, int[] bucketTris,
+                          boolean orderedFastPath) {
         int[] copyBucketTris() {
             return bucketTris.clone();
         }

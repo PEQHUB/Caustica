@@ -1610,7 +1610,13 @@ public final class RtEntities {
     private RtEntityCapture.PackedGeometry packCaptureGeometry() {
         long started = RtFrameStats.FRAME.startStage();
         try {
-            return capture.packGeometry();
+            RtEntityCapture.PackedGeometry packed = capture.packGeometry();
+            RtFrameStats.FRAME.count(packed.orderedFastPath()
+                    ? "entityPackOrderedFastPaths" : "entityPackReorderedPaths", 1);
+            RtFrameStats.FRAME.count(packed.orderedFastPath()
+                    ? "entityPackOrderedTriangles" : "entityPackReorderedTriangles",
+                    packed.indices().size() / 3);
+            return packed;
         } finally {
             RtFrameStats.FRAME.endStage("entity.capture.append.pack", started);
         }

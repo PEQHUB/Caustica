@@ -85,6 +85,8 @@ public final class RtFrameStats {
                     "entityParityChecks", "entityVmaBufferCreates", "entityGeometryBufferReuses",
                     "entityScratchBufferReuses", "entityUploadBytes", "entityMotionUploadBytes",
                     "entityPackedBytes", "entityPackedPaddingBytes", "entityRetainedGeometryBytes",
+                    "entityPackOrderedFastPaths", "entityPackReorderedPaths",
+                    "entityPackOrderedTriangles", "entityPackReorderedTriangles",
                     "firstPersonBodyInstances", "firstPersonHeadInstances", "firstPersonPairDropped",
                     "firstPersonBodyTextureSubmissions", "firstPersonBodyTextureFallbacks",
                     "firstPersonHeadTextureSubmissions", "firstPersonHeadTextureFallbacks",
