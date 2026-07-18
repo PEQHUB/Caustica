@@ -30,14 +30,16 @@ final class PhysicalSceneContractTest {
         assertTrue(miss.contains("SPECTRAL_SKY_PHOTOMETRIC_SCALE = 0.9765625"));
         assertFalse(miss.contains("SPECTRAL_MULTISCATTER_RETURN"));
         assertTrue(miss.contains("pc.environmentSky.xyz"));
-        assertTrue(miss.contains("SUN_DISC_HALF_ANGLE  = 0.0046530478"));
+        assertTrue(miss.contains("float solarDisc"));
+        assertTrue(miss.contains("SUN_LIMB_DARKENING = 0.6"));
+        assertTrue(miss.contains("1.0 - SUN_LIMB_DARKENING / 3.0"));
         assertTrue(miss.contains("MOON_DISC_HALF_ANGLE = 0.0047595129"));
         assertFalse(miss.contains("sunIsNeeLight ? max(pc.lightDir.w"));
         assertTrue(miss.contains("celestialTextureLod"));
-        assertTrue(miss.contains("validUvRect(pc.sunUv)"));
+        assertTrue(miss.contains("pc.celestialRadii.x"));
         assertTrue(miss.contains("validUvRect(pc.moonUv)"));
         assertTrue(miss.contains("1.0 - smoothstep(0.90, 1.0, m)"));
-        assertTrue(miss.contains("float core = pow(clamp(dot(t.rgb, t.rgb) * 0.45"));
+        assertFalse(miss.contains("float core = pow(clamp(dot(t.rgb, t.rgb) * 0.45"));
         assertFalse(miss.contains("return m <= 1.0 ? 1.0 : 0.0"));
     }
 
@@ -90,6 +92,11 @@ final class PhysicalSceneContractTest {
         assertTrue(display.contains("outputDither"));
         assertTrue(display.contains("ditherSequence.values"));
         assertTrue(display.contains("pc.frameIndex & 7u"));
+        assertTrue(display.contains("sampleBloom(pix, size)"));
+        String bloom = Files.readString(Path.of("shaders/display/bloom.comp"));
+        assertTrue(bloom.contains("smoothstep(1.0, 4.0, exposedLuminance)"));
+        assertTrue(bloom.contains("imageSize(bloomEighth)"));
+        assertTrue(bloom.contains("tentEighth"));
         assertFalse(display.contains("rt.rgb * 1024.0"));
     }
 
@@ -101,7 +108,7 @@ final class PhysicalSceneContractTest {
         assertTrue(composite.contains("world and celestial atlases must be ready before RT pipeline creation"));
         assertFalse(composite.contains("celView != 0L ? celView : atlasView"));
         assertFalse(composite.contains("celestialView != 0L ? celestialView : atlasView"));
-        assertTrue(miss.contains("if (aboveHorizon && sunCoverage > 0.0 && validUvRect(pc.sunUv))"));
+        assertTrue(miss.contains("if (aboveHorizon && sunCoverage > 0.0)"));
         assertTrue(miss.contains("if (aboveHorizon && moonCoverage > 0.0 && validUvRect(pc.moonUv))"));
         assertFalse(miss.contains("if (sd.y > 0.0"));
         assertFalse(miss.contains("if (pc.moonDir.y > 0.0"));

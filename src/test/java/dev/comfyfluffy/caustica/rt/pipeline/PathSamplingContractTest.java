@@ -30,8 +30,9 @@ final class PathSamplingContractTest {
         assertTrue(raygen.contains("(sampler.blueIndex << 3u) + (salt << 1u)"));
         assertTrue(raygen.contains("sampler.sampleIndex * 32u + sampler.bounce"));
         assertTrue(raygen.contains("float2 rnd2(inout PathSampler sampler, uint salt)"));
-        assertTrue(raygen.contains("float3 sampleCelestialSquare"));
+        assertTrue(raygen.contains("float3 sampleCelestialDisk"));
         assertTrue(raygen.contains("float2 sampleUv = rnd2(sampler, 2u)"));
+        assertTrue(raygen.contains("float cosTheta = lerp(1.0, cos(halfAngle), sampleUv.x)"));
         assertTrue(build.contains("-DCAUSTICA_OFFLINE=0"));
         assertTrue(build.contains("-DCAUSTICA_OFFLINE=0\", \"-DCAUSTICA_SER=0"));
         assertTrue(build.contains("-DCAUSTICA_OFFLINE=1\", \"-DCAUSTICA_SER=1"));

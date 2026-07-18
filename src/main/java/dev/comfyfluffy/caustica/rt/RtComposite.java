@@ -60,6 +60,7 @@ import dev.comfyfluffy.caustica.rt.material.RtEmissionSemantics;
 import dev.comfyfluffy.caustica.rt.material.RtMaterialOverrides;
 import dev.comfyfluffy.caustica.rt.material.RtMaterialRegistry;
 import dev.comfyfluffy.caustica.rt.pipeline.RtDisplayPipeline;
+import dev.comfyfluffy.caustica.rt.pipeline.RtBloomPipeline;
 import dev.comfyfluffy.caustica.rt.pipeline.RtDlssFg;
 import dev.comfyfluffy.caustica.rt.pipeline.RtDlssdDisocclusionPipeline;
 import dev.comfyfluffy.caustica.rt.pipeline.RtFgUiAlphaPipeline;
@@ -271,6 +272,7 @@ public final class RtComposite {
     private RtPathSampleSequence pathSampleSequence;
     private int pushSlot;
     private RtDisplayPipeline displayPipeline;
+    private RtBloomPipeline bloomPipeline;
     private RtSkyViewPipeline skyViewPipeline;
     private RtImage skyViewLut;
     private RtImage skyTransmittanceLut;
@@ -285,6 +287,9 @@ public final class RtComposite {
     // enabled. When the PQ swapchain is active, the combined UI overlay is composited over this image, then
     // this image is blitted straight to the swapchain.
     private RtImage hdrDisplayImage;
+    private RtImage bloomHalf;
+    private RtImage bloomQuarter;
+    private RtImage bloomEighth;
     // Set true after this frame's display dispatch wrote hdrDisplayImage (HDR enabled + RT ran); gates the
     // HDR present blit so a frame where RT did not run falls back to the vanilla SDR present.
     private boolean hdrWrittenThisFrame;
@@ -674,6 +679,9 @@ public final class RtComposite {
             }
             if (displayPipeline == null) {
                 displayPipeline = RtDisplayPipeline.create(ctx);
+            }
+            if (bloomPipeline == null) {
+                bloomPipeline = RtBloomPipeline.create(ctx);
             }
             // A resource reload re-stitches the block and celestial atlases. We've already torn down the world pipeline
             // (onResourceReloadStart) so nothing references the old atlas, but MC's deferred free keeps the
@@ -1244,6 +1252,7 @@ public final class RtComposite {
         boolean exposureDepthRequired = exposureDepthRequired(autoExposure, rrOperational, fgGuidesRequired);
         boolean hdrEnabled = RtHdr.effective();
         if (output != null && displayImage != null && hdrDisplayImage != null && exposure.ready()
+                && bloomHalf != null && bloomQuarter != null && bloomEighth != null
                 && (!renderSizeRrEnabled || rrOutput != null)
                 && displayW == width && displayH == height
                 && renderSizeRrEnabled == rrOperational && renderSizeRrQuality == rrQuality
@@ -1274,6 +1283,7 @@ public final class RtComposite {
         if (output != null) {
             output.destroy();
         }
+        destroyBloomImages();
         destroyGuideImages();
 
         displayW = width;
@@ -1312,6 +1322,18 @@ public final class RtComposite {
         int hdrH = hdrEnabled ? height : 1;
         hdrDisplayImage = ctx.createStorageImage(hdrW, hdrH, VK10.VK_FORMAT_R16G16B16A16_SFLOAT,
                 hdrEnabled ? "RT HDR display image " + width + "x" + height : "inactive HDR display image");
+        int bloomHalfW = Math.max(1, (width + 1) / 2);
+        int bloomHalfH = Math.max(1, (height + 1) / 2);
+        int bloomQuarterW = Math.max(1, (bloomHalfW + 1) / 2);
+        int bloomQuarterH = Math.max(1, (bloomHalfH + 1) / 2);
+        int bloomEighthW = Math.max(1, (bloomQuarterW + 1) / 2);
+        int bloomEighthH = Math.max(1, (bloomQuarterH + 1) / 2);
+        bloomHalf = ctx.createStorageImage(bloomHalfW, bloomHalfH,
+                VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "HDR glare half resolution");
+        bloomQuarter = ctx.createStorageImage(bloomQuarterW, bloomQuarterH,
+                VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "HDR glare quarter resolution");
+        bloomEighth = ctx.createStorageImage(bloomEighthW, bloomEighthH,
+                VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "HDR glare eighth resolution");
 
         // Descriptors must remain valid even when their consumer is off. Allocate full-sized guide images
         // only for RR, or depth/motion for FG; the shader skips writes to the 1x1 inactive bindings.
@@ -1377,8 +1399,25 @@ public final class RtComposite {
             blueNoiseSequence = RtBlueNoiseSequence.create(ctx);
         }
         RtImage displayInput = rrOutput != null ? rrOutput : output;
-        displayPipeline.setImages(displayImage.view, displayInput.view, exposure.image().view, hdrDisplayImage.view,
-                blueNoiseSequence.buffer());
+        bloomPipeline.setImages(displayInput.view, exposure.image().view,
+                bloomHalf.view, bloomQuarter.view, bloomEighth.view);
+        displayPipeline.setImages(displayImage.view, displayInput.view, exposure.image().view,
+                hdrDisplayImage.view, blueNoiseSequence.buffer(), bloomHalf.view);
+    }
+
+    private void destroyBloomImages() {
+        if (bloomHalf != null) {
+            bloomHalf.destroy();
+            bloomHalf = null;
+        }
+        if (bloomQuarter != null) {
+            bloomQuarter.destroy();
+            bloomQuarter = null;
+        }
+        if (bloomEighth != null) {
+            bloomEighth.destroy();
+            bloomEighth = null;
+        }
     }
 
     static boolean exposureDepthRequired(boolean autoExposure, boolean rrOperational, boolean fgGuidesRequired) {
@@ -1610,7 +1649,7 @@ public final class RtComposite {
                     sky.lightRadiance(),
                     sky.moonDir(),
                     sky.celestial(),
-                    sky.sunUv(),
+                    sky.celestialRadii(),
                     sky.moonUv(),
                     waterParams,
                     waterAnchor,
@@ -1839,6 +1878,11 @@ public final class RtComposite {
                 VulkanCommandEncoder.memoryBarrier(cmd, stack); // exposure image visible to the display mapper
                 if (traceGpuProfiler != null) traceGpuProfiler.exposureEnd(cmd);
 
+                try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "optical glare")) {
+                    bloomPipeline.dispatch(cmd, displayW, displayH);
+                }
+                VulkanCommandEncoder.memoryBarrier(cmd, stack);
+
                 try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "map RT to display");
                      RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.displayMap")) {
                     displayPipeline.dispatch(cmd, displayW, displayH, RtHdr.effective());
@@ -1916,7 +1960,7 @@ public final class RtComposite {
     }
 
     private record SkyPush(Float4 sunDir, Float4 lightDir, Float4 lightRadiance, Float4 moonDir,
-                           Float4 celestial, Float4 sunUv, Float4 moonUv, Float4 environmentSky,
+                           Float4 celestial, Float4 celestialRadii, Float4 moonUv, Float4 environmentSky,
                            Float4 skyState, Float4 skyLighting, Float4 borderFogColor,
                            Float4 borderFogParams) {}
 
@@ -2012,7 +2056,7 @@ public final class RtComposite {
                 new Float4(moonX, moonY, moonZ, moonPhase),
                 new Float4(astronomy.celestialPole()[0], astronomy.celestialPole()[1],
                         astronomy.celestialPole()[2], astronomy.siderealAngle()),
-                uv.sun(), uv.moon(), environmentSky,
+                new Float4(sunAngularRadius, moonAngularRadius, 0.0f, 0.0f), uv.moon(), environmentSky,
                 new Float4(dayFactor, twilightFactor, ambientMultiplier, solarEnvelope),
                 new Float4(sunMultiplier, moonMultiplier, airglowMultiplier, litFraction),
                 borderFogColor, borderFogParams);
@@ -2321,6 +2365,7 @@ public final class RtComposite {
             output.destroy();
             output = null;
         }
+        destroyBloomImages();
         destroyGuideImages();
         exposure.destroy();
         if (skyViewPipeline != null) {
@@ -2340,6 +2385,10 @@ public final class RtComposite {
         if (displayPipeline != null) {
             displayPipeline.destroy();
             displayPipeline = null;
+        }
+        if (bloomPipeline != null) {
+            bloomPipeline.destroy();
+            bloomPipeline = null;
         }
         if (hdrCompositePipeline != null) {
             hdrCompositePipeline.destroy();

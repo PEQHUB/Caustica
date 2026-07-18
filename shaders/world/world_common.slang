@@ -86,7 +86,7 @@ public struct WorldPush {
     [vk::offset(240)] public float4   lightRadiance;
     [vk::offset(256)] public float4   moonDir;
     [vk::offset(272)] public float4   celestial;
-    [vk::offset(288)] public float4   sunUv;
+    [vk::offset(288)] public float4   celestialRadii; // sun radius, moon radius, reserved, reserved
     [vk::offset(304)] public float4   moonUv;
     [vk::offset(320)] public float4   waterParams;
     [vk::offset(336)] public float4   waterAnchor;

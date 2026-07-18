@@ -48,6 +48,7 @@ public final class RtDisplayPipeline {
     private long boundExposureView;
     private long boundHdrView;
     private long boundDitherBuffer;
+    private long boundBloomView;
     private int ditherFrameIndex;
     private boolean destroyed;
 
@@ -63,7 +64,7 @@ public final class RtDisplayPipeline {
     public static RtDisplayPipeline create(RtContext ctx) {
         VkDevice vk = ctx.vk();
         try (MemoryStack stack = MemoryStack.stackPush()) {
-            VkDescriptorSetLayoutBinding.Buffer binds = VkDescriptorSetLayoutBinding.calloc(5, stack);
+            VkDescriptorSetLayoutBinding.Buffer binds = VkDescriptorSetLayoutBinding.calloc(6, stack);
             binds.get(0).binding(0).descriptorType(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
                     .descriptorCount(1).stageFlags(VK10.VK_SHADER_STAGE_COMPUTE_BIT);
             binds.get(1).binding(1).descriptorType(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
@@ -74,6 +75,8 @@ public final class RtDisplayPipeline {
                     .descriptorCount(1).stageFlags(VK10.VK_SHADER_STAGE_COMPUTE_BIT);
             binds.get(4).binding(4).descriptorType(VK10.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER)
                     .descriptorCount(1).stageFlags(VK10.VK_SHADER_STAGE_COMPUTE_BIT);
+            binds.get(5).binding(5).descriptorType(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
+                    .descriptorCount(1).stageFlags(VK10.VK_SHADER_STAGE_COMPUTE_BIT);
 
             VkDescriptorSetLayoutCreateInfo dslci = VkDescriptorSetLayoutCreateInfo.calloc(stack).sType$Default().pBindings(binds);
             LongBuffer p = stack.mallocLong(1);
@@ -82,7 +85,7 @@ public final class RtDisplayPipeline {
             RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT, dsl, "display descriptor set layout");
 
             VkDescriptorPoolSize.Buffer poolSizes = VkDescriptorPoolSize.calloc(2, stack);
-            poolSizes.get(0).type(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).descriptorCount(4);
+            poolSizes.get(0).type(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).descriptorCount(5);
             poolSizes.get(1).type(VK10.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER).descriptorCount(1);
             VkDescriptorPoolCreateInfo dpci = VkDescriptorPoolCreateInfo.calloc(stack).sType$Default().maxSets(1).pPoolSizes(poolSizes);
             check(VK10.vkCreateDescriptorPool(vk, dpci, null, p), "vkCreateDescriptorPool(rt display)");
@@ -120,10 +123,10 @@ public final class RtDisplayPipeline {
     }
 
     public void setImages(long outputImageView, long rtImageView, long exposureImageView, long hdrImageView,
-                          RtBuffer ditherBuffer) {
+                          RtBuffer ditherBuffer, long bloomImageView) {
         if (boundOutputView == outputImageView && boundRtView == rtImageView
                 && boundExposureView == exposureImageView && boundHdrView == hdrImageView
-                && boundDitherBuffer == ditherBuffer.handle) {
+                && boundDitherBuffer == ditherBuffer.handle && boundBloomView == bloomImageView) {
             return;
         }
         try (MemoryStack stack = MemoryStack.stackPush()) {
@@ -137,8 +140,10 @@ public final class RtDisplayPipeline {
             hdrInfo.get(0).imageView(hdrImageView).imageLayout(VK10.VK_IMAGE_LAYOUT_GENERAL);
             VkDescriptorBufferInfo.Buffer ditherInfo = VkDescriptorBufferInfo.calloc(1, stack);
             ditherInfo.get(0).buffer(ditherBuffer.handle).offset(0).range(ditherBuffer.size);
+            VkDescriptorImageInfo.Buffer bloomInfo = VkDescriptorImageInfo.calloc(1, stack);
+            bloomInfo.get(0).imageView(bloomImageView).imageLayout(VK10.VK_IMAGE_LAYOUT_GENERAL);
 
-            VkWriteDescriptorSet.Buffer writes = VkWriteDescriptorSet.calloc(5, stack);
+            VkWriteDescriptorSet.Buffer writes = VkWriteDescriptorSet.calloc(6, stack);
             writes.get(0).sType$Default().dstSet(descriptorSet).dstBinding(0)
                     .descriptorCount(1).descriptorType(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).pImageInfo(outputInfo);
             writes.get(1).sType$Default().dstSet(descriptorSet).dstBinding(1)
@@ -149,6 +154,8 @@ public final class RtDisplayPipeline {
                     .descriptorCount(1).descriptorType(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).pImageInfo(hdrInfo);
             writes.get(4).sType$Default().dstSet(descriptorSet).dstBinding(4)
                     .descriptorCount(1).descriptorType(VK10.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER).pBufferInfo(ditherInfo);
+            writes.get(5).sType$Default().dstSet(descriptorSet).dstBinding(5)
+                    .descriptorCount(1).descriptorType(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).pImageInfo(bloomInfo);
             VK10.vkUpdateDescriptorSets(ctx.vk(), writes, null);
         }
         boundOutputView = outputImageView;
@@ -156,6 +163,7 @@ public final class RtDisplayPipeline {
         boundExposureView = exposureImageView;
         boundHdrView = hdrImageView;
         boundDitherBuffer = ditherBuffer.handle;
+        boundBloomView = bloomImageView;
     }
 
     /**

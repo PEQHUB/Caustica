@@ -23,7 +23,7 @@ float pow2(float x) { return x * x; }
 // Near-white top-of-atmosphere disc radiances: the visible warm/red tint comes from multiplying by
 // transmittanceToSpace(dir) at draw time — at noon the sun reads warm-white, at the horizon it reddens
 // on exactly the sky's own sunset curve.
-static const float SUN_DISC_LUMINANCE = 24.0;
+static const float SUN_DISC_AVG_LUMINANCE = 24.0;
 // Full-moon scene radiance before the user multiplier. This keeps the visible sprite in the same
 // calibrated domain as transported moonlight instead of turning it into a giant white lamp.
 static const float MOON_DISC_BASE_LUMINANCE = 0.000244140625; // 0.25 * 2^-10
@@ -32,8 +32,8 @@ static const float MOON_DISC_BASE_LUMINANCE = 0.000244140625; // 0.25 * 2^-10
 static const float SKY_SATURATION = 1.0; // spectral conversion supplies physical chromaticity
 // Physical mean apparent angular radii. These match the default NEE radii, so visible bodies and their
 // lighting share one angular scale instead of reflecting Minecraft's enormous decorative sky quads.
-static const float SUN_DISC_HALF_ANGLE  = 0.0046530478; // 0.2666 degrees
 static const float MOON_DISC_HALF_ANGLE = 0.0047595129; // 0.2727 degrees
+static const float SUN_LIMB_DARKENING = 0.6;
 // Faint night-sky ambient so the night isn't pure black where the atmosphere in-scatter falls to zero.
 static const float3 AIRGLOW_ZENITH  = float3(0.00000060, 0.00000078, 0.00000120);
 static const float3 AIRGLOW_HORIZON = float3(0.00000082, 0.00000088, 0.00000105);
@@ -363,6 +363,19 @@ float squareBody(float3 dir, float3 bodyDir, float halfAngle, float3 celestialAx
     return 1.0 - smoothstep(0.90, 1.0, m);
 }
 
+// Energy-normalized linear limb darkening over a circular finite solar emitter. The 1-u/3 disc
+// average keeps changing the profile from silently changing the sunlight carried by the disc.
+float solarDisc(float3 dir, float3 sunDir, float radius, float rayFootprint, out float limb) {
+    float angularDistance = acos(clamp(dot(dir, sunDir), -1.0, 1.0));
+    float edge = max(rayFootprint, 1.0e-5);
+    float coverage = 1.0 - smoothstep(radius - edge, radius + edge, angularDistance);
+    float normalizedRadius = saturate(angularDistance / max(radius, 1.0e-6));
+    float mu = sqrt(max(1.0 - normalizedRadius * normalizedRadius, 0.0));
+    limb = (1.0 - SUN_LIMB_DARKENING * (1.0 - mu))
+            / (1.0 - SUN_LIMB_DARKENING / 3.0);
+    return coverage;
+}
+
 bool validUvRect(float4 rect) {
     return all(rect.zw > rect.xy) && all(rect.xy >= float2(0.0)) && all(rect.zw <= float2(1.0));
 }
@@ -506,25 +519,16 @@ void main(inout Payload payload) {
         col = lerp(groundVoid * ambientMultiplier, col, boundaryWeight);
     }
 
-    // Sun & moon discs — sampled from the vanilla celestials atlas, gated to rays that haven't already
-    // accounted for the light via diffuse NEE. squareBody gives the body-local [-1,1] coord; the
-    // sprite's own texel coverage (alpha) shapes the disc.
+    // The analytic solar disc and atlas-authored lunar phase are gated off after diffuse NEE so direct
+    // lighting is not counted again by a continuation miss.
     if (showCelestial && earthAtmosphere) {
         float2 local;
-        float sunCoverage = squareBody(dir, sd, SUN_DISC_HALF_ANGLE, pc.celestial.xyz, local);
-        if (aboveHorizon && sunCoverage > 0.0 && validUvRect(pc.sunUv)) {
-            float2 uv = lerp(pc.sunUv.xy, pc.sunUv.zw, local * 0.5 + 0.5);
-            float4 t = celestialsAtlas.SampleLevel(uv,
-                    celestialTextureLod(pc.sunUv, SUN_DISC_HALF_ANGLE, payload.rayCone));
-            // The vanilla 26.2 sprite is alpha-opaque and bakes a very broad, faint square halo into RGB.
-            // Feeding that halo directly into HDR makes the complete 33-degree tangent quad visible in
-            // reflections. Restore the last clean core-isolation curve: it retains the bright authored
-            // centre while driving the 1..40/255 boundary texels below the scene-radiance noise floor.
-            float core = pow(clamp(dot(t.rgb, t.rgb) * 0.45, 0.0, 1.0), 6.0);
-            // Atmospheric transmittance owns the physical disc colour and sunset reddening. Rain and the
-            // feathered quad coverage remain presentation gates, not changes to direct-light energy.
-            col += SUN_DISC_LUMINANCE * spectralTransmittanceToSpace(dir)
-                    * (core * t.a * sunCoverage * pc.sunDir.w);
+        float limb;
+        float sunCoverage = solarDisc(dir, sd, pc.celestialRadii.x,
+                unpackHalf2(payload.rayCone).y, limb);
+        if (aboveHorizon && sunCoverage > 0.0) {
+            col += SUN_DISC_AVG_LUMINANCE * spectralTransmittanceToSpace(dir)
+                    * (limb * sunCoverage * pc.sunDir.w);
         }
         // Same horizon gate as the sun: with the soft-horizon change, below-horizon rays no longer clip
         // at the planet, so without this the moon disc would stay visible after it set.

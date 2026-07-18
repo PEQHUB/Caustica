@@ -877,16 +877,16 @@ float3 cosineDir(float3 n, inout PathSampler sampler) {
     return normalize(local.x * t + local.y * b + local.z * n);
 }
 
-// Soft shadows sample the active Minecraft celestial quad. Temporal reconstruction integrates the
-// stochastic directions into contact-hardening penumbrae.
-float3 sampleCelestialSquare(float3 axis, float halfAngle, inout PathSampler sampler) {
+// Uniform solid-angle sample of the active circular celestial emitter. Temporal reconstruction
+// integrates the stochastic directions into contact-hardening penumbrae.
+float3 sampleCelestialDisk(float3 axis, float halfAngle, inout PathSampler sampler) {
     float3 right = normalize(cross(axis, pc.celestial.xyz));
     float3 up = cross(right, axis);
-    float t = tan(halfAngle);
-    float2 sampleUv = rnd2(sampler, 2u) * 2.0 - 1.0;
-    float u = sampleUv.x * t;
-    float v = sampleUv.y * t;
-    return normalize(axis + u * right + v * up);
+    float2 sampleUv = rnd2(sampler, 2u);
+    float cosTheta = lerp(1.0, cos(halfAngle), sampleUv.x);
+    float sinTheta = sqrt(max(1.0 - cosTheta * cosTheta, 0.0));
+    float phi = 6.2831853 * sampleUv.y;
+    return normalize(axis * cosTheta + sinTheta * (right * cos(phi) + up * sin(phi)));
 }
 
 // Sample a GGX visible-normal (VNDF, Heitz 2018) about geometric normal n for view ve, returning the
@@ -1492,7 +1492,7 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
             }
 
             float3 lightDir = pc.lightDir.w > 0.0
-                    ? sampleCelestialSquare(pc.lightDir.xyz, pc.lightDir.w, sampler) : pc.lightDir.xyz;
+                    ? sampleCelestialDisk(pc.lightDir.xyz, pc.lightDir.w, sampler) : pc.lightDir.xyz;
             // Billboards are effectively two-sided receivers. Bias from the side facing the light; shadow
             // rays exclude particles anyway, but this keeps the origin sane when the light is behind the
             // camera side.
@@ -1723,7 +1723,7 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
         // over accumulation. The same sampled direction drives ndl, the shadow ray, and the specular
         // half-vector.
         float3 lightDir = pc.lightDir.w > 0.0
-                ? sampleCelestialSquare(pc.lightDir.xyz, pc.lightDir.w, sampler) : pc.lightDir.xyz;
+                ? sampleCelestialDisk(pc.lightDir.xyz, pc.lightDir.w, sampler) : pc.lightDir.xyz;
         float3 directRadiance = pc.lightRadiance.xyz;
         float signedNdl = dot(n, lightDir);
         float ndl = max(0.0, signedNdl);
