@@ -52,7 +52,10 @@ if(MSVC)
   target_compile_options(nrdbridge PRIVATE /W4 /WX /wd4324)
   set_property(TARGET nrdbridge PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 else()
-  target_compile_options(nrdbridge PRIVATE -Wall -Wextra -Werror -fvisibility=hidden)
+  # Keep Caustica warnings fatal while insulating the pinned NRD/NRI headers from GCC diagnostics
+  # produced by their intentionally partial aggregate initializers and presence-marker constants.
+  target_compile_options(nrdbridge PRIVATE -Wall -Wextra -Werror
+    -Wno-missing-field-initializers -Wno-unused-variable -fvisibility=hidden)
 endif()
 
 set(NRD_BRIDGE_OUTPUT_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../build/native/nrd_bridge"

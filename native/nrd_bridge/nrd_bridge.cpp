@@ -1,3 +1,6 @@
+#include <cstdio>
+#include <cstring>
+
 #include <NRI.h>
 #include <Extensions/NRIHelper.h>
 #include <Extensions/NRIRayTracing.h>
