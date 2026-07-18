@@ -212,10 +212,9 @@ public final class RtDlssFg {
         if (queueFallback) {
             return queueFallbackReason;
         }
-        if (logicalVsyncRequested) {
-            return "MAILBOX VSync requires Streamline-owned presenting-queue pacing";
-        }
-        return "Asynchronous IMMEDIATE presentation";
+        return logicalVsyncRequested
+                ? "Asynchronous MAILBOX presentation with timeline-retired inputs"
+                : "Asynchronous IMMEDIATE presentation with timeline-retired inputs";
     }
 
     public boolean queueFallbackActive() {
@@ -998,7 +997,7 @@ public final class RtDlssFg {
     private boolean useNoClientQueues() {
         String override = diagnosticQueueOverride();
         return "no-client-queues".equals(override)
-                || ("auto".equals(override) && !queueFallback && !logicalVsyncRequested);
+                || ("auto".equals(override) && !queueFallback);
     }
 
     private static String diagnosticQueueOverride() {

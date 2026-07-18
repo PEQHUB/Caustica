@@ -39,10 +39,11 @@ class DlssgPresentationContractTest {
     }
 
     @Test
-    void automaticQueuePolicyUsesPresentBlockingForMailboxVsync() throws Exception {
+    void automaticQueuePolicyUsesTimelineRetirementForMailboxVsync() throws Exception {
         String fg = source("src/main/java/dev/comfyfluffy/caustica/rt/pipeline/RtDlssFg.java");
-        assertTrue(fg.contains("!queueFallback && !logicalVsyncRequested"));
-        assertTrue(fg.contains("MAILBOX VSync requires Streamline-owned presenting-queue pacing"));
+        assertTrue(fg.contains("\"auto\".equals(override) && !queueFallback"));
+        assertTrue(fg.contains("Asynchronous MAILBOX presentation with timeline-retired inputs"));
+        assertFalse(fg.contains("!queueFallback && !logicalVsyncRequested"));
     }
 
     @Test
