@@ -2007,7 +2007,10 @@ public final class RtComposite {
         float moonX = moonDirection[0], moonY = moonDirection[1], moonZ = moonDirection[2];
         float moonPhase = moonPhaseIndex;
         boolean earthAtmosphere = mc.level != null && Level.OVERWORLD.equals(mc.level.dimension());
-        float rainBrightness = mc.level == null ? 1.0f : 1.0f - mc.level.getRainLevel(partial);
+        // Weather remains a vanilla presentation/gameplay effect (particles, sounds, wet weather state).
+        // Do not use its global fade as RT radiance: at full rain it reaches zero and erases both celestial
+        // discs and every transported sky light, including in biomes where precipitation is not visible.
+        float rainBrightness = 1.0f;
         float starBrightness = astronomy.starBrightness() * rainBrightness;
         int packedSky = probe.getValue(EnvironmentAttributes.SKY_COLOR, partial);
         float dayFactor = astronomy.dayFactor();
