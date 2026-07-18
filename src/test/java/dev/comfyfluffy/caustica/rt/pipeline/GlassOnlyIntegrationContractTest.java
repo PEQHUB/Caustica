@@ -26,7 +26,7 @@ final class GlassOnlyIntegrationContractTest {
     }
 
     @Test
-    void standardGlassStaysCompactAndLayeredModeTracksNestedMedia() throws IOException {
+    void standardGlassStaysCompactAndAdvancedDoesNotInventLayerOwnership() throws IOException {
         String raygen = source("shaders/world/world.rgen.slang");
         String closestHit = source("shaders/world/world.rchit.slang");
         String common = source("shaders/world/world_common.slang");
@@ -57,10 +57,10 @@ final class GlassOnlyIntegrationContractTest {
 
         assertFalse(raygen.contains("MAX_MEDIUM_DEPTH"));
         assertFalse(raygen.contains("pathMedia"));
-        assertTrue(raygen.contains("#if CAUSTICA_NESTED_MEDIA\n    // The advanced transport variant tracks nested media"));
-        assertTrue(raygen.contains("float4 mediumIorStack = float4(1.0)"));
-        assertTrue(raygen.contains("float4 mediumExtStackR = float4(0.0)"));
-        assertTrue(raygen.contains("if (mediumStackDepth >= MAX_MEDIUM_STACK_DEPTH) break"));
+        assertTrue(raygen.contains("#define CAUSTICA_NESTED_MEDIA 0"));
+        assertTrue(raygen.contains("#define CAUSTICA_LAYERED_OPTICS 0"));
+        assertTrue(raygen.contains("gTransparencyLayer[pix] = float4(0.0)"));
+        assertFalse(raygen.contains("gTransparencyLayer[pix] = float4(layeredPremultipliedReflection"));
         assertTrue(raygen.contains("solidDielectricExtinction(glassTint) * payload.hitT"));
         assertTrue(raygen.contains("void opticalGuideHit"));
         assertTrue(raygen.contains("crossing < uint(MAX_OPTICAL_INTERFACE_DEPTH)"));
@@ -76,11 +76,10 @@ final class GlassOnlyIntegrationContractTest {
         assertTrue(raygen.contains("eta = entering ? (1.0 / WATER_IOR) : WATER_IOR"));
         assertTrue(raygen.contains("Crossing-budget exhaustion means no trustworthy diffuse destination"));
         assertTrue(raygen.contains("gv_hitCamRel = destinationHitCamRel"));
-        assertTrue(raygen.contains("if (glassGuide)"));
         int destination = raygen.indexOf("if (destinationValid) {");
         int failure = raygen.indexOf("} else {", destination);
         String validPath = raygen.substring(destination, failure);
-        assertTrue(validPath.contains("#if CAUSTICA_LAYERED_OPTICS"));
+        assertTrue(validPath.contains("Standard is refraction-priority"));
         assertTrue(validPath.contains("gv_normal = destinationNormal"));
         assertTrue(validPath.contains("gv_rough = destinationRoughness"));
         assertTrue(raygen.contains("gv_albedo = destinationDiffuseAlbedo"));

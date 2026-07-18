@@ -50,8 +50,8 @@ public final class RtNrdResolvePipeline {
         VkDevice device = context.vk();
         try (MemoryStack stack = MemoryStack.stackPush()) {
             LongBuffer output = stack.mallocLong(1);
-            VkDescriptorSetLayoutBinding.Buffer bindings = VkDescriptorSetLayoutBinding.calloc(9, stack);
-            for (int i = 0; i < 9; i++) bindings.get(i).binding(i)
+            VkDescriptorSetLayoutBinding.Buffer bindings = VkDescriptorSetLayoutBinding.calloc(11, stack);
+            for (int i = 0; i < 11; i++) bindings.get(i).binding(i)
                     .descriptorType(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).descriptorCount(1)
                     .stageFlags(VK10.VK_SHADER_STAGE_COMPUTE_BIT);
             VkDescriptorSetLayoutCreateInfo layoutInfo = VkDescriptorSetLayoutCreateInfo.calloc(stack)
@@ -60,7 +60,7 @@ public final class RtNrdResolvePipeline {
                     "vkCreateDescriptorSetLayout(NRD resolve)");
             long setLayout = output.get(0);
             VkDescriptorPoolSize.Buffer poolSize = VkDescriptorPoolSize.calloc(1, stack)
-                    .type(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).descriptorCount(9);
+                    .type(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).descriptorCount(11);
             VkDescriptorPoolCreateInfo poolInfo = VkDescriptorPoolCreateInfo.calloc(stack).sType$Default()
                     .maxSets(1).pPoolSizes(poolSize);
             check(VK10.vkCreateDescriptorPool(device, poolInfo, null, output),
@@ -72,7 +72,7 @@ public final class RtNrdResolvePipeline {
                     "vkAllocateDescriptorSets(NRD resolve)");
             long set = output.get(0);
             VkPushConstantRange.Buffer range = VkPushConstantRange.calloc(1, stack)
-                    .stageFlags(VK10.VK_SHADER_STAGE_COMPUTE_BIT).offset(0).size(16);
+                    .stageFlags(VK10.VK_SHADER_STAGE_COMPUTE_BIT).offset(0).size(24);
             VkPipelineLayoutCreateInfo pipelineLayoutInfo = VkPipelineLayoutCreateInfo.calloc(stack)
                     .sType$Default().pSetLayouts(stack.longs(setLayout)).pPushConstantRanges(range);
             check(VK10.vkCreatePipelineLayout(device, pipelineLayoutInfo, null, output),
@@ -93,13 +93,14 @@ public final class RtNrdResolvePipeline {
     }
 
     public void setImages(long diffuseSh0, long diffuseSh1, long specularSh0, long specularSh1,
-            long normalRoughness, long diffuseAlbedo, long specularAlbedo, long viewDirection, long output) {
+            long normalRoughness, long diffuseAlbedo, long specularAlbedo, long viewDirection, long output,
+            long viewZ, long noisyInput) {
         try (MemoryStack stack = MemoryStack.stackPush()) {
             long[] views = {diffuseSh0, diffuseSh1, specularSh0, specularSh1,
-                    normalRoughness, diffuseAlbedo, specularAlbedo, viewDirection, output};
-            VkDescriptorImageInfo.Buffer images = VkDescriptorImageInfo.calloc(9, stack);
-            VkWriteDescriptorSet.Buffer writes = VkWriteDescriptorSet.calloc(9, stack);
-            for (int i = 0; i < 9; i++) {
+                    normalRoughness, diffuseAlbedo, specularAlbedo, viewDirection, output, viewZ, noisyInput};
+            VkDescriptorImageInfo.Buffer images = VkDescriptorImageInfo.calloc(11, stack);
+            VkWriteDescriptorSet.Buffer writes = VkWriteDescriptorSet.calloc(11, stack);
+            for (int i = 0; i < 11; i++) {
                 images.get(i).imageView(views[i]).imageLayout(VK10.VK_IMAGE_LAYOUT_GENERAL);
                 writes.get(i).sType$Default().dstSet(descriptorSet).dstBinding(i).descriptorCount(1)
                         .descriptorType(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
@@ -109,14 +110,16 @@ public final class RtNrdResolvePipeline {
         }
     }
 
-    public void dispatch(VkCommandBuffer commandBuffer, int width, int height, int family, boolean sh) {
+    public void dispatch(VkCommandBuffer commandBuffer, int width, int height, int family, boolean sh,
+            boolean forceRaw) {
         try (MemoryStack stack = MemoryStack.stackPush();
                 RtDebugLabels.Scope ignored = RtDebugLabels.scope(context, commandBuffer, "NRD resolve")) {
             VK10.vkCmdBindPipeline(commandBuffer, VK10.VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
             VK10.vkCmdBindDescriptorSets(commandBuffer, VK10.VK_PIPELINE_BIND_POINT_COMPUTE,
                     pipelineLayout, 0, stack.longs(descriptorSet), null);
-            ByteBuffer push = stack.malloc(16).putInt(0, width).putInt(4, height)
-                    .putInt(8, family).putInt(12, sh ? 1 : 0);
+            ByteBuffer push = stack.malloc(24).putInt(0, width).putInt(4, height)
+                    .putInt(8, family).putInt(12, sh ? 1 : 0)
+                    .putFloat(16, RtNrd.DENOISING_RANGE).putInt(20, forceRaw ? 1 : 0);
             VK10.vkCmdPushConstants(commandBuffer, pipelineLayout, VK10.VK_SHADER_STAGE_COMPUTE_BIT, 0, push);
             VK10.vkCmdDispatch(commandBuffer, (width + 15) / 16, (height + 15) / 16, 1);
         }

@@ -17,6 +17,8 @@ import org.lwjgl.vulkan.VK10;
 /** Cross-platform NRD Vulkan reconstruction backend. */
 public final class RtNrd {
     public static final RtNrd INSTANCE = new RtNrd();
+    /** View-space distances at or beyond this value are sky and intentionally bypass NRD. */
+    public static final float DENOISING_RANGE = 999_000.0f;
     private static final int RESOURCE_SIZE = 16;
     private static final int COMMON_SIZE = 308;
     private static final int SETTINGS_SIZE = 152;
@@ -139,7 +141,7 @@ public final class RtNrd {
             bytes.putFloat(256, 1.0f / width).putFloat(260, 1.0f / height).putFloat(264, 0.0f);
             bytes.putFloat(268, jitterX).putFloat(272, jitterY);
             bytes.putFloat(276, previousJitterX).putFloat(280, previousJitterY);
-            bytes.putFloat(284, deltaMs).putFloat(288, 999_000.0f);
+            bytes.putFloat(284, deltaMs).putFloat(288, DENOISING_RANGE);
             bytes.putFloat(292, CausticaConfig.Rt.Nrd.DISOCCLUSION_THRESHOLD.value());
             bytes.putFloat(296, CausticaConfig.Rt.Nrd.SPLIT_SCREEN.value());
             bytes.putInt(300, frameIndex).putInt(304, reset || resetHistory ? 1 : 0);

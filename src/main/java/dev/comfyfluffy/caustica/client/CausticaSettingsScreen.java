@@ -446,7 +446,7 @@ public class CausticaSettingsScreen extends Screen {
         controls.add(toggle(Component.translatable("caustica.options.rt.highQualityTransparency"),
                 CausticaConfig.Rt.Reconstruction.ADVANCED_OPTICAL_TRANSPORT)
                 .tooltip(Component.translatable("caustica.options.rt.highQualityTransparency.tooltip"))
-                .activeWhen(this::opticalTransportControlsActive));
+                .activeWhen(() -> false));
         controls.add(toggle(Component.translatable("caustica.options.rt.particleTemporalHistory"),
                 CausticaConfig.Rt.DlssRr.PARTICLE_TEMPORAL_HISTORY)
                 .tooltip(Component.translatable("caustica.options.rt.particleTemporalHistory.tooltip"))

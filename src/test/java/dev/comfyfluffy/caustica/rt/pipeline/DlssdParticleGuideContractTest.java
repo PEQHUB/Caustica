@@ -42,7 +42,7 @@ final class DlssdParticleGuideContractTest {
         assertTrue(composite.contains("if (particleTemporalHistory)"));
         assertTrue(config.contains("dlss-rr.particle-temporal-history\", false"));
         assertFalse(config.contains("dlss-rr.particle-temporal-history\", true"));
-        assertTrue(raygen.contains("if (encounteredAnimatedWater) gv_animatedGuide = 1.0"));
+        assertFalse(raygen.contains("if (encounteredAnimatedWater) gv_animatedGuide = 1.0"));
     }
 
     private static String read(String path) throws IOException {

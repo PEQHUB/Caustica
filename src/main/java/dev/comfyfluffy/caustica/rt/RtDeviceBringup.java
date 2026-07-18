@@ -194,21 +194,11 @@ public final class RtDeviceBringup {
     }
 
     private static String highQualityTransparencyShader(String shader) {
-        // HQ is a DLSS-RR guide/transport experiment. A persisted true value must not select the
-        // two-path shader after reconstruction is switched to NRD or off.
-        if (!RtReconstruction.usesDlss() || !RtDlssRr.INSTANCE.isOperational()
-                || !CausticaConfig.Rt.DlssRr.HIGH_QUALITY_TRANSPARENCY.value()) return shader;
-        int suffix = shader.indexOf(".rgen.spv");
-        if (suffix < 0) throw new IllegalArgumentException("not a raygen shader: " + shader);
-        return shader.substring(0, suffix) + "_hq" + shader.substring(suffix);
+        return shader;
     }
 
     private static String advancedNrdTransportShader(String shader) {
-        if (!RtReconstruction.usesNrd() || !RtNrd.INSTANCE.isOperational()
-                || !CausticaConfig.Rt.Reconstruction.ADVANCED_OPTICAL_TRANSPORT.value()) return shader;
-        int suffix = shader.indexOf(".rgen.spv");
-        if (suffix < 0) throw new IllegalArgumentException("not a raygen shader: " + shader);
-        return shader.substring(0, suffix) + "_hq" + shader.substring(suffix);
+        return shader;
     }
 
     public static String sharcDiagnosticUpdateRaygenShader() {

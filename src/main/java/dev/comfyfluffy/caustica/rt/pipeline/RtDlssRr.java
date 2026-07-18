@@ -149,8 +149,7 @@ public final class RtDlssRr {
     }
 
     public static int requiredResourceCount() {
-        return requiredResourceCount(CausticaConfig.Rt.DlssRr.DIFFUSE_PATH_GUIDE.value(),
-                CausticaConfig.Rt.DlssRr.HIGH_QUALITY_TRANSPARENCY.value());
+        return requiredResourceCount(CausticaConfig.Rt.DlssRr.DIFFUSE_PATH_GUIDE.value(), false);
     }
 
     static int requiredResourceCount(boolean diffusePathGuide) {

@@ -54,16 +54,12 @@
 #ifndef CAUSTICA_TRANSPARENCY_HQ
 #define CAUSTICA_TRANSPARENCY_HQ 0
 #endif
-#if CAUSTICA_TRANSPARENCY_HQ && !CAUSTICA_OFFLINE && !CAUSTICA_SHARC_UPDATE
-#define CAUSTICA_NESTED_MEDIA 1
-#else
+// The SDK's transparency overlay is for particles and composited transparent effects; it has no
+// independent dielectric depth/normal/motion contract. Keep the experimental dielectric split disabled
+// until the backend can reconstruct both physical owners without pretending reflection is a particle.
 #define CAUSTICA_NESTED_MEDIA 0
-#endif
-#if CAUSTICA_NESTED_MEDIA && !CAUSTICA_NRD
-#define CAUSTICA_LAYERED_OPTICS 1
-#else
 #define CAUSTICA_LAYERED_OPTICS 0
-#endif
+#define CAUSTICA_DLSS_TRANSPARENCY_RESOURCES 0
 import world_common;
 import world_sky_lut;
 
@@ -93,10 +89,9 @@ static SharcRWPtr<uint> sharcStats;
 [[vk::binding(8, 0)]] [format("rg16f")]   RWTexture2D<float2> gSpecMotion; // reflection MVs for RR
 [[vk::binding(10, 0)]] [format("r16f")] RWTexture2D<float> gAnimatedGuide; // animated-surface / particle temporal responsivity
 [[vk::binding(13, 0)]] [format("rgba16f")] RWTexture2D<float4> gDiffuseRayDirectionHitDistance;
-#if CAUSTICA_LAYERED_OPTICS
-// The layered variant keeps these at offline-only binding holes already present in the base descriptor
-// layout. The normal online shader has no declarations or writes for them, so disabling the feature adds
-// no images, barriers, resource tags, or shader instructions.
+#if CAUSTICA_DLSS_TRANSPARENCY_RESOURCES
+// Advanced currently aliases the stable refraction path. Keep the already-wired optional resources
+// neutral so Streamline sees no dielectric overlay; the standard variant has no declarations or writes.
 [[vk::binding(9, 0)]] [format("rgba16f")] RWTexture2D<float4> gTransparencyLayer;
 [[vk::binding(11, 0)]] [format("rgba16f")] RWTexture2D<float4> gTransparencyOpacity;
 [[vk::binding(12, 0)]] [format("rgba16f")] RWTexture2D<float4> gColorBeforeTransparency;
@@ -306,6 +301,14 @@ static float3 gv_specPreviousNormal;
 // follows the same deterministic delta reflection, while a separate guide ray replaces the mirror plane
 // with the reflected surface in DLSSD's G-buffer.
 static bool gv_psrMirror;
+#if CAUSTICA_NRD
+// Explicit primary-visibility classification. The radial sky position cannot be reused as view Z:
+// near the horizon its projection can fall inside NRD's denoising range.
+static bool gv_nrdPrimaryMiss;
+// A modest finite sentinel just outside NRD's configured range avoids overflow in any accidental
+// neighborhood depth math while still classifying primary misses exactly.
+static const float NRD_SKY_VIEWZ_SENTINEL = 1.0e6;
+#endif
 
 static const uint OPTICAL_NONE = 0u;
 static const uint OPTICAL_THIN_GLASS = 2u;
@@ -1476,8 +1479,10 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
             // packed show-celestial flag decides whether this path segment may see the bright disc.
             float3 sky = payload.albedo;
             if (captureGuides && segment == 0) { // primary ray hit sky: guides describe "no surface"
-                gv_normal = float3(0.0, 0.0, 0.0);
-                gv_geometricNormal = float3(0.0, 0.0, 0.0);
+                // Sky is outside NRD's denoising range and is resolved from the raw trace. Still provide a
+                // finite camera-facing normal so every bound guide remains valid for validation/debug paths.
+                gv_normal = normalize(-rd);
+                gv_geometricNormal = gv_normal;
                 // Flat mid-grey albedo guide for sky (NOT the bright sky radiance): demodulating DLSS-RR
                 // by the huge sun-disc radiance rings/artifacts around the sun. A constant albedo keeps
                 // the brightness in the lighting channel where RR resolves it cleanly.
@@ -1488,6 +1493,9 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
                 gv_motionHitCamRel = gv_hitCamRel;
                 gv_motionUseRefracted = false;
                 gv_motionObjDisp = float3(0.0, 0.0, 0.0); // sky is static
+#if CAUSTICA_NRD
+                gv_nrdPrimaryMiss = true;
+#endif
             }
 #if CAUSTICA_SHARC_UPDATE
             SharcUpdateMiss(sharcParameters, sharcState, sky);
@@ -1659,13 +1667,24 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
             }
 #endif
             bool chooseReflection = false;
+#if !CAUSTICA_LAYERED_OPTICS && !CAUSTICA_NRD && !CAUSTICA_OFFLINE
+            bool standardPrimaryTransmission = segment == 0
+                    && (pc.flags & FRAME_FLAG_RR_GUIDES) != 0u;
+#else
+            bool standardPrimaryTransmission = false;
+#endif
 #if CAUSTICA_PRIMARY_DIELECTRIC_SPLIT
             if (segment == 0 && primaryOpticalSample != 0u) {
                 chooseReflection = primaryOpticalSample == PRIMARY_OPTICAL_REFLECTION;
             } else
 #endif
             {
-                chooseReflection = rndf(sampler) < F;
+                // Standard DLSS is explicitly refraction-priority: its one path and one ordinary guide
+                // tuple both follow transmission. Advanced mode evaluates this lobe plus a separate
+                // reflected continuation. TIR is the only primary-interface exception because no
+                // transmitted path exists. Non-DLSS/offline paths retain unbiased Fresnel roulette.
+                chooseReflection = standardPrimaryTransmission
+                        ? dot(transmittedDir, transmittedDir) <= 0.0 : rndf(sampler) < F;
             }
             if (chooseReflection) {
                 rd = reflect(rd, interfaceNormal);
@@ -1674,6 +1693,9 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
                 // TIR has no transmitted estimator. The forced transmission layer is exactly black and
                 // alpha-over with opacity one selects the reflection layer without inventing energy.
                 if (dot(transmittedDir, transmittedDir) <= 0.0) break;
+                // Standard intentionally presents the conditional transmitted view at full weight. It is
+                // refraction-priority, not a complete Fresnel estimator; attenuating by (1-F) without a
+                // separately reconstructed reflected owner would make grazing water collapse toward black.
                 if (thinPane) {
                     throughput *= glassTint;
                 } else {
@@ -1870,6 +1892,25 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
 #endif
             float F = fresnelDielectric(cosI, etaI, etaT);
             float3 transmittedDir = refract(rd, n, etaI / etaT);
+            if (captureRefractedGuides && captureGuides && segment == 0 && waterWaves) {
+                // A hard animated-water reject discards all temporal reconstruction; zero bias falsely
+                // claims that the moving interface samples the same destination. Estimate only the mapping
+                // change caused by the previous wave normal and feed Streamline a bounded confidence hint.
+                // This adds no guide ray, image, descriptor, or pass.
+                float3 previousTransmittedDir = refract(rd, previousWaterNormal, etaI / etaT);
+                bool currentTransmissionValid = dot(transmittedDir, transmittedDir) > 0.0;
+                bool previousTransmissionValid = dot(previousTransmittedDir, previousTransmittedDir) > 0.0;
+                float waveHistoryBias = 0.0;
+                if (currentTransmissionValid != previousTransmissionValid) {
+                    waveHistoryBias = 1.0;
+                } else if (currentTransmissionValid) {
+                    float angularPixels = length(transmittedDir - previousTransmittedDir)
+                            / max(primaryConeSpread, 1.0e-5);
+                    float transition = saturate((angularPixels - 0.25) / 1.75);
+                    waveHistoryBias = transition * transition * (3.0 - 2.0 * transition);
+                }
+                gv_animatedGuide = max(gv_animatedGuide, waveHistoryBias);
+            }
             if (captureGuides && segment == 0) { // primary water hit: feed RR a smooth dielectric specular surface
                 gv_normal = n;
                 gv_rough = WATER_GUIDE_ROUGH;
@@ -1888,10 +1929,9 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
                     gv_opticalGuideMode = 1u;
                     gv_opticalExitEta = surfaceWaterEntering ? WATER_IOR : (1.0 / WATER_IOR);
                 }
-                // Current geometry cannot provide exact previous-wave refracted correspondence. Reject
-                // animated-water history until a true previous-time optical walk exists; accepting a guessed
-                // destination MV produces boiling even when reflection is submitted as a separate layer.
-                if (waterWaves) gv_animatedGuide = 1.0;
+                // Wave animation changes the interface direction, but the ordinary DLSS signal below is
+                // destination-owned. Do not annihilate the entire pixel's history merely because the ray
+                // crossed animated water; depth/motion invalidity still rejects genuinely bad history.
             }
             if (primaryOnly) {
                 break;
@@ -1908,13 +1948,20 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
             }
 #endif
             bool chooseReflection = false;
+#if !CAUSTICA_LAYERED_OPTICS && !CAUSTICA_NRD && !CAUSTICA_OFFLINE
+            bool standardPrimaryTransmission = segment == 0
+                    && (pc.flags & FRAME_FLAG_RR_GUIDES) != 0u;
+#else
+            bool standardPrimaryTransmission = false;
+#endif
 #if CAUSTICA_PRIMARY_DIELECTRIC_SPLIT
             if (segment == 0 && primaryOpticalSample != 0u) {
                 chooseReflection = primaryOpticalSample == PRIMARY_OPTICAL_REFLECTION;
             } else
 #endif
             {
-                chooseReflection = rndf(sampler) < F;
+                chooseReflection = standardPrimaryTransmission
+                        ? dot(transmittedDir, transmittedDir) <= 0.0 : rndf(sampler) < F;
             }
             if (chooseReflection) {
                 rd = reflect(rd, n);
@@ -2589,8 +2636,8 @@ void main() {
     bool writeMotionGuides = writeRrGuides || (pc.flags & FRAME_FLAG_FG_GUIDES) != 0u;
     bool writeExposureDepth = (pc.flags & FRAME_FLAG_EXPOSURE_DEPTH) != 0u;
     bool captureGuides = writeMotionGuides || writeExposureDepth || primaryOnly;
-    // NRD's combined clear-interface signal has one shared normal/depth tuple and stays on the interface.
-    // DLSS-RR can follow the transmitted destination because layered mode supplies an explicit overlay.
+    // DLSS owns a refraction-priority signal and follows that destination with one coherent ordinary tuple.
+    // NRD retains its own combined interface contract and must not inherit this DLSS-only guide policy.
     bool captureRefractedGuides = (writeMotionGuides && !writeNrdGuides)
             || pc.debugView == 2u || pc.debugView == 5u
             || pc.debugView == 6u || pc.debugView == 7u;
@@ -2621,6 +2668,9 @@ void main() {
     gv_diffuseGuidePending = false;
     gv_specPreviousNormal = float3(0.0, 0.0, 0.0);
     gv_psrMirror = false;
+#if CAUSTICA_NRD
+    gv_nrdPrimaryMiss = false;
+#endif
 #if CAUSTICA_SHARC_QUERY && CAUSTICA_SHARC_DIAGNOSTICS
     gv_sharcDebug = float3(0.02);
     gv_sharcHashDebug = float3(0.0);
@@ -2772,33 +2822,18 @@ void main() {
                 destinationHitCamRel, destinationMotionPrev, destinationValid,
                 destinationNormal, destinationRoughness,
                 destinationDiffuseAlbedo, destinationSpecularAlbedo, encounteredAnimatedWater);
-        if (encounteredAnimatedWater) gv_animatedGuide = 1.0;
+        // The guide walk records animated-water traversal for diagnostics only. It is not a reason to
+        // replace unrelated destination history with the current sample.
         if (destinationValid) {
             gv_motionHitCamRel = destinationHitCamRel;
             gv_motionObjDisp = destinationMotionPrev;
             gv_motionUseRefracted = true;
             gv_albedo = destinationDiffuseAlbedo;
-#if CAUSTICA_LAYERED_OPTICS
-            // The base/color-before signal is transmitted radiance, so every ordinary guide must belong
-            // to that same destination. The premultiplied interface reflection is an un-guided overlay,
-            // matching Streamline's documented transparency-layer contract.
+            // Standard is refraction-priority, so every ordinary guide describes this same destination.
             gv_hitCamRel = destinationHitCamRel;
             gv_normal = destinationNormal;
             gv_rough = destinationRoughness;
             gv_specAlb = destinationSpecularAlbedo;
-#else
-            // Animated water is a visible dielectric interface, not the opaque bed behind it. Keep its
-            // depth, wave normal, roughness, Fresnel and reflection motion on that one physical surface;
-            // only the transmitted color guides follow the refracted destination. Replacing water depth
-            // with riverbed depth made one RR pixel describe two surfaces and caused reflection ghosting.
-            // Glass continues to use its transmitted ordinary depth/color layer, but its normal,
-            // roughness, Fresnel and specular motion all remain on the visible dielectric interface.
-            // Replacing those two interface guides with the opaque destination created a mixed-surface
-            // RR input and was the glass-blur regression.
-            if (glassGuide) {
-                gv_hitCamRel = destinationHitCamRel;
-            }
-#endif
         } else {
             // No coherent transmitted layer exists. A value of one in BiasCurrentColorHint is NVIDIA's
             // hard history reject, preventing the foreground interface from validating stale background.
@@ -2810,11 +2845,7 @@ void main() {
     float2 specMotion = float2(0.0, 0.0);
     bool debugSpecMotion = pc.debugView == 7u;
     bool interfaceSpecMotionRequired = debugSpecMotion
-#if CAUSTICA_LAYERED_OPTICS
-            ;
-#else
-            || writeRrGuides;
-#endif
+            || (writeRrGuides && !gv_motionUseRefracted);
     if (interfaceSpecMotionRequired) {
         specMotion = specularReflectionMotion(
                 specSurfaceCamRel + pc.camOffset, specSurfaceNormal, gv_geometricNormal, specSurfacePreviousNormal,
@@ -2824,9 +2855,7 @@ void main() {
     // Hardware (non-linear, reversed-Z) depth for DLSS-RR + Frame Generation: project the camera-relative
     // primary hit through the forward view-projection and take ndc z/w — exactly the value a rasterizer
     // would write. Reversed-Z (near=1, far=0), so DLSS gets the DepthInverted flag; sky's far hit -> ~0.
-    // Glass depth follows its transmitted destination. Water depth remains on the physical animated
-    // interface; its refracted destination supplies color motion while BiasCurrentColorHint rejects stale
-    // history. Reflection continues to use the separately preserved physical-interface guides.
+    // Refraction-priority DLSS depth and motion follow the same transmitted destination.
     bool debugDepth = pc.debugView == 3u;
     bool debugMotion = pc.debugView == 5u;
     float nrdViewZ = max(length(gv_hitCamRel), 1.0e-4);
@@ -2848,12 +2877,9 @@ void main() {
         }
         motion = (prevNdc - curNdc) * 0.5 * size;
     }
-#if CAUSTICA_LAYERED_OPTICS
-    // Streamline exposes no independent transparency-layer MV tag. Keep the one submitted guide tuple
-    // entirely destination-owned; animated water is hard-rejected above instead of mixing interface and
-    // destination correspondence in one pixel.
-    if (writeRrGuides) specMotion = motion;
-#endif
+    // A refraction-priority pixel has no independent reflected layer. Keep its specular guide on the same
+    // transmitted owner instead of pairing destination albedo with interface reflection motion.
+    if (writeRrGuides && gv_motionUseRefracted) specMotion = motion;
 
     if (writeRrGuides) {
         gNormal[pix] = float4(gv_normal, gv_rough);
@@ -2870,7 +2896,9 @@ void main() {
         }
 #if CAUSTICA_NRD
         if (writeNrdGuides) {
-            gNrdViewZ[pix] = nrdViewZ;
+            // NRD deliberately leaves sky output unwritten. Classify from the actual primary miss rather
+            // than projected depth, then place that pixel unambiguously outside the denoising range.
+            gNrdViewZ[pix] = gv_nrdPrimaryMiss ? NRD_SKY_VIEWZ_SENTINEL : nrdViewZ;
         }
 #endif
     } else if (writeMotionGuides) {
@@ -2954,6 +2982,12 @@ void main() {
         float3 specularDemodulation = max(specSurfaceAlbedo, float3(1.0e-4));
         float3 diffuseSignal = nrdDiffuseRadiance / diffuseDemodulation;
         float3 specularSignal = nrdSpecularRadiance / specularDemodulation;
+        // Match NRD's sanitize=true frontend contract. Invalid or out-of-FP16-range transport must not
+        // enter temporal history, where one bad sample can otherwise persist as bright colored outlines.
+        diffuseSignal = (any(isnan(diffuseSignal)) || any(isinf(diffuseSignal)))
+                ? float3(0.0) : clamp(diffuseSignal, float3(0.0), float3(65504.0));
+        specularSignal = (any(isnan(specularSignal)) || any(isinf(specularSignal)))
+                ? float3(0.0) : clamp(specularSignal, float3(0.0), float3(65504.0));
         float3 diffuseDirection = dot(nrdDiffuseDirectionHitDistance.xyz,
                 nrdDiffuseDirectionHitDistance.xyz) > 1.0e-8
                 ? normalize(nrdDiffuseDirectionHitDistance.xyz) : gv_normal;
@@ -2995,17 +3029,14 @@ void main() {
         gNrdViewDirection[pix] = float4(normalize(-gv_hitCamRel), specSurfaceRoughness);
     }
 #endif
-#if CAUSTICA_LAYERED_OPTICS
-    gTransparencyLayer[pix] = float4(layeredPremultipliedReflection, 0.0);
-    gTransparencyOpacity[pix] = float4(layeredOpacity, layeredOpacity, layeredOpacity, 1.0);
-    gColorBeforeTransparency[pix] = float4(layeredBaseRadiance, 1.0);
-    // Keep the ordinary physical result available to exposure, debug capture, and the no-RR fallback.
-    // DLSS-RR receives this final image as ScalingInputColor and gColorBeforeTransparency as the separate
-    // pre-layer snapshot, so it can identify the premultiplied reflection without losing final radiance.
-    outImage[pix] = float4(frameRadiance, 1.0);
-#else
-    outImage[pix] = float4(frameRadiance, 1.0);
+#if CAUSTICA_DLSS_TRANSPARENCY_RESOURCES
+    // Advanced is deliberately neutral until a backend can reconstruct dielectric interface and
+    // destination owners separately. Do not route dielectric reflection through the particle overlay ABI.
+    gTransparencyLayer[pix] = float4(0.0);
+    gTransparencyOpacity[pix] = float4(0.0);
+    gColorBeforeTransparency[pix] = float4(frameRadiance, 1.0);
 #endif
+    outImage[pix] = float4(frameRadiance, 1.0);
 #endif // CAUSTICA_OFFLINE
 #endif
 }

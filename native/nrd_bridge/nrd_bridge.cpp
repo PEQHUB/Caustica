@@ -10,6 +10,8 @@
 #include <NRDIntegration.h>
 #include <NRDIntegration.hpp>
 
+#include "nrd_extension_filter.h"
+
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
@@ -17,6 +19,7 @@
 #include <exception>
 #include <memory>
 #include <string>
+#include <vector>
 
 #if defined(_WIN32)
 #define NRDBRIDGE_API extern "C" __declspec(dllexport)
@@ -200,8 +203,20 @@ NRDBRIDGE_API int32_t nrdbridge_create(uint64_t instance, uint64_t physicalDevic
         deviceDesc.queueFamilies = &queueFamily;
         deviceDesc.queueFamilyNum = 1;
         deviceDesc.minorVersion = 2;
-        deviceDesc.vkExtensions.deviceExtensions = enabledDeviceExtensions;
-        deviceDesc.vkExtensions.deviceExtensionNum = enabledDeviceExtensionNum;
+        // DeviceCreationVKDesc describes an already-created Vulkan device. NRI uses the supplied names
+        // not only as metadata but also as a request to resolve each extension's complete dispatch table.
+        // Caustica enables ray tracing for its renderer, but NRD itself is compute-only. Passing
+        // VK_KHR_ray_tracing_pipeline to NRI 179 makes it require vkCmdTraceRaysIndirect2KHR even when
+        // VK_KHR_ray_tracing_maintenance1 was not enabled, which rejects an otherwise valid device.
+        std::vector<const char*> nrdDeviceExtensions;
+        nrdDeviceExtensions.reserve(enabledDeviceExtensionNum);
+        for (uint32_t i = 0; i < enabledDeviceExtensionNum; ++i) {
+            const char* extension = enabledDeviceExtensions ? enabledDeviceExtensions[i] : nullptr;
+            if (extension && !nrdbridge::isRayTracingOnlyDeviceExtension(extension))
+                nrdDeviceExtensions.push_back(extension);
+        }
+        deviceDesc.vkExtensions.deviceExtensions = nrdDeviceExtensions.data();
+        deviceDesc.vkExtensions.deviceExtensionNum = static_cast<uint32_t>(nrdDeviceExtensions.size());
 
         nrd::DenoiserDesc denoiserDesc = {kDenoiserId, state->denoiser};
         nrd::InstanceCreationDesc instanceDesc = {};

@@ -1646,7 +1646,8 @@ public final class RtComposite {
             nrdResolvePipeline = RtNrdResolvePipeline.create(ctx);
             nrdResolvePipeline.setImages(nrdRawOutput.view, nrdSh1Output.view,
                     nrdSpecRawOutput.view, nrdSpecSh1Output.view, gNormal.view,
-                    gAlbedo.view, gSpecAlbedo.view, gNrdViewDirection.view, nrdResolvedOutput.view);
+                    gAlbedo.view, gSpecAlbedo.view, gNrdViewDirection.view, nrdResolvedOutput.view,
+                    gNrdViewZ.view, output.view);
             if (nrdResolvedOutput != rrOutput
                     && "edge-adaptive".equals(CausticaConfig.Rt.Nrd.UPSCALE_FILTER.get())) {
                 nrdSpatialUpscalePipeline = RtNrdSpatialUpscalePipeline.create(ctx);
@@ -2159,10 +2160,10 @@ public final class RtComposite {
                             nrdResolvePipeline.setImages(nrdRawOutput.view, nrdSh1Output.view,
                                     nrdSpecRawOutput.view, nrdSpecSh1Output.view, gNormal.view,
                                     gAlbedo.view, gSpecAlbedo.view, gNrdViewDirection.view,
-                                    nrdResolvedOutput.view);
+                                    nrdResolvedOutput.view, gNrdViewZ.view, output.view);
                             nrdResolvePipeline.dispatch(cmd, renderW, renderH,
                                     "relax".equals(CausticaConfig.Rt.Nrd.DENOISER.get()) ? 1 : 0,
-                                    CausticaConfig.Rt.Nrd.SPHERICAL_HARMONICS.value());
+                                    CausticaConfig.Rt.Nrd.SPHERICAL_HARMONICS.value(), false);
                             if (nrdResolvedOutput != rrOutput) {
                                 VulkanCommandEncoder.memoryBarrier(cmd, stack);
                                 if (nrdSpatialUpscalePipeline != null) {
@@ -2182,10 +2183,10 @@ public final class RtComposite {
                     nrdResolvePipeline.setImages(gNrdSignal.view, gNrdSh1.view,
                             gNrdSpecSignal.view, gNrdSpecSh1.view, gNormal.view,
                             gAlbedo.view, gSpecAlbedo.view, gNrdViewDirection.view,
-                            nrdResolvedOutput.view);
+                            nrdResolvedOutput.view, gNrdViewZ.view, output.view);
                     nrdResolvePipeline.dispatch(cmd, renderW, renderH,
                             "relax".equals(CausticaConfig.Rt.Nrd.DENOISER.get()) ? 1 : 0,
-                            CausticaConfig.Rt.Nrd.SPHERICAL_HARMONICS.value());
+                            CausticaConfig.Rt.Nrd.SPHERICAL_HARMONICS.value(), true);
                     if (nrdResolvedOutput != rrOutput) {
                         VulkanCommandEncoder.memoryBarrier(cmd, stack);
                         if (nrdSpatialUpscalePipeline != null) {
@@ -2294,9 +2295,9 @@ public final class RtComposite {
     }
 
     private static boolean highQualityTransparencyEnabled() {
-        if (!CausticaConfig.Rt.Reconstruction.ADVANCED_OPTICAL_TRANSPORT.value()) return false;
-        return (RtReconstruction.usesDlss() && RtDlssRr.INSTANCE.isOperational())
-                || (RtReconstruction.usesNrd() && RtNrd.INSTANCE.isOperational());
+        // The Streamline transparency overlay has no independent dielectric depth/normal/motion owner.
+        // Keep the persisted experimental setting inert until a physically coherent backend exists.
+        return false;
     }
 
     private void clearOfflineAccumulation(VkCommandBuffer cmd, MemoryStack stack) {

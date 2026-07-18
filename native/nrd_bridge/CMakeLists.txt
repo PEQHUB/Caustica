@@ -40,7 +40,7 @@ FetchContent_Declare(nrd
   DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
 FetchContent_MakeAvailable(nrd)
 
-add_library(nrdbridge SHARED nrd_bridge.cpp)
+add_library(nrdbridge SHARED nrd_bridge.cpp nrd_extension_filter.h)
 target_link_libraries(nrdbridge PRIVATE NRD NRDIntegration NRI)
 target_include_directories(nrdbridge PRIVATE
   "${nrd_SOURCE_DIR}/Include"
@@ -56,6 +56,17 @@ else()
   # produced by their intentionally partial aggregate initializers and presence-marker constants.
   target_compile_options(nrdbridge PRIVATE -Wall -Wextra -Werror
     -Wno-missing-field-initializers -Wno-unused-variable -fvisibility=hidden)
+endif()
+
+enable_testing()
+add_executable(nrdbridge_extension_filter_test
+  nrd_extension_filter_test.cpp
+  nrd_extension_filter.h)
+add_test(NAME nrdbridge_extension_filter COMMAND nrdbridge_extension_filter_test)
+if(MSVC)
+  target_compile_options(nrdbridge_extension_filter_test PRIVATE /W4 /WX)
+else()
+  target_compile_options(nrdbridge_extension_filter_test PRIVATE -Wall -Wextra -Werror)
 endif()
 
 set(NRD_BRIDGE_OUTPUT_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../build/native/nrd_bridge"

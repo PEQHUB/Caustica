@@ -75,8 +75,6 @@ public final class RtReconstruction {
 
     public static int resourceIdentity() {
         int identity = backend().ordinal();
-        identity = 31 * identity + Boolean.hashCode(
-                CausticaConfig.Rt.Reconstruction.ADVANCED_OPTICAL_TRANSPORT.value());
         if (usesDlss()) {
             identity = 31 * identity + RtDlssRr.quality();
             identity = 31 * identity + Boolean.hashCode(

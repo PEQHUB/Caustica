@@ -797,6 +797,8 @@ def nrdPlatform = (nrdArch == "x86_64" || nrdArch == "amd64")
 def nrdFilename = nrdOs.windows ? "nrdbridge.dll" : "libnrdbridge.so"
 def nrdLocalOutput = new File(layout.buildDirectory.get().asFile,
 		"native/nrd_bridge/release/${nrdFilename}")
+def nrdExtensionFilterTestOutput = new File(nrdBridgeBuildDir,
+		nrdOs.windows ? "Release/nrdbridge_extension_filter_test.exe" : "nrdbridge_extension_filter_test")
 
 def configureNrdBridge = tasks.register("configureNrdBridge", Exec) {
 	group = "build"
@@ -818,9 +820,18 @@ def buildNrdBridge = tasks.register("buildNrdBridge", Exec) {
 	onlyIf { nrdPlatform != null }
 	dependsOn(configureNrdBridge)
 	inputs.files(fileTree(nrdBridgeSourceDir) { include "CMakeLists.txt", "*.cpp", "*.h" })
-	outputs.file(nrdLocalOutput)
+	outputs.files(nrdLocalOutput, nrdExtensionFilterTestOutput)
 	commandLine "cmake", "--build", nrdBridgeBuildDir.absolutePath,
-			"--config", "Release", "--target", "nrdbridge", "--parallel"
+			"--config", "Release", "--target", "nrdbridge", "nrdbridge_extension_filter_test", "--parallel"
+}
+
+def testNrdBridge = tasks.register("testNrdBridge", Exec) {
+	group = "verification"
+	description = "Runs native NRD bridge contract tests."
+	onlyIf { nrdPlatform != null }
+	dependsOn(buildNrdBridge)
+	commandLine "ctest", "--test-dir", nrdBridgeBuildDir.absolutePath,
+			"--build-config", "Release", "--output-on-failure"
 }
 
 def bundleNrdNatives = tasks.register("bundleNrdNatives") {
@@ -862,7 +873,7 @@ tasks.withType(Test).configureEach {
 }
 
 tasks.named("check").configure {
-	dependsOn(testStreamlineBridge, testPackagedStreamlineBridge)
+	dependsOn(testStreamlineBridge, testPackagedStreamlineBridge, testNrdBridge)
 }
 
 tasks.withType(JavaCompile).configureEach {

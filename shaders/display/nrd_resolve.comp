@@ -10,13 +10,26 @@ layout(binding = 5, set = 0, rgba16f) uniform readonly image2D diffuseAlbedoImag
 layout(binding = 6, set = 0, rgba16f) uniform readonly image2D specularAlbedoImage;
 layout(binding = 7, set = 0, rgba16f) uniform readonly image2D viewDirectionImage;
 layout(binding = 8, set = 0, rgba16f) uniform writeonly image2D outputImage;
+layout(binding = 9, set = 0, r32f) uniform readonly image2D viewZImage;
+layout(binding = 10, set = 0, rgba16f) uniform readonly image2D noisyInputImage;
 
 layout(push_constant) uniform Push {
     uint width;
     uint height;
     uint family; // 0 REBLUR, 1 RELAX
     uint sphericalHarmonics;
+    float denoisingRange;
+    uint forceRaw;
 } pc;
+
+bool invalid(vec3 value) {
+    return any(isnan(value)) || any(isinf(value));
+}
+
+vec3 sanitizedNoisy(ivec2 pixel) {
+    vec3 noisy = imageLoad(noisyInputImage, pixel).rgb;
+    return invalid(noisy) ? vec3(0.0) : clamp(noisy, vec3(0.0), vec3(65504.0));
+}
 
 vec3 ycocgToLinear(vec3 value) {
     float t = value.x - value.z;
@@ -37,6 +50,19 @@ vec3 resolveSh(vec4 sh0, vec3 sh1, vec3 direction) {
 void main() {
     ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
     if (pixel.x >= int(pc.width) || pixel.y >= int(pc.height)) return;
+    // Failed native evaluation leaves frontend signal encodings in the input images. They are not the
+    // backend format (notably RELAX_SH RGB input versus YCoCg output), so fallback is an explicit raw copy.
+    if (pc.forceRaw != 0u) {
+        imageStore(outputImage, pixel, vec4(sanitizedNoisy(pixel), 1.0));
+        return;
+    }
+    float viewZ = imageLoad(viewZImage, pixel).x;
+    // NRD intentionally leaves sky/out-of-range outputs unwritten. The raw path trace is the authoritative
+    // scene-linear sky and prevents undefined FP16 contents from becoming purple flashes or edge halos.
+    if (!(viewZ < pc.denoisingRange)) {
+        imageStore(outputImage, pixel, vec4(sanitizedNoisy(pixel), 1.0));
+        return;
+    }
     vec4 diffuseSh0 = imageLoad(diffuseSh0Image, pixel);
     vec4 specularSh0 = imageLoad(specularSh0Image, pixel);
     vec3 diffuse;
@@ -44,7 +70,9 @@ void main() {
     if (pc.sphericalHarmonics == 0u) {
         diffuse = pc.family == 0u ? ycocgToLinear(diffuseSh0.xyz) : max(diffuseSh0.xyz, vec3(0.0));
         specular = pc.family == 0u ? ycocgToLinear(specularSh0.xyz) : max(specularSh0.xyz, vec3(0.0));
-    } else if (pc.family == 0u) {
+    } else {
+        // Both REBLUR_SH and RELAX_SH expose NRD's backend SG/SH layout here: SH0 is
+        // {Y, Co, Cg, hit distance} and SH1 is directional Y, even though RELAX's frontend input SH0 is RGB.
         vec3 normal = normalize(imageLoad(normalRoughnessImage, pixel).xyz);
         vec4 viewRoughness = imageLoad(viewDirectionImage, pixel);
         vec3 viewDirection = normalize(viewRoughness.xyz);
@@ -54,12 +82,12 @@ void main() {
         vec3 dominantDirection = normalize(mix(normal, reflect(-viewDirection, normal), dominantFactor));
         diffuse = resolveSh(diffuseSh0, imageLoad(diffuseSh1Image, pixel).xyz, normal);
         specular = resolveSh(specularSh0, imageLoad(specularSh1Image, pixel).xyz, dominantDirection);
-    } else {
-        // RELAX SH0 retains linear RGB; SH1 still participates in NRD's directional temporal/spatial filters.
-        diffuse = max(diffuseSh0.xyz, vec3(0.0));
-        specular = max(specularSh0.xyz, vec3(0.0));
     }
     vec3 diffuseAlbedo = max(imageLoad(diffuseAlbedoImage, pixel).rgb, vec3(0.0));
     vec3 specularAlbedo = max(imageLoad(specularAlbedoImage, pixel).rgb, vec3(0.0));
-    imageStore(outputImage, pixel, vec4(diffuse * diffuseAlbedo + specular * specularAlbedo, 1.0));
+    vec3 resolved = diffuse * diffuseAlbedo + specular * specularAlbedo;
+    // Reject non-finite native output before it can poison the display/upscale pass or temporal feedback.
+    resolved = invalid(resolved)
+            ? sanitizedNoisy(pixel) : clamp(resolved, vec3(0.0), vec3(65504.0));
+    imageStore(outputImage, pixel, vec4(resolved, 1.0));
 }

@@ -17,6 +17,9 @@ NVIDIA, force DLSS-RR, or turn reconstruction off globally.
 NRD receives native Vulkan handles through a small FFM/C bridge and records NRI/NRD compute dispatches
 into Caustica's existing graphics command buffer. The bridge enables neither NVAPI nor AMD AGS and links
 no CUDA or NGX component. It uses the official NRD NRI integration layer with SPIR-V shaders.
+Because NRD is compute-only, the bridge filters Caustica's ray-tracing/OMM/invocation-reorder extension
+names from the private NRI wrapper's metadata. The real Vulkan device and its enabled extensions are not
+changed; this prevents NRI from resolving optional ray-tracing entry points that NRD never calls.
 
 The device bring-up no longer requires NV/EXT Shader Execution Reordering. AMD and other no-SER devices
 select baseline live, offline, and SHaRC shader binaries built with standard Vulkan `TraceRay`; SER-capable
@@ -40,16 +43,16 @@ linear RGB. A bridge failure decodes the current noisy input instead of presenti
 Sub-native NRD modes can use a feature-gated HDR bicubic/contrast-adaptive compute upscaler with live
 sharpness, or explicit linear/nearest alternatives. Native mode creates and dispatches no upscale pipeline.
 
-Advanced Optical Transport is reconstruction-global. Its separate shader variant tracks a bounded nested
-water/glass/ice medium stack and distance-based solid absorption on NRD as well as DLSS-RR. DLSS-RR adds an
-exact deterministic first-interface split and submits final color, color-before-transparency, premultiplied
-reflection, and opacity through the official Streamline tags. Disabled mode selects the compact shader and
-allocates no layer images. Animated water continues to reject history because the renderer does not yet have
-an exact previous-time refracted correspondence.
+Standard DLSS-RR is explicitly refraction-priority: the first visible water/glass/ice interface spends its
+single continuation on transmission (reflection is retained only for TIR), and the complete ordinary guide
+tuple follows that same refracted destination. The transmitted view is intentionally full-weight because no
+separately reconstructed reflected owner exists; multiplying by `(1-F)` alone would blacken grazing water.
+Advanced Optical Transport remains visible but unavailable until a backend can reconstruct both owners. It
+selects no alternate shader and allocates no layer images.
 
 ## Live menu surface
 
-The Reconstruction tab exposes backend, Advanced Optical Transport, REBLUR/RELAX, directional SH/SG,
+The Reconstruction tab exposes backend, the unavailable Advanced Optical Transport runway, REBLUR/RELAX, directional SH/SG,
 native/quality/balanced/performance/custom render scales, edge-adaptive/linear/nearest upscale filters,
 upscale sharpness, anti-firefly, antilag, main/fast history, history-fix frames/stride, prepass and blur
 radii, lobe/roughness/plane rejection, disocclusion threshold, REBLUR hit-distance A/B/C, RELAX A-Trous
