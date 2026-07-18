@@ -741,6 +741,9 @@ public final class RtAccel {
             VkAccelerationStructureDeviceAddressInfoKHR addrInfo = VkAccelerationStructureDeviceAddressInfoKHR.calloc(stack)
                     .sType$Default().accelerationStructure(handle);
             long deviceAddress = vkGetAccelerationStructureDeviceAddressKHR(vk, addrInfo);
+            if (deviceAddress == 0L) {
+                throw new IllegalStateException(label + " returned a null BLAS device address");
+            }
             return new RtAccel(vk, handle, deviceAddress, backing, ownsBacking, opacityMicromap);
         } catch (Throwable t) {
             vkDestroyAccelerationStructureKHR(vk, handle, null);
@@ -1011,6 +1014,10 @@ public final class RtAccel {
         final int facingCullDisable = 0x00000001;
         for (int i = 0, count = instances.size(); i < count; i++) {
             Instance instance = instances.get(i);
+            if (instance.blasDeviceAddress() == 0L) {
+                throw new IllegalStateException("TLAS instance " + (firstInstance + i)
+                        + " has a null BLAS device address");
+            }
             long dst = mapped + (long) (firstInstance + i) * VkAccelerationStructureInstanceKHR.SIZEOF;
             float[] transform = instance.transform3x4();
             for (int component = 0; component < 12; component++) {
