@@ -28,6 +28,7 @@ import dev.comfyfluffy.caustica.rt.RtContext;
 import dev.comfyfluffy.caustica.rt.RtDebugLabels;
 
 import java.util.List;
+import java.util.concurrent.ConcurrentHashMap;
 
 import static org.lwjgl.vulkan.EXTOpacityMicromap.VK_ACCESS_2_MICROMAP_READ_BIT_EXT;
 import static org.lwjgl.vulkan.EXTOpacityMicromap.VK_ACCESS_2_MICROMAP_WRITE_BIT_EXT;
@@ -76,6 +77,7 @@ import static org.lwjgl.vulkan.KHRSynchronization2.vkCmdPipelineBarrier2KHR;
  * factories; free with {@link #destroy()}. One BLAS per section; one TLAS rebuilt per frame.
  */
 public final class RtAccel {
+    private static final ConcurrentHashMap<Long, RtAccel> LIVE_BY_ADDRESS = new ConcurrentHashMap<>();
     // vkCmdBuildMicromapsEXT requires both data.deviceAddress and triangleArray.deviceAddress to be
     // multiples of 256 (VUID-vkCmdBuildMicromapsEXT-pInfos-07515).
     private static final long MICROMAP_INPUT_ADDRESS_ALIGNMENT = 256L;
@@ -122,6 +124,11 @@ public final class RtAccel {
         this.backing = backing;
         this.ownsBacking = ownsBacking;
         this.opacityMicromap = opacityMicromap;
+        RtAccel collision = LIVE_BY_ADDRESS.putIfAbsent(deviceAddress, this);
+        if (collision != null) {
+            throw new IllegalStateException("Duplicate live acceleration structure address 0x"
+                    + Long.toHexString(deviceAddress));
+        }
     }
 
     public void destroy() {
@@ -129,6 +136,7 @@ public final class RtAccel {
             return;
         }
         if (handle != 0L) {
+            LIVE_BY_ADDRESS.remove(deviceAddress, this);
             vkDestroyAccelerationStructureKHR(vk, handle, null);
         }
         if (opacityMicromap != null) {
@@ -1033,6 +1041,11 @@ public final class RtAccel {
             if (instance.blasDeviceAddress() == 0L) {
                 throw new IllegalStateException("TLAS instance " + (firstInstance + i)
                         + " has a null BLAS device address");
+            }
+            if (!LIVE_BY_ADDRESS.containsKey(instance.blasDeviceAddress())) {
+                throw new IllegalStateException("TLAS instance " + (firstInstance + i)
+                        + " references a non-live BLAS address 0x"
+                        + Long.toHexString(instance.blasDeviceAddress()));
             }
             long dst = mapped + (long) (firstInstance + i) * VkAccelerationStructureInstanceKHR.SIZEOF;
             float[] transform = instance.transform3x4();
