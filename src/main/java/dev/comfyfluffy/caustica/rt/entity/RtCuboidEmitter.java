@@ -19,8 +19,6 @@ import org.joml.Vector3fc;
 /** Exact direct traversal for vanilla {@link ModelPart.Cube} geometry. */
 final class RtCuboidEmitter {
     private static final int STANDARD_CORNERS = 8;
-    private static final String VERIFIED_EMF_CUBE =
-            "traben.entity_model_features.models.parts.EMFModelPartCustom$EMFCube";
     private static final ClassValue<Boolean> VANILLA_MODEL_CLASS = new ClassValue<>() {
         @Override
         protected Boolean computeValue(Class<?> type) {
@@ -300,8 +298,7 @@ final class RtCuboidEmitter {
         }
 
         static CubeTemplate create(ModelPart.Cube cube) {
-            boolean verifiedEmfCube = VERIFIED_EMF_CUBE.equals(cube.getClass().getName());
-            if (cube.getClass() != ModelPart.Cube.class && !verifiedEmfCube) {
+            if (cube.getClass() != ModelPart.Cube.class) {
                 return null;
             }
             ModelPart.Polygon[] polygons = cube.polygons;
@@ -342,12 +339,6 @@ final class RtCuboidEmitter {
                 }
                 Vector3fc normal = polygon.normal();
                 faces[faceIndex] = new FaceTemplate(corners, u, v, normal.x(), normal.y(), normal.z());
-            }
-            // EMF 3.2.6's EMFCube.compile is bytecode-equivalent to this emitter's generic polygon path:
-            // it consumes the final polygon array, transforms the stored normal and x/16,y/16,z/16 vertices,
-            // then forwards the same UV and submission state. Keep it generic so no topology assumption is added.
-            if (verifiedEmfCube) {
-                return new CubeTemplate(cube);
             }
             if (overflow || cornerCount != STANDARD_CORNERS) {
                 return new CubeTemplate(cube);
