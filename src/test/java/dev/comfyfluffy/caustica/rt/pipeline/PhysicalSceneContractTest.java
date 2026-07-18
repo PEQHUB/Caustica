@@ -34,6 +34,7 @@ final class PhysicalSceneContractTest {
         assertTrue(miss.contains("pc.environmentSky.xyz"));
         assertTrue(miss.contains("float solarDisc"));
         assertTrue(miss.contains("SUN_LIMB_DARKENING = 0.6"));
+        assertTrue(miss.contains("SUN_DISC_AVG_LUMINANCE = 192.0"));
         assertTrue(miss.contains("1.0 - SUN_LIMB_DARKENING / 3.0"));
         assertFalse(miss.contains("MOON_DISC_HALF_ANGLE"));
         assertFalse(miss.contains("sunIsNeeLight ? max(pc.lightDir.w"));
@@ -54,9 +55,11 @@ final class PhysicalSceneContractTest {
         String bridge = Files.readString(Path.of(
                 "src/main/java/dev/comfyfluffy/caustica/client/CausticaDebugBridge.java"));
         assertTrue(composite.contains("lunarIlluminanceLux(moonMultiplier, litFraction"));
-        assertTrue(composite.contains("AstronomicalSky.lunarDiscHorizonVisibility(moonY, moonAngularRadius)"));
+        assertTrue(composite.contains("AstronomicalSky.lunarDiscHorizonVisibility(moonY, moonLightAngularRadius)"));
         assertTrue(composite.contains("return 0.25f * moonMultiplier"));
-        assertTrue(composite.contains("lightRadius = moonAngularRadius"));
+        assertTrue(composite.contains("lightRadius = sunLightAngularRadius"));
+        assertTrue(composite.contains("lightRadius = moonLightAngularRadius"));
+        assertTrue(composite.contains("new Float4(sunAngularRadius, moonAngularRadius"));
         for (String property : new String[] {"moonAltitudeRadians", "moonLitFraction",
                 "moonHorizonVisibility", "moonEffectiveIlluminanceLux"}) {
             assertTrue(bridge.contains("setProperty(\"" + property + "\""), property);

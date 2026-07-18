@@ -32,7 +32,7 @@ final class MirrorPsrShaderContractTest {
         // This explicit offset must match the generated WorldPushData serializer. A prior 428-byte
         // annotation made every runtime setting read the four-byte padding lane and clamp to depth 1.
         assertTrue(common.contains("[vk::offset(424)] public uint     psrMaxMirrors"));
-        assertTrue(config.contains("\"composite.psr-max-mirrors\", 3, 1, 32"));
+        assertTrue(config.contains("\"composite.psr-max-mirrors\", 32, 1, 32"));
         assertTrue(options.contains("new OptionInstance.IntRange(1, 32)"));
     }
 

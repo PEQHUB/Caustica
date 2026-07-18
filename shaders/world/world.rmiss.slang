@@ -23,7 +23,10 @@ float pow2(float x) { return x * x; }
 // Near-white top-of-atmosphere disc radiances: the visible warm/red tint comes from multiplying by
 // transmittanceToSpace(dir) at draw time — at noon the sun reads warm-white, at the horizon it reddens
 // on exactly the sky's own sunset curve.
-static const float SUN_DISC_AVG_LUMINANCE = 24.0;
+// Presentation-only solar radiance. Direct illumination remains calibrated independently in RtComposite;
+// this higher disc radiance supplies the retinal glare/bloom expected from looking at the sun without
+// lifting terrain exposure or multiplying sunlight energy.
+static const float SUN_DISC_AVG_LUMINANCE = 192.0;
 // Full-moon scene radiance before the user multiplier. This keeps the visible sprite in the same
 // calibrated domain as transported moonlight instead of turning it into a giant white lamp.
 static const float MOON_DISC_BASE_LUMINANCE = 0.000244140625; // 0.25 * 2^-10

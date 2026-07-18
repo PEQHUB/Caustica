@@ -718,7 +718,7 @@ public final class CausticaConfig {
             public static final IntSetting DEBUG_VIEW = intValue("caustica.rt.debugView", "composite.debug-view", 0);
             public static final IntSetting SPP = intAtLeast("caustica.rt.spp", "composite.spp", 1, 1);
             public static final IntSetting MAX_BOUNCES =
-                    clampedInt("caustica.rt.maxBounces", "composite.max-bounces", 4, 2, 8);
+                    clampedInt("caustica.rt.maxBounces", "composite.max-bounces", 8, 2, 8);
             public static final BooleanSetting WATER_WAVES =
                     bool("caustica.rt.waterWaves", "composite.water-waves", true);
             public static final FloatSetting TORCH_EMISSION_MULTIPLIER = clampedFloat(
@@ -728,20 +728,20 @@ public final class CausticaConfig {
             public static final FloatSetting SUNLIGHT_INTENSITY_EV = clampedFloat(
                     "caustica.rt.sunlightIntensityEv", "composite.sunlight-intensity-ev", 0.0f, -4.0f, 4.0f);
             public static final FloatSetting MOONLIGHT_INTENSITY_EV = clampedFloat(
-                    "caustica.rt.moonlightIntensityEv", "composite.moonlight-intensity-ev", 0.0f, -4.0f, 8.0f);
+                    "caustica.rt.moonlightIntensityEv", "composite.moonlight-intensity-ev", 6.0f, -4.0f, 8.0f);
             public static final FloatSetting NIGHT_AIRGLOW_EV = clampedFloat(
-                    "caustica.rt.nightAirglowEv", "composite.night-airglow-ev", 0.0f, -8.0f, 8.0f);
+                    "caustica.rt.nightAirglowEv", "composite.night-airglow-ev", 2.9925926f, -8.0f, 8.0f);
             public static final FloatSetting ASTRONOMICAL_LATITUDE_DEG = clampedFloat(
                     "caustica.rt.astronomicalLatitudeDeg", "composite.astronomical-latitude-deg",
                     40.0f, -90.0f, 90.0f);
             public static final IntSetting DAY_OF_YEAR_OFFSET = clampedInt(
-                    "caustica.rt.dayOfYearOffset", "composite.day-of-year-offset", 79, 0, 364);
+                    "caustica.rt.dayOfYearOffset", "composite.day-of-year-offset", 0, 0, 364);
             public static final IntSetting PSR_MAX_MIRRORS = clampedInt(
-                    "caustica.rt.psrMaxMirrors", "composite.psr-max-mirrors", 3, 1, 32);
+                    "caustica.rt.psrMaxMirrors", "composite.psr-max-mirrors", 32, 1, 32);
             public static final FloatSetting SUN_ANGULAR_RADIUS =
-                    radians("caustica.rt.sunAngularRadius", "composite.sun-angular-radius-deg", 0.2666f);
+                    radians("caustica.rt.sunAngularRadius", "composite.sun-angular-radius-deg", 1.5f);
             public static final FloatSetting MOON_ANGULAR_RADIUS =
-                    radians("caustica.rt.moonAngularRadius", "composite.moon-angular-radius-deg", 0.2727f);
+                    radians("caustica.rt.moonAngularRadius", "composite.moon-angular-radius-deg", 3.0f);
             public static final FloatSetting JITTER_SIGN_X =
                     finiteFloat("caustica.rt.jitterSignX", "composite.jitter-sign-x", 1.0f);
             public static final FloatSetting JITTER_SIGN_Y =
@@ -759,7 +759,7 @@ public final class CausticaConfig {
             public static final IntSetting COMPLETION_RESULTS_PER_PASS =
                     intAtLeast("caustica.rt.sectionResultsPerTick", "terrain.section-results-per-tick", 64, 0);
             public static final IntSetting MAX_INFLIGHT_SECTIONS =
-                    intAtLeast("caustica.rt.maxInflightSections", "terrain.max-inflight-sections", 128, 0);
+                    intAtLeast("caustica.rt.maxInflightSections", "terrain.max-inflight-sections", 192, 0);
             public static final IntSetting SECTION_TABLE_INITIAL_CAPACITY =
                     intAtLeast("caustica.rt.sectionTableInitialCapacity", "terrain.section-table-initial-capacity", 512, 1);
             public static final IntSetting REBASE_DISTANCE_BLOCKS =
@@ -967,14 +967,14 @@ public final class CausticaConfig {
             public static final StringSetting MODE =
                     string("caustica.rt.exposure.mode", "exposure.mode", "auto", Exposure::sanitizeMode);
             public static final FloatSetting MANUAL_EXPOSURE_EV =
-                    finiteFloat("caustica.rt.exposure.manualExposureEv", "exposure.manual-exposure-ev", 0.0f);
+                    finiteFloat("caustica.rt.exposure.manualExposureEv", "exposure.manual-exposure-ev", 5.027523f);
             public static final FloatSetting COMPENSATION_EV = clampedFloat(
                     "caustica.rt.exposure.compensationEv", "exposure.compensation-ev", 0.0f, -4.0f, 4.0f);
             public static final FloatSetting KEY = exposureScale("caustica.rt.exposure.key", "exposure.key", 0.18f);
             public static final FloatSetting MIN_EV =
                     finiteFloat("caustica.rt.exposure.minEv", "exposure.min-ev", -20.0f);
             public static final FloatSetting MAX_EV =
-                    clampedFloat("caustica.rt.exposure.maxEv", "exposure.max-ev", 12.0f, 0.0f, 12.0f);
+                    clampedFloat("caustica.rt.exposure.maxEv", "exposure.max-ev", 5.7297297f, 0.0f, 12.0f);
             public static final FloatSetting ADAPT_UP =
                     clampedFloat("caustica.rt.exposure.adaptUp", "exposure.adapt-up", 3.0f, 0.05f, 20.0f);
             public static final FloatSetting ADAPT_DOWN =
@@ -986,7 +986,7 @@ public final class CausticaConfig {
             public static final FloatSetting HIGHLIGHT_PERCENTILE = clampedFloat(
                     "caustica.rt.exposure.highlightPercentile", "exposure.highlight-percentile", 0.998f, 0.5f, 1.0f);
             public static final FloatSetting HIGHLIGHT_HEADROOM = clampedFloat(
-                    "caustica.rt.exposure.highlightHeadroom", "exposure.highlight-headroom", 8.0f, 0.18f, 64.0f);
+                    "caustica.rt.exposure.highlightHeadroom", "exposure.highlight-headroom", 1.995413f, 0.18f, 64.0f);
             public static final FloatSetting CENTER_WEIGHT = clampedFloat(
                     "caustica.rt.exposure.centerWeight", "exposure.center-weight", 3.0f, 0.0f, 8.0f);
             public static final FloatSetting LOG_MIN = clampedFloat(
@@ -1128,7 +1128,7 @@ public final class CausticaConfig {
                     clampedFloat("caustica.rt.sdr.psychov.peak", "sdr.psychov.peak", 1.0f, 0.5f, 8.0f);
             public static final FloatSetting PSYCHOV23_PEAK =
                     clampedFloat("caustica.rt.sdr.psychov23.peak", "sdr.psychov23.peak",
-                            1000.0f / 203.0f, 0.5f, 64.0f);
+                            4.0f, 0.5f, 64.0f);
 
             private Sdr() {
             }
@@ -1278,7 +1278,7 @@ public final class CausticaConfig {
             public static final int TONEMAP_ID_PSYCHOV = 2;
             public static final int TONEMAP_ID_PSYCHOV23 = 3;
 
-            public static final BooleanSetting ENABLED = bool("caustica.rt.hdr", "hdr.enabled", true);
+            public static final BooleanSetting ENABLED = bool("caustica.rt.hdr", "hdr.enabled", false);
             public static final StringSetting TONEMAP_MODE =
                     string("caustica.rt.hdr.tonemapMode", "hdr.tonemap-mode", TONEMAP_PSYCHOV23, Hdr::sanitizeTonemapMode);
             public static final FloatSetting PAPER_WHITE_NITS =

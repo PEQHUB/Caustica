@@ -2017,8 +2017,12 @@ public final class RtComposite {
         float sunlightEv = CausticaConfig.Rt.Composite.SUNLIGHT_INTENSITY_EV.value();
         float moonlightEv = CausticaConfig.Rt.Composite.MOONLIGHT_INTENSITY_EV.value();
         float airglowEv = CausticaConfig.Rt.Composite.NIGHT_AIRGLOW_EV.value();
+        // Presentation sizes are deliberately independent of the finite direct-light sources. Large,
+        // readable celestial sprites must not soften shadows or change transported scene illumination.
         float sunAngularRadius = CausticaConfig.Rt.Composite.SUN_ANGULAR_RADIUS.value();
         float moonAngularRadius = CausticaConfig.Rt.Composite.MOON_ANGULAR_RADIUS.value();
+        float sunLightAngularRadius = (float)Math.toRadians(0.2666);
+        float moonLightAngularRadius = (float)Math.toRadians(0.2727);
         handleSkyDiscontinuity(sunX, sunY, sunZ, ambientEv, sunlightEv, moonlightEv, airglowEv,
                 sunAngularRadius, moonAngularRadius);
         int fallbackSky = (packedSky & 0x00ffffff) != 0
@@ -2040,7 +2044,7 @@ public final class RtComposite {
         float sunMultiplier = (float)Math.pow(2.0, sunlightEv);
         float moonMultiplier = (float)Math.pow(2.0, moonlightEv);
         float airglowMultiplier = (float)Math.pow(2.0, airglowEv);
-        float moonHorizonVisibility = AstronomicalSky.lunarDiscHorizonVisibility(moonY, moonAngularRadius);
+        float moonHorizonVisibility = AstronomicalSky.lunarDiscHorizonVisibility(moonY, moonLightAngularRadius);
         float sunPeak = 120_000.0f * sceneScale * sunMultiplier * dayFactor * rainBrightness;
         float moonTransmittanceLuma = 0.2627f * moonTrans[0] + 0.6780f * moonTrans[1] + 0.0593f * moonTrans[2];
         float moonTopOfAtmosphereLux = lunarIlluminanceLux(moonMultiplier, litFraction,
@@ -2054,11 +2058,11 @@ public final class RtComposite {
         if (sunLuma >= moonLuma) {
             lx = sunX; ly = sunY; lz = sunZ;
             rr = sunPeak * sunTrans[0]; rg = sunPeak * sunTrans[1]; rb = sunPeak * sunTrans[2];
-            lightRadius = sunAngularRadius;
+            lightRadius = sunLightAngularRadius;
         } else {
             lx = moonX; ly = moonY; lz = moonZ;
             rr = moonPeak * moonTrans[0]; rg = moonPeak * moonTrans[1]; rb = moonPeak * moonTrans[2];
-            lightRadius = moonAngularRadius;
+            lightRadius = moonLightAngularRadius;
         }
         if (!earthAtmosphere) {
             dayFactor = twilightFactor = solarEnvelope = 0.0f;
