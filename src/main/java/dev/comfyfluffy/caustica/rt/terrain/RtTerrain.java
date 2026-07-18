@@ -1064,7 +1064,11 @@ public final class RtTerrain {
                         completeTask(task, prepared, build, null);
                         return;
                     }
-                    submitTerrainCompaction(ctx, task, prepared, build);
+                    // The immutable source BLAS is already complete and traceable. Publish it directly;
+                    // the optional compact-size query/copy phase has produced repeatable device loss on
+                    // the current NVIDIA driver while startup terrain builds overlap graphics work.
+                    prepared.releaseBuildInputs();
+                    completeTask(task, prepared, build, null);
                 });
     }
 
