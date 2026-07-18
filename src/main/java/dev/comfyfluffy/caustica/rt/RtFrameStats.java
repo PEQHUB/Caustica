@@ -54,6 +54,7 @@ public final class RtFrameStats {
                     "entity.capture.rigidReuse.equal",
                     "entity.capture.rigidReuse.yaw",
                     "entity.capture.rigidReuse.shade",
+                    "entity.capture.append.pack",
                     "entity.capture.append.alloc",
                     "entity.capture.append.copy",
                     "entity.capture.append.blas",

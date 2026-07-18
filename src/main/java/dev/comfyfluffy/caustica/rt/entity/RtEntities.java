@@ -1239,7 +1239,7 @@ public final class RtEntities {
         int asInput = org.lwjgl.vulkan.KHRAccelerationStructure.VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
         int storage = org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
         int vertCount = capture.verts.size() / 3;
-        RtEntityCapture.PackedGeometry packed = capture.packGeometry();
+        RtEntityCapture.PackedGeometry packed = packCaptureGeometry();
         int idxCount = packed.indices().size();
         EntityGeometryLayout layout = EntityGeometryLayout.create(capture.verts.size(), idxCount,
                 capture.uvList.size(), packed.primitives().size());
@@ -1571,7 +1571,7 @@ public final class RtEntities {
         int asInput = org.lwjgl.vulkan.KHRAccelerationStructure.VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
         int storage = org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
         int vertCount = capture.verts.size() / 3;
-        RtEntityCapture.PackedGeometry packed = capture.packGeometry();
+        RtEntityCapture.PackedGeometry packed = packCaptureGeometry();
         int idxCount = packed.indices().size();
         EntityGeometryLayout layout = EntityGeometryLayout.create(capture.verts.size(), idxCount,
                 capture.uvList.size(), packed.primitives().size());
@@ -1607,13 +1607,22 @@ public final class RtEntities {
         build.count++;
     }
 
+    private RtEntityCapture.PackedGeometry packCaptureGeometry() {
+        long started = RtFrameStats.FRAME.startStage();
+        try {
+            return capture.packGeometry();
+        } finally {
+            RtFrameStats.FRAME.endStage("entity.capture.append.pack", started);
+        }
+    }
+
     /** Pack one changed entity's four logical geometry regions into its retired ring slot's backing. */
     private void appendPackedEntity(RtContext ctx, FrameBuild build, Motion motion, long entityId,
                                     int instanceBit, int mask, float[] instanceTransform) {
         int asInput = org.lwjgl.vulkan.KHRAccelerationStructure.VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
         int storage = org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
         int vertCount = capture.verts.size() / 3;
-        RtEntityCapture.PackedGeometry packed = capture.packGeometry();
+        RtEntityCapture.PackedGeometry packed = packCaptureGeometry();
         int idxCount = packed.indices().size();
         EntityGeometryLayout layout = EntityGeometryLayout.create(capture.verts.size(), idxCount,
                 capture.uvList.size(), packed.primitives().size());
