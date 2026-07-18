@@ -7,6 +7,7 @@ import dev.comfyfluffy.caustica.CausticaConfig.IntSetting;
 import dev.comfyfluffy.caustica.CausticaConfig.StringSetting;
 import dev.comfyfluffy.caustica.client.ui.CausticaWidgets;
 import dev.comfyfluffy.caustica.client.ui.CausticaWidgets.ActionButton;
+import dev.comfyfluffy.caustica.client.ui.CausticaWidgets.BundleHeader;
 import dev.comfyfluffy.caustica.client.ui.CausticaWidgets.Dropdown;
 import dev.comfyfluffy.caustica.client.ui.CausticaWidgets.InfoStrip;
 import dev.comfyfluffy.caustica.client.ui.CausticaWidgets.LabeledControl;
@@ -415,7 +416,10 @@ public class CausticaSettingsScreen extends Screen {
                 CausticaConfig.Rt.Fg.UI_RECOMPOSITION));
         controls.add(toggle(Component.translatable("caustica.options.rt.fg.fullscreenMenu"),
                 CausticaConfig.Rt.Fg.FULLSCREEN_MENU_DETECTION));
-        addGrid(controls);
+        addBundle("Display format", "HDR output and restart-sensitive presentation state");
+        addGrid(controls.subList(0, 1));
+        addBundle("Frame generation & response", "Generated frames, latency response, and UI handling");
+        addGrid(controls.subList(1, controls.size()));
         addInfo(() -> CausticaConfig.Rt.Hdr.pendingRestart()
                 ? Component.translatable("caustica.options.rt.hdr.restartRequired")
                 : Component.literal("Output changes save automatically"));
@@ -433,8 +437,10 @@ public class CausticaSettingsScreen extends Screen {
                 CausticaConfig.Rt.DlssRr.QUALITY::configuredValue, CausticaConfig.Rt.DlssRr.QUALITY::set,
                 value -> Component.translatable("caustica.options.rt.dlssQuality." + value), null)
                 .activeWhen(CausticaConfig.Rt.DlssRr.ENABLED::configuredValue));
-        controls = ordered(controls, 0, 2, 1);
-        addGrid(controls);
+        addBundle("Ray reconstruction", "Enablement and output quality");
+        addGrid(List.of(controls.get(0), controls.get(2)));
+        addBundle("Guide inputs", "Scene-linear signals that stabilize reconstructed lighting");
+        addGrid(List.of(controls.get(1)));
     }
 
     private void addLighting() {
@@ -486,8 +492,12 @@ public class CausticaSettingsScreen extends Screen {
                 .tooltip(Component.translatable("caustica.options.rt.torchIntensity.tooltip"))
                 .resetOnShift(() -> CausticaConfig.Rt.Composite.TORCH_EMISSION_MULTIPLIER.set(
                         CausticaConfig.Rt.Composite.TORCH_EMISSION_MULTIPLIER.defaultValue())));
-        controls = ordered(controls, 0, 6, 1, 7, 2, 3, 8, 4, 5);
-        addGrid(controls);
+        addBundle("Light energy", "Primary illumination and environmental fill");
+        addGrid(controls.subList(0, 4));
+        addBundle("Celestial placement", "Sky orientation and apparent disc size");
+        addGrid(controls.subList(4, 8));
+        addBundle("Emissive materials", "Intensity applied to texture-authored emissive surfaces");
+        addGrid(controls.subList(8, 9));
     }
 
     private void addGeometry() {
@@ -507,7 +517,12 @@ public class CausticaSettingsScreen extends Screen {
         controls.add(intSlider(Component.translatable("caustica.options.rt.psrMirrorDepth"),
                 CausticaConfig.Rt.Composite.PSR_MAX_MIRRORS, 1, 32,
                 value -> String.format(Locale.ROOT, "%.0f", value)));
-        addGrid(controls);
+        addBundle("Path tracer", "Core renderer enablement, sampling, and path depth");
+        addGrid(controls.subList(0, 3));
+        addBundle("Scene participation", "World objects included in ray-traced transport");
+        addGrid(controls.subList(3, 5));
+        addBundle("Surface effects", "Water motion and planar reflection depth");
+        addGrid(controls.subList(5, 7));
     }
 
     private void addSharc() {
@@ -564,7 +579,14 @@ public class CausticaSettingsScreen extends Screen {
         controls.add(toggle(Component.translatable("caustica.options.rt.sharcDetailedStats"),
                 CausticaConfig.Rt.Sharc.DETAILED_STATS)
                 .tooltip(Component.translatable("caustica.options.rt.sharcDetailedStats.tooltip")));
-        addGrid(controls);
+        addBundle("Cache foundation", "Enablement, capacity, and world-to-cache scaling");
+        addGrid(controls.subList(0, 4));
+        addBundle("Update cadence", "Accumulation lifetime and bounded update work");
+        addGrid(controls.subList(4, 9));
+        addBundle("Transport policy", "Where cached radiance participates in path transport");
+        addGrid(controls.subList(9, 13));
+        addBundle("Telemetry & maintenance", "Detailed counters, cache state, and recovery actions");
+        addGrid(controls.subList(13, 14));
 
         addInfo(this::sharcStatusText);
         addGrid(List.of(
@@ -674,7 +696,16 @@ public class CausticaSettingsScreen extends Screen {
                 CausticaConfig.Rt.Hdr.PEAK_NITS, 80, 10000,
                 value -> String.format(Locale.ROOT, "%.0f nits", value))
                 .activeWhen(CausticaConfig.Rt.Hdr.ENABLED::configuredValue));
-        addGrid(controls);
+        addBundle("Exposure intent", "Mode, artistic offset, and the middle-gray target");
+        addGrid(controls.subList(0, 4));
+        addBundle("Metering & highlight protection", "Scene samples that steer automatic exposure");
+        addGrid(List.of(controls.get(4), controls.get(5), controls.get(6), controls.get(7), controls.get(12)));
+        addBundle("Adaptation range", "Response speed and the permitted exposure envelope");
+        addGrid(controls.subList(8, 12));
+        addBundle("Histogram bounds", "Luminance window used by the exposure meter");
+        addGrid(controls.subList(13, 15));
+        addBundle("Output curves", "SDR/HDR mapping and target display brightness");
+        addGrid(controls.subList(15, 19));
 
         addInfo(() -> Component.literal(String.format(Locale.ROOT,
                 "Exposure  actual %+.2f EV  |  target %+.2f EV  |  confidence %.0f%%  |  trusted %.1f%%  |  ceiling %+.1f EV",
@@ -684,7 +715,10 @@ public class CausticaSettingsScreen extends Screen {
                 RtComposite.INSTANCE.exposureActiveCeilingEv())));
         addInfo(() -> Component.literal("Active curve  \u2022  " + activeToneLabel()));
         List<AbstractWidget> active = toneWidgets(activeToneControls());
-        if (!active.isEmpty()) addGrid(active);
+        if (!active.isEmpty()) {
+            addBundle("Active curve shaping", "Fine controls for the currently selected tone mapper");
+            addGrid(active);
+        }
     }
 
     private void addView() {
@@ -705,7 +739,12 @@ public class CausticaSettingsScreen extends Screen {
                 CausticaConfig.Rt.FirstPerson.VERTICAL_OFFSET, -0.30, 0.30));
         controls.add(offsetSlider(Component.translatable("caustica.options.rt.firstPerson.lateral"),
                 CausticaConfig.Rt.FirstPerson.LATERAL_OFFSET, -0.20, 0.20));
-        addGrid(controls);
+        addBundle("Camera comfort", "Stabilize framing during movement and aiming");
+        addGrid(controls.subList(0, 1));
+        addBundle("First-person body", "Self-visibility and vanilla-model coordination");
+        addGrid(controls.subList(1, 3));
+        addBundle("Body placement", "Fine alignment relative to the camera");
+        addGrid(controls.subList(3, 6));
     }
 
     private void addDiagnostics() {
@@ -719,7 +758,10 @@ public class CausticaSettingsScreen extends Screen {
                 value -> Component.translatable("caustica.options.rt.debugView." + value), null));
         controls.add(new ActionButton(180, () -> Component.literal("Frame Generation diagnostics"),
                 () -> minecraft.setScreenAndShow(new RtFrameGenerationDiagnosticsScreen(this, options)), false));
-        addGrid(controls);
+        addBundle("Runtime telemetry", "Persistent counters for performance inspection");
+        addGrid(controls.subList(0, 1));
+        addBundle("Visual inspection", "Debug outputs and specialized diagnostic surfaces");
+        addGrid(controls.subList(1, 3));
         addInfo(() -> Component.literal("Offline renderer: use the configured capture key while in world"));
     }
 
@@ -767,6 +809,12 @@ public class CausticaSettingsScreen extends Screen {
         searchContext = title + ' ' + subtitle;
         if (collectingSearchResults) return;
         body.addChild(new SectionHeader(contentWidth, Component.literal(title), Component.literal(subtitle)));
+    }
+
+    private void addBundle(String title, String purpose) {
+        searchContext = title + ' ' + purpose;
+        if (collectingSearchResults) return;
+        body.addChild(new BundleHeader(contentWidth, Component.literal(title)));
     }
 
     private void addGrid(List<? extends AbstractWidget> controls) {

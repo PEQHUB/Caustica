@@ -82,6 +82,27 @@ public final class CausticaWidgets {
         }
     }
 
+    /** Compact visual boundary for a related control bundle inside a category. */
+    public static final class BundleHeader extends AbstractWidget {
+        public BundleHeader(int width, Component title) {
+            super(0, 0, width, 18, title);
+            this.active = false;
+        }
+
+        @Override
+        public void extractWidgetRenderState(GuiGraphicsExtractor g, int mouseX, int mouseY, float partialTick) {
+            int y = getY();
+            g.fill(getX(), y + 2, getX() + 3, getBottom() - 2, 0xC0B9D9FF);
+            g.fill(getX() + 3, y + 2, getRight(), getBottom() - 2, 0x26000000);
+            g.text(Minecraft.getInstance().font, getMessage(), getX() + 9, y + 5, TEXT);
+        }
+
+        @Override
+        protected void updateWidgetNarration(NarrationElementOutput output) {
+            output.add(NarratedElementType.TITLE, getMessage());
+        }
+    }
+
     public static final class InfoStrip extends AbstractWidget {
         private final Supplier<Component> text;
 
