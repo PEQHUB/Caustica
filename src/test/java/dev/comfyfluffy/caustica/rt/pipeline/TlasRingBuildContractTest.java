@@ -15,6 +15,8 @@ final class TlasRingBuildContractTest {
                 "src/main/java/dev/comfyfluffy/caustica/rt/RtGpuExecutor.java"));
         String composite = Files.readString(Path.of(
                 "src/main/java/dev/comfyfluffy/caustica/rt/RtComposite.java"));
+        String frameStats = Files.readString(Path.of(
+                "src/main/java/dev/comfyfluffy/caustica/rt/RtFrameStats.java"));
 
         assertTrue(accel.contains("tlas.label + \" build\""));
         assertTrue(!accel.contains("tlas.update"));
@@ -27,5 +29,13 @@ final class TlasRingBuildContractTest {
                 < composite.indexOf("RtAccel.prepareTlas"));
         assertTrue(composite.indexOf("RtAccel.markTlasUsed(frameTlas, graphicsUse)")
                 < composite.indexOf("encoder.execute(cmd)"));
+        assertTrue(frameStats.contains("\"frame.prepareTlas.wait\""));
+        assertTrue(frameStats.contains("\"frame.prepareTlas.packBase\""));
+        assertTrue(frameStats.contains("\"frame.prepareTlas.packDynamic\""));
+        assertTrue(frameStats.contains("\"frame.prepareTlas.flush\""));
+        assertTrue(accel.contains("endStage(\"frame.prepareTlas.wait\""));
+        assertTrue(accel.contains("endStage(\"frame.prepareTlas.packBase\""));
+        assertTrue(accel.contains("endStage(\"frame.prepareTlas.packDynamic\""));
+        assertTrue(accel.contains("endStage(\"frame.prepareTlas.flush\""));
     }
 }

@@ -26,6 +26,7 @@ import org.lwjgl.vulkan.VkQueryPoolCreateInfo;
 
 import dev.comfyfluffy.caustica.rt.RtContext;
 import dev.comfyfluffy.caustica.rt.RtDebugLabels;
+import dev.comfyfluffy.caustica.rt.RtFrameStats;
 
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
@@ -1004,7 +1005,12 @@ public final class RtAccel {
         // Frame age is not GPU completion. Startup can leave more than RING submissions in flight; wait
         // before rewriting this instance buffer, rebuilding its AS, or destroying it during a resize.
         if (slot != null) {
-            ctx.gpuExecutor().waitForGraphicsValue(slot.lastGraphicsUse);
+            long waitStart = RtFrameStats.FRAME.startStage();
+            try {
+                ctx.gpuExecutor().waitForGraphicsValue(slot.lastGraphicsUse);
+            } finally {
+                RtFrameStats.FRAME.endStage("frame.prepareTlas.wait", waitStart);
+            }
         }
         if (slot == null || count > slot.capacity) {
             // Outgrown (or first use). The slot's previous use is RING frames behind — off all queues by
@@ -1016,10 +1022,25 @@ public final class RtAccel {
             ring.slots[ring.cursor] = slot;
         }
         ring.cursor = (ring.cursor + 1) % TlasRing.RING;
-        writeTlasInstances(baseInstances, slot.instanceBuffer.mapped, 0);
-        writeTlasInstances(dynamicInstances, slot.instanceBuffer.mapped, baseCount);
+        long basePackStart = RtFrameStats.FRAME.startStage();
+        try {
+            writeTlasInstances(baseInstances, slot.instanceBuffer.mapped, 0);
+        } finally {
+            RtFrameStats.FRAME.endStage("frame.prepareTlas.packBase", basePackStart);
+        }
+        long dynamicPackStart = RtFrameStats.FRAME.startStage();
+        try {
+            writeTlasInstances(dynamicInstances, slot.instanceBuffer.mapped, baseCount);
+        } finally {
+            RtFrameStats.FRAME.endStage("frame.prepareTlas.packDynamic", dynamicPackStart);
+        }
         if (count > 0) {
-            slot.instanceBuffer.flush(0L, (long) count * VkAccelerationStructureInstanceKHR.SIZEOF);
+            long flushStart = RtFrameStats.FRAME.startStage();
+            try {
+                slot.instanceBuffer.flush(0L, (long) count * VkAccelerationStructureInstanceKHR.SIZEOF);
+            } finally {
+                RtFrameStats.FRAME.endStage("frame.prepareTlas.flush", flushStart);
+            }
         }
         slot.lastGraphicsUse = graphicsUse;
         return new PreparedTlas(slot.accel, slot.instanceBuffer, slot.scratch, count,
