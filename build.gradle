@@ -35,7 +35,6 @@ loom {
 			programArg "VULKAN"
 			// java.lang.foreign restricted methods (FFM bindings to amd_fidelityfx_vk.dll)
 			vmArg "--enable-native-access=ALL-UNNAMED"
-
             // NVIDIA NGX (DLSS) allocates ~1MB on the stack during init, which overflows Java's default 1MB thread stack.
             // pass -Xss here directly so the main render thread is resized before the VM parses JAVA_TOOL_OPTIONS.
             vmArg "-Xss16m"
@@ -350,14 +349,14 @@ abstract class CompileShaders extends DefaultTask {
 				}
 			}
 		}
-		// Keep the live raygen below the last-known-clean 124 KB ceiling. Front-face lighting and mutually
-		// exclusive thin-surface backlighting share one visibility traversal; robust geometric-normal origins
-		// therefore do not justify raising the accepted complexity budget.
+		// The live raygen owns the camera-only physical atmosphere boundary and vanilla-controlled section
+		// reveal. Keep that intentional presentation path inside a tight 128 KB ceiling; transport variants
+		// still share the same visibility traversal and sampler-inlining checks below.
 		["world.rgen.spv", "world_nv.rgen.spv"].each { name ->
 			def raygen = new File(scratchDir, name)
-			if (!raygen.isFile() || raygen.length() > 124_000L) {
+			if (!raygen.isFile() || raygen.length() > 128_000L) {
 				throw new GradleException("Glass-only world raygen complexity budget exceeded: ${name} is "
-						+ "${raygen.isFile() ? raygen.length() : 'missing'} bytes (limit 124000)")
+						+ "${raygen.isFile() ? raygen.length() : 'missing'} bytes (limit 128000)")
 			}
 			def disassembly = new File(temporaryDir, "${name}.spvasm")
 			execOps.exec {

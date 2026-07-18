@@ -9,14 +9,13 @@
 // disc isn't double-counted against the direct light → fireflies). The atmosphere gradient + stars are
 // added on every miss (any bounce): stars aren't a NEE light, so they never double-count.
 import world_common;
+import world_sky_lut;
 
 [[vk::push_constant]] PushAddr pcAddr;
 
 // Vanilla celestials atlas (sun + moon-phase sprites), bound by RtComposite. Sampled with an explicit
 // LOD (no derivatives in a miss shader). The sun/moon discs are drawn from its real texels.
 [[vk::binding(16, 0)]] Sampler2D celestialsAtlas;
-[[vk::binding(17, 0)]] [format("rgba32f")] RWTexture2D<float4> skyViewLut;
-
 static const float PI = 3.14159265359;
 float pow2(float x) { return x * x; }
 
@@ -37,8 +36,6 @@ static const float SKY_SATURATION = 1.0; // spectral conversion supplies physica
 // lighting share one angular scale instead of reflecting Minecraft's enormous decorative sky quads.
 static const float SUN_LIMB_DARKENING = 0.6;
 // Faint night-sky ambient so the night isn't pure black where the atmosphere in-scatter falls to zero.
-static const float3 AIRGLOW_ZENITH  = float3(0.00000060, 0.00000078, 0.00000120);
-static const float3 AIRGLOW_HORIZON = float3(0.00000082, 0.00000088, 0.00000105);
 
 // ---- Physically-based atmosphere (Nishita / O'Neil single scattering + ozone absorption). A view ray
 // is marched through the atmospheric shell; at each step the transmittance toward the sun is integrated
@@ -163,7 +160,8 @@ static const float4 SPECTRAL_AEROSOL_SCATTER_XS = float4(1.5908e-22, 1.7711e-22,
 static const float SPECTRAL_AEROSOL_BASE_DENSITY = 1.3681e20;
 static const float SPECTRAL_AEROSOL_BACKGROUND_DENSITY = 2.0e6;
 static const float SPECTRAL_AEROSOL_HEIGHT_SCALE = 0.73;
-static const float SPECTRAL_AEROSOL_G = 0.8;
+// Must match sky_view.comp so exact mirrors and the pre-integrated visible sky share one aureole shape.
+static const float SPECTRAL_AEROSOL_G = 0.88;
 static const float SPECTRAL_SKY_PHOTOMETRIC_SCALE = 0.9765625;
 // Bounded isotropic return for scattering orders beyond the directly integrated first order. This is
 // the real-time energy-compensation closure around the four-wavelength medium, not part of García
@@ -282,24 +280,6 @@ float3 spectralAtmosphere(float3 dir, float3 lightDir, float sourceScale) {
         viewTransmittance *= stepTransmittance;
     }
     return max(spectralToBt2020(radiance) * SPECTRAL_SKY_PHOTOMETRIC_SCALE, float3(0.0));
-}
-
-float3 sampleSkyView(float3 dir) {
-    uint width, height;
-    skyViewLut.GetDimensions(width, height);
-    float elevation = asin(clamp(dir.y, 0.0, 1.0));
-    float2 uv = float2(atan2(dir.z, dir.x) / (2.0 * PI) + 0.5,
-            sqrt(elevation / (0.5 * PI)));
-    float2 pixel = uv * float2(width, height) - 0.5;
-    int2 base = int2(floor(pixel));
-    float2 f = frac(pixel);
-    int x0 = ((base.x % int(width)) + int(width)) % int(width);
-    int x1 = (x0 + 1) % int(width);
-    int y0 = clamp(base.y, 0, int(height) - 1);
-    int y1 = min(y0 + 1, int(height) - 1);
-    float3 a = lerp(skyViewLut[uint2(x0, y0)].rgb, skyViewLut[uint2(x1, y0)].rgb, f.x);
-    float3 b = lerp(skyViewLut[uint2(x0, y1)].rgb, skyViewLut[uint2(x1, y1)].rgb, f.x);
-    return lerp(a, b, f.y);
 }
 
 // A delta mirror exposes the angular texel grid of the sky-view LUT because it supplies no BRDF
@@ -479,20 +459,16 @@ void main(inout Payload payload) {
     float lum = transportLuminance(col);
     col = max(lerp(float3(lum, lum, lum), col, SKY_SATURATION), float3(0.0, 0.0, 0.0));
     float up = clamp(skyDir.y, 0.0, 1.0);
-    float3 nightAmbient = bt709ToBt2020(lerp(AIRGLOW_HORIZON, AIRGLOW_ZENITH, up));
+    float3 nightAmbient = bt709ToBt2020(lerp(SKY_AIRGLOW_HORIZON, SKY_AIRGLOW_ZENITH, up));
     col += earthAtmosphere
             ? nightAmbient * pc.skyLighting.z * (1.0 - solarEnvelope) : float3(0.0);
     if (earthAtmosphere && aboveHorizon) col += stars(dir, starBrightness, VdotS, pc.celestial);
     col *= ambientMultiplier;
     // Match the upper-hemisphere value at y=0, then collapse to the bounded void within one
     // thousandth of a direction unit. This removes the seam without opening broad geometry leaks.
-    if (primaryRay && !aboveHorizon) {
-        // Camera rays that escape below the horizon have crossed the finite RT terrain boundary. Continue
-        // the exact horizon value briefly, then converge into the authoritative dimension fog instead of
-        // exposing the transport-only black void. Celestial bodies remain horizon-gated below.
-        float borderWeight = 1.0 - smoothstep(-0.08, 0.0, dir.y);
-        col = lerp(col, max(pc.borderFogColor.xyz, float3(0.0)), borderWeight);
-    } else if (earthAtmosphere && !aboveHorizon) {
+    if (primaryRay && !aboveHorizon && !earthAtmosphere) {
+        col = max(pc.borderFogColor.xyz, float3(0.0));
+    } else if (!primaryRay && earthAtmosphere && !aboveHorizon) {
         float boundaryWeight = smoothstep(-1.0e-3, 0.0, dir.y);
         col = lerp(groundVoid * ambientMultiplier, col, boundaryWeight);
     }

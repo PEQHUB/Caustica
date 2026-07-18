@@ -27,6 +27,8 @@ final class PhysicalSceneContractTest {
         assertTrue(skyLut.contains("pc.sun.w"));
         assertTrue(skyLut.contains("VIEW_STEPS = 32"));
         assertTrue(skyLut.contains("LIGHT_STEPS = 16"));
+        assertTrue(skyLut.contains("AEROSOL_G = 0.88"));
+        assertTrue(miss.contains("SPECTRAL_AEROSOL_G = 0.88"));
         assertTrue(skyLut.contains("uv.y * uv.y * (0.5 * PI)"));
         assertFalse(skyLut.contains("signedElevation"));
         assertTrue(miss.contains("SPECTRAL_SKY_PHOTOMETRIC_SCALE = 0.9765625"));

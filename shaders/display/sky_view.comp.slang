@@ -21,7 +21,9 @@ static const float4 AEROSOL_SCATTER_XS = float4(1.5908e-22, 1.7711e-22, 2.0942e-
 static const float AEROSOL_BASE_DENSITY = 1.3681e20;
 static const float AEROSOL_BACKGROUND_DENSITY = 2.0e6;
 static const float AEROSOL_HEIGHT_SCALE = 0.73;
-static const float AEROSOL_G = 0.8;
+// Strong forward scattering keeps the circumsolar aureole attached to the rendered sun instead of
+// turning the bright horizon into a detached broad glow. Match the exact mirror path in world.rmiss.
+static const float AEROSOL_G = 0.88;
 static const float PHOTOMETRIC_SCALE = 0.9765625;
 static const int VIEW_STEPS = 32;
 static const int LIGHT_STEPS = 16;

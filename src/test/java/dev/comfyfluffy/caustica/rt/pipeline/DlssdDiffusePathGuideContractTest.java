@@ -39,12 +39,13 @@ final class DlssdDiffusePathGuideContractTest {
                 "src/main/java/dev/comfyfluffy/caustica/rt/RtComposite.java"));
         String closestHit = Files.readString(Path.of("shaders/world/world.rchit.slang"));
         String miss = Files.readString(Path.of("shaders/world/world.rmiss.slang"));
+        String skyLut = Files.readString(Path.of("shaders/world/world_sky_lut.slang"));
 
         assertTrue(composite.contains("GUIDE_COUNT = 11"));
         assertTrue(closestHit.contains("[[vk::binding(1, 1)]] Sampler2D materialSurface0Tex[]"));
         assertTrue(closestHit.contains("[[vk::binding(2, 1)]] Sampler2D materialNormalAoTex[]"));
         assertTrue(closestHit.contains("[[vk::binding(3, 1)]] Sampler2D materialSurface1Tex[]"));
         assertTrue(miss.contains("[[vk::binding(16, 0)]] Sampler2D celestialsAtlas"));
-        assertTrue(miss.contains("[[vk::binding(17, 0)]] [format(\"rgba32f\")] RWTexture2D<float4> skyViewLut"));
+        assertTrue(skyLut.contains("[[vk::binding(17, 0)]] [format(\"rgba32f\")] RWTexture2D<float4> skyViewLut"));
     }
 }

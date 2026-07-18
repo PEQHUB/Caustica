@@ -104,6 +104,7 @@ final class OfflineGroundTruthContractTest {
         String raygen = Files.readString(Path.of("shaders/world/world.rgen.slang"));
         String hit = Files.readString(Path.of("shaders/world/world.rchit.slang"));
         String miss = Files.readString(Path.of("shaders/world/world.rmiss.slang"));
+        String skyLut = Files.readString(Path.of("shaders/world/world_sky_lut.slang"));
         String composite = Files.readString(Path.of(
                 "src/main/java/dev/comfyfluffy/caustica/rt/RtComposite.java"));
 
@@ -113,6 +114,6 @@ final class OfflineGroundTruthContractTest {
         assertTrue(hit.contains("vk::binding(2, 1)"));
         assertTrue(hit.contains("vk::binding(3, 1)"));
         assertTrue(miss.contains("vk::binding(16, 0)"));
-        assertTrue(miss.contains("vk::binding(17, 0)"));
+        assertTrue(skyLut.contains("vk::binding(17, 0)"));
     }
 }
