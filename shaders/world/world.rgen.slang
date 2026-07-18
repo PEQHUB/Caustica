@@ -1583,7 +1583,10 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
                 gv_rough = WATER_GUIDE_ROUGH;
                 gv_albedo = float3(0.0, 0.0, 0.0);
                 gv_specAlb = float3(F, F, F);
-                gv_hitCamRel = hitPos - pc.camOffset; // depth + reflection start at the water surface
+                // Capture the physical interface first. The separately preserved specular guides retain
+                // this water surface; a successful optical walk later moves every ordinary guide to the
+                // same refracted destination so DLSSD depth and motion never describe different layers.
+                gv_hitCamRel = hitPos - pc.camOffset;
                 gv_motionHitCamRel = gv_hitCamRel;
                 gv_motionUseRefracted = false;
                 gv_motionObjDisp = float3(0.0, 0.0, 0.0);
@@ -2185,13 +2188,17 @@ void main() {
             gv_motionObjDisp = destinationMotionPrev;
             gv_motionUseRefracted = true;
             gv_albedo = destinationDiffuseAlbedo;
-            if (glassGuide) {
-                // The ordinary visible layer is the transmitted destination. Specular albedo/motion remain
-                // attached to the separately preserved primary glass interface, matching DLSSD semantics.
-                gv_hitCamRel = destinationHitCamRel;
-                gv_normal = destinationNormal;
-                gv_rough = destinationRoughness;
-            }
+            // The ordinary visible layer is the transmitted destination for both water and glass. DLSSD
+            // requires depth to represent the same surface that generated ordinary motion; retaining water
+            // depth here while exporting destination motion was the underwater ghosting defect. Specular
+            // albedo/motion remain attached to the separately preserved primary dielectric interface.
+            gv_hitCamRel = destinationHitCamRel;
+            gv_normal = destinationNormal;
+            gv_rough = destinationRoughness;
+        } else {
+            // No coherent transmitted layer exists. A value of one in BiasCurrentColorHint is NVIDIA's
+            // hard history reject, preventing the foreground interface from validating stale background.
+            gv_animatedGuide = 1.0;
         }
     }
 
@@ -2208,7 +2215,8 @@ void main() {
     // Hardware (non-linear, reversed-Z) depth for DLSS-RR + Frame Generation: project the camera-relative
     // primary hit through the forward view-projection and take ndc z/w — exactly the value a rasterizer
     // would write. Reversed-Z (near=1, far=0), so DLSS gets the DepthInverted flag; sky's far hit -> ~0.
-    // Water depth follows its surface; clear glass follows the transmitted destination to avoid blur.
+    // Clear dielectric depth follows the transmitted destination so depth and ordinary motion share one
+    // temporal surface. Reflection continues to use the separately preserved physical-interface guides.
     bool debugDepth = pc.debugView == 3u;
     bool debugMotion = pc.debugView == 5u;
     if (writeMotionGuides || writeExposureDepth || debugDepth) {

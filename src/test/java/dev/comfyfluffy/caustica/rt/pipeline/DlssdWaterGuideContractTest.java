@@ -45,6 +45,23 @@ final class DlssdWaterGuideContractTest {
         assertFalse(raygen.contains("unresolvedDiffuseAlbedo"));
     }
 
+    @Test
+    void refractedWaterDepthMotionAndMaterialShareTheDestinationSurface() throws IOException {
+        String raygen = read("shaders/world/world.rgen.slang");
+        int destination = raygen.indexOf("if (destinationValid) {");
+        int failure = raygen.indexOf("} else {", destination);
+        String validPath = raygen.substring(destination, failure);
+
+        assertTrue(validPath.contains("gv_motionHitCamRel = destinationHitCamRel"));
+        assertTrue(validPath.contains("gv_albedo = destinationDiffuseAlbedo"));
+        assertTrue(validPath.contains("gv_hitCamRel = destinationHitCamRel"));
+        assertTrue(validPath.contains("gv_normal = destinationNormal"));
+        assertTrue(validPath.contains("gv_rough = destinationRoughness"));
+        assertFalse(validPath.contains("if (glassGuide)"));
+        assertTrue(raygen.contains("gv_animatedGuide = 1.0;\n        }\n    }"));
+        assertTrue(raygen.contains("depth and ordinary motion share one"));
+    }
+
     private static String read(String relative) throws IOException {
         return Files.readString(Path.of(relative)).replace("\r\n", "\n");
     }
