@@ -13,10 +13,9 @@ inline bool isCompleteDlssdVulkanTexture(const slbridge_resource_desc& descripto
             && descriptor.height != 0;
 }
 
-/** Ten core tags, plus the optional diffuse guide and/or the atomic three-tag transparency layer. */
+/** Ten core tags, plus optional particle, diffuse, and/or atomic three-tag transparency resources. */
 inline bool isSupportedDlssdResourceCount(uint32_t resourceCount) noexcept {
-    return resourceCount == 10 || resourceCount == 11
-            || resourceCount == 13 || resourceCount == 14;
+    return resourceCount >= 10 && resourceCount <= 15;
 }
 
 inline bool dlssdResourceCountRequiresDiffusePath(uint32_t resourceCount) noexcept {
@@ -27,7 +26,8 @@ inline bool dlssdResourceCountRequiresTransparencyLayer(uint32_t resourceCount) 
     return resourceCount == 13 || resourceCount == 14;
 }
 
-inline bool hasExpectedDlssdOptionalResources(uint32_t resourceCount, bool hasDiffusePath,
+inline bool hasExpectedDlssdOptionalResources(uint32_t resourceCount, bool hasParticleHint,
+        bool hasDiffusePath,
         bool hasColorBeforeTransparency, bool hasTransparencyLayer,
         bool hasTransparencyLayerOpacity) noexcept {
     if (!isSupportedDlssdResourceCount(resourceCount)) {
@@ -37,10 +37,10 @@ inline bool hasExpectedDlssdOptionalResources(uint32_t resourceCount, bool hasDi
             || hasTransparencyLayer || hasTransparencyLayerOpacity;
     const bool hasCompleteTransparencyLayer = hasColorBeforeTransparency
             && hasTransparencyLayer && hasTransparencyLayerOpacity;
-    const bool requiresTransparencyLayer = dlssdResourceCountRequiresTransparencyLayer(resourceCount);
-    return hasDiffusePath == dlssdResourceCountRequiresDiffusePath(resourceCount)
-            && hasAnyTransparencyLayer == requiresTransparencyLayer
-            && (!requiresTransparencyLayer || hasCompleteTransparencyLayer);
+    const uint32_t expectedCount = 10u + (hasParticleHint ? 1u : 0u)
+            + (hasDiffusePath ? 1u : 0u) + (hasCompleteTransparencyLayer ? 3u : 0u);
+    return resourceCount == expectedCount
+            && (!hasAnyTransparencyLayer || hasCompleteTransparencyLayer);
 }
 
 } // namespace slbridge::detail

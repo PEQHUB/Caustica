@@ -363,6 +363,7 @@ public final class RtComposite {
     private RtImage gDepthHistoryB;
     private RtImage gTemporalGuideHistoryA;
     private RtImage gTemporalGuideHistoryB;
+    private RtImage gParticleHint;
     private RtImage gDisocclusion;
     private RtImage gBiasCurrentColor;
     private boolean diffusePathGuideKnown;
@@ -1421,6 +1422,10 @@ public final class RtComposite {
             gTemporalGuideHistoryB.destroy();
             gTemporalGuideHistoryB = null;
         }
+        if (gParticleHint != null) {
+            gParticleHint.destroy();
+            gParticleHint = null;
+        }
         if (gDisocclusion != null) {
             gDisocclusion.destroy();
             gDisocclusion = null;
@@ -1613,6 +1618,8 @@ public final class RtComposite {
                     "DLSSD temporal responsivity history A");
             gTemporalGuideHistoryB = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R16_SFLOAT,
                     "DLSSD temporal responsivity history B");
+            gParticleHint = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R16_SFLOAT,
+                    "DLSSD particle hint");
         }
         gDisocclusion = ctx.createStorageImage(dlssGuideW, dlssGuideH, VK10.VK_FORMAT_R16_SFLOAT,
                 "DLSSD disocclusion mask");
@@ -1624,7 +1631,8 @@ public final class RtComposite {
                     gDepthHistoryA.view, gDepthHistoryB.view, gDisocclusion.view, gBiasCurrentColor.view,
                     gAnimatedGuide.view,
                     particleTemporalHistory ? gTemporalGuideHistoryA.view : 0L,
-                    particleTemporalHistory ? gTemporalGuideHistoryB.view : 0L);
+                    particleTemporalHistory ? gTemporalGuideHistoryB.view : 0L,
+                    particleTemporalHistory ? gParticleHint.view : 0L);
         }
         // At native resolution the display mapper can consume the trace image directly; reserve a second
         // full-resolution FP16 image only when RR may write or need a same-frame fallback upscale.
@@ -2144,7 +2152,7 @@ public final class RtComposite {
                     if (RtReconstruction.usesDlss()) {
                         rrDone = RtDlssRr.INSTANCE.evaluate(cmd.address(), output, gDepth, gMotion, gAlbedo,
                                 gSpecAlbedo, gNormal, gSpecMotion, gDisocclusion, gBiasCurrentColor,
-                                gDiffuseRayDirectionHitDistance, gColorBeforeTransparency,
+                                gParticleHint, gDiffuseRayDirectionHitDistance, gColorBeforeTransparency,
                                 gTransparencyLayer, gTransparencyOpacity, rrOutput,
                                 renderW, renderH, displayW, displayH,
                                 jitterX, jitterY, frameProjection, mvCurProjView,

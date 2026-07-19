@@ -1115,7 +1115,7 @@ SLBRIDGE_EXPORT int32_t slbridge_evaluate_dlssd(uint64_t frame_token, uint32_t v
         const slbridge_constants* constants, uint64_t command_buffer) {
     if (!g_slSetConstants || !g_slEvaluateFeature || !resources || !constants || !command_buffer
             || !slbridge::detail::isSupportedDlssdResourceCount(resource_count)) {
-        setError("Streamline DLSS-RR evaluation requires ten core resources, an optional diffuse guide, an optional atomic transparency layer, constants, and a command buffer");
+        setError("Streamline DLSS-RR evaluation requires ten core resources, optional particle/diffuse/transparency resources, constants, and a command buffer");
         return -1;
     }
     auto* token = tokenFromHandle(frame_token);
@@ -1140,6 +1140,7 @@ SLBRIDGE_EXPORT int32_t slbridge_evaluate_dlssd(uint64_t frame_token, uint32_t v
     bool hasSpecularMotion = false;
     bool hasDisocclusion = false;
     bool hasBiasCurrentColor = false;
+    bool hasParticleHint = false;
     bool hasDiffusePathGuide = false;
     bool hasColorBeforeTransparency = false;
     bool hasTransparencyLayer = false;
@@ -1178,6 +1179,7 @@ SLBRIDGE_EXPORT int32_t slbridge_evaluate_dlssd(uint64_t frame_token, uint32_t v
         case SLBRIDGE_BUFFER_SPECULAR_MOTION_VECTORS: hasSpecularMotion = true; break;
         case SLBRIDGE_BUFFER_DISOCCLUSION_MASK: hasDisocclusion = true; break;
         case SLBRIDGE_BUFFER_BIAS_CURRENT_COLOR_HINT: hasBiasCurrentColor = true; break;
+        case SLBRIDGE_BUFFER_PARTICLE_HINT: hasParticleHint = true; break;
         case SLBRIDGE_BUFFER_DIFFUSE_RAY_DIRECTION_HIT_DISTANCE: hasDiffusePathGuide = true; break;
         case SLBRIDGE_BUFFER_COLOR_BEFORE_TRANSPARENCY: hasColorBeforeTransparency = true; break;
         case SLBRIDGE_BUFFER_TRANSPARENCY_LAYER: hasTransparencyLayer = true; break;
@@ -1189,7 +1191,7 @@ SLBRIDGE_EXPORT int32_t slbridge_evaluate_dlssd(uint64_t frame_token, uint32_t v
             || !hasSpecularAlbedo || !hasNormalRoughness || !hasSpecularMotion
             || !hasDisocclusion || !hasBiasCurrentColor
             || !slbridge::detail::hasExpectedDlssdOptionalResources(resource_count,
-                    hasDiffusePathGuide, hasColorBeforeTransparency,
+                    hasParticleHint, hasDiffusePathGuide, hasColorBeforeTransparency,
                     hasTransparencyLayer, hasTransparencyLayerOpacity)) {
         setError("Streamline DLSS-RR is missing one or more required local resource tags");
         return -1;

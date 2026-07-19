@@ -16,6 +16,10 @@ final class RtDlssRrResourceContractTest {
         assertEquals(11, RtDlssRr.requiredResourceCount(true));
         assertEquals(13, RtDlssRr.requiredResourceCount(false, true));
         assertEquals(14, RtDlssRr.requiredResourceCount(true, true));
+        assertEquals(11, RtDlssRr.requiredResourceCount(false, false, true));
+        assertEquals(12, RtDlssRr.requiredResourceCount(true, false, true));
+        assertEquals(14, RtDlssRr.requiredResourceCount(false, true, true));
+        assertEquals(15, RtDlssRr.requiredResourceCount(true, true, true));
     }
 
     @Test
@@ -23,6 +27,7 @@ final class RtDlssRrResourceContractTest {
         assertEquals(40, RtDlssRr.BUFFER_COLOR_BEFORE_TRANSPARENCY);
         assertEquals(51, RtDlssRr.BUFFER_TRANSPARENCY_LAYER);
         assertEquals(52, RtDlssRr.BUFFER_TRANSPARENCY_LAYER_OPACITY);
+        assertEquals(26, RtDlssRr.BUFFER_PARTICLE_HINT);
         assertEquals(VK10.VK_FORMAT_R16G16B16A16_SFLOAT, RtDlssRr.TRANSPARENCY_LAYER_FORMAT);
         assertEquals(VK10.VK_FORMAT_R16G16B16A16_SFLOAT, RtDlssRr.TRANSPARENCY_LAYER_OPACITY_FORMAT);
         assertEquals(10, StreamlineAbi.VERSION);

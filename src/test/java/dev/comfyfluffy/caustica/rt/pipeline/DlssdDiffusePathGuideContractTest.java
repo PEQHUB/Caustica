@@ -28,7 +28,7 @@ final class DlssdDiffusePathGuideContractTest {
                 "src/main/java/dev/comfyfluffy/caustica/rt/pipeline/RtDlssRr.java"));
         assertTrue(rr.contains("BUFFER_DIFFUSE_RAY_DIRECTION_HIT_DISTANCE = 46"));
         assertTrue(rr.contains("if (diffusePathGuide)"));
-        assertTrue(rr.contains("requiredResourceCount(diffusePathGuide, layeredTransparency)"));
+        assertTrue(rr.contains("requiredResourceCount(diffusePathGuide, layeredTransparency, particleHistory)"));
 
         String bridge = Files.readString(Path.of("native/streamline_bridge/streamline_bridge.cpp"));
         assertTrue(bridge.contains("isSupportedDlssdResourceCount(resource_count)"));

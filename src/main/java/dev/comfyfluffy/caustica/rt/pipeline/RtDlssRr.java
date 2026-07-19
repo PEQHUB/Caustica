@@ -40,6 +40,7 @@ public final class RtDlssRr {
     private static final int BUFFER_SPECULAR_MOTION_VECTORS = 10;
     private static final int BUFFER_DISOCCLUSION_MASK = 11;
     private static final int BUFFER_NORMAL_ROUGHNESS = 14;
+    static final int BUFFER_PARTICLE_HINT = 26;
     private static final int BUFFER_BIAS_CURRENT_COLOR_HINT = 29;
     static final int BUFFER_COLOR_BEFORE_TRANSPARENCY = 40;
     private static final int BUFFER_DIFFUSE_RAY_DIRECTION_HIT_DISTANCE = 46;
@@ -149,7 +150,8 @@ public final class RtDlssRr {
     }
 
     public static int requiredResourceCount() {
-        return requiredResourceCount(CausticaConfig.Rt.DlssRr.DIFFUSE_PATH_GUIDE.value(), false);
+        return requiredResourceCount(CausticaConfig.Rt.DlssRr.DIFFUSE_PATH_GUIDE.value(), false,
+                CausticaConfig.Rt.DlssRr.PARTICLE_TEMPORAL_HISTORY.value());
     }
 
     static int requiredResourceCount(boolean diffusePathGuide) {
@@ -157,12 +159,20 @@ public final class RtDlssRr {
     }
 
     static int requiredResourceCount(boolean diffusePathGuide, boolean layeredTransparency) {
+        return requiredResourceCount(diffusePathGuide, layeredTransparency, false);
+    }
+
+    static int requiredResourceCount(boolean diffusePathGuide, boolean layeredTransparency,
+            boolean particleHint) {
+        int resourceCount;
         if (layeredTransparency) {
-            return diffusePathGuide
+            resourceCount = diffusePathGuide
                     ? DIFFUSE_PATH_TRANSPARENCY_LAYER_RESOURCE_COUNT
                     : TRANSPARENCY_LAYER_RESOURCE_COUNT;
+        } else {
+            resourceCount = diffusePathGuide ? DIFFUSE_PATH_RESOURCE_COUNT : CORE_RESOURCE_COUNT;
         }
-        return diffusePathGuide ? DIFFUSE_PATH_RESOURCE_COUNT : CORE_RESOURCE_COUNT;
+        return resourceCount + (particleHint ? 1 : 0);
     }
 
     /**
@@ -180,7 +190,7 @@ public final class RtDlssRr {
             double cameraX, double cameraY, double cameraZ,
             float cameraDeltaX, float cameraDeltaY, float cameraDeltaZ, boolean reset) {
         return evaluate(commandBuffer, color, depth, motion, diffuseAlbedo, specularAlbedo,
-                normalRoughness, specularMotion, disocclusion, biasCurrentColor,
+                normalRoughness, specularMotion, disocclusion, biasCurrentColor, null,
                 diffuseRayDirectionHitDistance, null, null, null, output,
                 renderWidth, renderHeight, displayWidth, displayHeight,
                 jitterX, jitterY, projection, currentViewProjection, previousViewProjection, viewRotation,
@@ -190,7 +200,7 @@ public final class RtDlssRr {
     public boolean evaluate(long commandBuffer, RtImage color, RtImage depth, RtImage motion,
             RtImage diffuseAlbedo, RtImage specularAlbedo, RtImage normalRoughness,
             RtImage specularMotion, RtImage disocclusion, RtImage biasCurrentColor,
-            RtImage diffuseRayDirectionHitDistance, RtImage colorBeforeTransparency,
+            RtImage particleHint, RtImage diffuseRayDirectionHitDistance, RtImage colorBeforeTransparency,
             RtImage transparencyLayer,
             RtImage transparencyLayerOpacity, RtImage output,
             int renderWidth, int renderHeight, int displayWidth, int displayHeight,
@@ -228,7 +238,8 @@ public final class RtDlssRr {
                         "Streamline DLSS-RR color-before, transparency layer, and opacity must be supplied together");
             }
             boolean layeredTransparency = completeTransparencyResources;
-            int resourceCount = requiredResourceCount(diffusePathGuide, layeredTransparency);
+            boolean particleHistory = particleHint != null;
+            int resourceCount = requiredResourceCount(diffusePathGuide, layeredTransparency, particleHistory);
             MemorySegment resources = StreamlineAbi.allocate(arena,
                     StreamlineAbi.RESOURCE_DESC_SIZE * resourceCount);
             writeResource(resources, 0, color, VK10.VK_FORMAT_R16G16B16A16_SFLOAT,
@@ -249,9 +260,13 @@ public final class RtDlssRr {
                     renderWidth, renderHeight, BUFFER_DISOCCLUSION_MASK);
             writeResource(resources, 8, biasCurrentColor, VK10.VK_FORMAT_R16_SFLOAT,
                     renderWidth, renderHeight, BUFFER_BIAS_CURRENT_COLOR_HINT);
-            writeResource(resources, 9, output, VK10.VK_FORMAT_R16G16B16A16_SFLOAT,
+            int optionalResource = 9;
+            if (particleHistory) {
+                writeResource(resources, optionalResource++, particleHint, VK10.VK_FORMAT_R16_SFLOAT,
+                        renderWidth, renderHeight, BUFFER_PARTICLE_HINT);
+            }
+            writeResource(resources, optionalResource++, output, VK10.VK_FORMAT_R16G16B16A16_SFLOAT,
                     displayWidth, displayHeight, BUFFER_SCALING_OUTPUT_COLOR);
-            int optionalResource = CORE_RESOURCE_COUNT;
             if (diffusePathGuide) {
                 writeResource(resources, optionalResource++, diffuseRayDirectionHitDistance,
                         VK10.VK_FORMAT_R16G16B16A16_SFLOAT, renderWidth, renderHeight,

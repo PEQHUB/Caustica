@@ -56,7 +56,7 @@ public final class RtDlssdDisocclusionPipeline {
     }
 
     public static RtDlssdDisocclusionPipeline create(RtContext ctx, boolean particleTemporalHistory) {
-        int imageBindings = particleTemporalHistory ? 9 : BASE_IMAGE_BINDINGS;
+        int imageBindings = particleTemporalHistory ? 10 : BASE_IMAGE_BINDINGS;
         VkDevice vk = ctx.vk();
         try (MemoryStack stack = MemoryStack.stackPush()) {
             VkDescriptorSetLayoutBinding.Buffer bindings = VkDescriptorSetLayoutBinding.calloc(imageBindings, stack);
@@ -120,8 +120,8 @@ public final class RtDlssdDisocclusionPipeline {
 
     public void setImages(long depth, long motion, long historyA, long historyB,
             long disocclusion, long biasCurrent, long animatedGuide,
-            long temporalGuideHistoryA, long temporalGuideHistoryB) {
-        int imageBindings = particleTemporalHistory ? 9 : BASE_IMAGE_BINDINGS;
+            long temporalGuideHistoryA, long temporalGuideHistoryB, long particleHint) {
+        int imageBindings = particleTemporalHistory ? 10 : BASE_IMAGE_BINDINGS;
         try (MemoryStack stack = MemoryStack.stackPush()) {
             VkDescriptorImageInfo.Buffer infos = VkDescriptorImageInfo.calloc(imageBindings * SET_COUNT, stack);
             VkWriteDescriptorSet.Buffer writes = VkWriteDescriptorSet.calloc(imageBindings * SET_COUNT, stack);
@@ -133,7 +133,7 @@ public final class RtDlssdDisocclusionPipeline {
                 long currentTemporalGuide = parity == 0 ? temporalGuideHistoryB : temporalGuideHistoryA;
                 long[] images = particleTemporalHistory
                         ? new long[] {depth, motion, previousHistory, currentHistory, disocclusion, biasCurrent,
-                                animatedGuide, previousTemporalGuide, currentTemporalGuide}
+                                animatedGuide, previousTemporalGuide, currentTemporalGuide, particleHint}
                         : new long[] {depth, motion, previousHistory, currentHistory, disocclusion, biasCurrent,
                                 animatedGuide};
                 for (int binding = 0; binding < imageBindings; binding++) {

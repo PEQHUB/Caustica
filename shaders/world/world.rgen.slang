@@ -1784,10 +1784,9 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
                 gv_motionHitCamRel = gv_hitCamRel;
                 gv_motionUseRefracted = false;
                 gv_motionObjDisp = payload.motionPrev; // per-particle MV: de-ghost moving particles
-                // Particle billboards can change sprite frame, alpha coverage, scale, or lifetime without
-                // those changes being representable by their center-translation MV. Reject their current
-                // history; the disocclusion pass retains this footprint for one frame to clear vacated pixels.
-                gv_animatedGuide = 1.0;
+                // Particle identity is distinct from fractional animated-water responsivity. The optional
+                // particle-history pass turns this exact value into ParticleHint and footprint rejection.
+                gv_animatedGuide = 2.0;
             }
             if (primaryOnly) {
                 break;
