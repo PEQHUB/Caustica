@@ -37,7 +37,6 @@ public final class RtSkyStarLayerPipeline {
     private final long pipeline;
     private long boundOutput;
     private long boundMask;
-    private long boundDepth;
 
     private RtSkyStarLayerPipeline(RtContext context, long descriptorSetLayout, long descriptorPool,
             long descriptorSet, long pipelineLayout, long pipeline) {
@@ -53,8 +52,8 @@ public final class RtSkyStarLayerPipeline {
         VkDevice device = context.vk();
         try (MemoryStack stack = MemoryStack.stackPush()) {
             LongBuffer out = stack.mallocLong(1);
-            VkDescriptorSetLayoutBinding.Buffer bindings = VkDescriptorSetLayoutBinding.calloc(3, stack);
-            for (int i = 0; i < 3; i++) {
+            VkDescriptorSetLayoutBinding.Buffer bindings = VkDescriptorSetLayoutBinding.calloc(2, stack);
+            for (int i = 0; i < 2; i++) {
                 bindings.get(i).binding(i).descriptorType(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
                         .descriptorCount(1).stageFlags(VK10.VK_SHADER_STAGE_COMPUTE_BIT);
             }
@@ -63,7 +62,7 @@ public final class RtSkyStarLayerPipeline {
                     "vkCreateDescriptorSetLayout(sky stars)");
             long setLayout = out.get(0);
             VkDescriptorPoolSize.Buffer poolSize = VkDescriptorPoolSize.calloc(1, stack)
-                    .type(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).descriptorCount(3);
+                    .type(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).descriptorCount(2);
             check(VK10.vkCreateDescriptorPool(device,
                     VkDescriptorPoolCreateInfo.calloc(stack).sType$Default().maxSets(1).pPoolSizes(poolSize),
                     null, out), "vkCreateDescriptorPool(sky stars)");
@@ -94,13 +93,13 @@ public final class RtSkyStarLayerPipeline {
         }
     }
 
-    public void setImages(long output, long mask, long depth) {
-        if (output == boundOutput && mask == boundMask && depth == boundDepth) return;
+    public void setImages(long output, long mask) {
+        if (output == boundOutput && mask == boundMask) return;
         try (MemoryStack stack = MemoryStack.stackPush()) {
-            long[] views = {output, mask, depth};
-            VkDescriptorImageInfo.Buffer images = VkDescriptorImageInfo.calloc(3, stack);
-            VkWriteDescriptorSet.Buffer writes = VkWriteDescriptorSet.calloc(3, stack);
-            for (int i = 0; i < 3; i++) {
+            long[] views = {output, mask};
+            VkDescriptorImageInfo.Buffer images = VkDescriptorImageInfo.calloc(2, stack);
+            VkWriteDescriptorSet.Buffer writes = VkWriteDescriptorSet.calloc(2, stack);
+            for (int i = 0; i < 2; i++) {
                 images.get(i).imageView(views[i]).imageLayout(VK10.VK_IMAGE_LAYOUT_GENERAL);
                 writes.get(i).sType$Default().dstSet(descriptorSet).dstBinding(i).descriptorCount(1)
                         .descriptorType(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
@@ -110,7 +109,6 @@ public final class RtSkyStarLayerPipeline {
         }
         boundOutput = output;
         boundMask = mask;
-        boundDepth = depth;
     }
 
     public void dispatch(VkCommandBuffer commandBuffer, long worldPushAddress,

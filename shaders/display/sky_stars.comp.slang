@@ -5,7 +5,6 @@ import world_stars;
 
 [[vk::binding(0, 0)]] [format("rgba16f")] RWTexture2D<float4> outputImage;
 [[vk::binding(1, 0)]] [format("r16f")] RWTexture2D<float> primarySkyMask;
-[[vk::binding(2, 0)]] [format("r32f")] RWTexture2D<float> primarySkyDepth;
 
 struct SkyStarLayerPush {
     uint64_t worldPushAddr;
@@ -16,6 +15,31 @@ struct SkyStarLayerPush {
 };
 [[vk::push_constant]] SkyStarLayerPush pc;
 
+bool conservativePrimarySky(uint2 outputPixel)
+{
+    float2 sourcePixel =
+        (float2(outputPixel) + 0.5)
+        * float2(pc.sourceWidth, pc.sourceHeight)
+        / float2(pc.outputWidth, pc.outputHeight)
+        - 0.5;
+
+    int2 center = int2(floor(sourcePixel));
+
+    for (int y = 0; y <= 1; ++y)
+    for (int x = 0; x <= 1; ++x)
+    {
+        int2 p = clamp(
+            center + int2(x, y),
+            int2(0),
+            int2(pc.sourceWidth, pc.sourceHeight) - 1);
+
+        if (primarySkyMask.Load(p) < 0.5)
+            return false;
+    }
+
+    return true;
+}
+
 [numthreads(16, 16, 1)]
 void main(uint3 dispatchThreadId : SV_DispatchThreadID) {
     int2 pixel = int2(dispatchThreadId.xy);
@@ -25,29 +49,10 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID) {
     if ((world.flags & FRAME_FLAG_DIRECT_SKY_STARS) == 0u
             || (world.flags & (1u << 10u)) == 0u) return;
 
-    // Map the output pixel footprint back to the RT-input visibility guides. Every covered source sample
-    // must be a primary sky miss with the explicit zero-depth sky marker; a single geometry sample rejects
-    // the output pixel conservatively. The depth check is intentionally independent of the compact mask so
-    // a stale or misclassified mask sample cannot paint stars over a terrain silhouette.
-    float2 sourceSize = float2(pc.sourceWidth, pc.sourceHeight);
-    float2 outputSize = float2(pc.outputWidth, pc.outputHeight);
-    // The RT mask was traced with the frame's subpixel jitter. Undo that shift before looking up the
-    // source visibility footprint; otherwise a terrain edge can borrow the neighboring sky classification.
-    float2 sourceCenter = (float2(pixel) + 0.5) * sourceSize / outputSize - 0.5 - world.jitter;
-    float2 sourceHalfFootprint = 0.5 * sourceSize / outputSize;
-    int2 minSource = int2(ceil(sourceCenter - sourceHalfFootprint));
-    int2 maxSource = int2(floor(sourceCenter + sourceHalfFootprint));
-    if (minSource.x < 0 || minSource.y < 0
-            || maxSource.x >= int(pc.sourceWidth) || maxSource.y >= int(pc.sourceHeight)) return;
-    [loop]
-    for (int y = minSource.y; y <= maxSource.y; y++) {
-        [loop]
-        for (int x = minSource.x; x <= maxSource.x; x++) {
-            if (primarySkyMask.Load(int2(x, y)) < 0.5) return;
-            if (primarySkyDepth.Load(int2(x, y)) > 0.0) return;
-        }
-    }
+    if (!conservativePrimarySky(uint2(pixel)))
+        return;
 
+    float2 outputSize = float2(pc.outputWidth, pc.outputHeight);
     float2 invOutput = 1.0 / outputSize;
     float2 centerPixel = float2(pixel);
     float2 centerUv = (centerPixel + 0.5) * invOutput;

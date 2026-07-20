@@ -2943,9 +2943,6 @@ void main() {
 #if !CAUSTICA_OFFLINE
     if (writeSkyMask) {
         gPrimarySkyMask[pix] = gv_primarySky ? 1.0 : 0.0;
-        // Direct stars use this existing guide as an independent visibility gate. Encode sky as exact
-        // zero and every primary surface as a strictly positive marker, including very distant terrain.
-        gDepth[pix] = gv_primarySky ? 0.0 : max(gv_depth, 1.0e-4);
     }
 #endif
 

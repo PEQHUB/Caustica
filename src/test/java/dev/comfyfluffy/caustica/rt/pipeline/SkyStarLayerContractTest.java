@@ -21,8 +21,7 @@ final class SkyStarLayerContractTest {
         assertTrue(layer.contains("maxAngularFootprint"));
         assertTrue(layer.contains("circularStars"));
         assertTrue(layer.contains("cornerUv"));
-        assertTrue(layer.contains("primarySkyDepth"));
-        assertTrue(layer.contains("- world.jitter"));
+        assertTrue(layer.contains("conservativePrimarySky"));
     }
 
     @Test
@@ -47,7 +46,7 @@ final class SkyStarLayerContractTest {
         String pipeline = Files.readString(Path.of(
                 "src/main/java/dev/comfyfluffy/caustica/rt/pipeline/RtSkyStarLayerPipeline.java"));
         assertTrue(composite.contains("setExtraStorageImage(6, gPrimarySkyMask.view)"));
-        assertTrue(composite.contains("setImages(displayInput.view, gPrimarySkyMask.view, gDepth.view)"));
+        assertTrue(composite.contains("setImages(displayInput.view, gPrimarySkyMask.view)"));
         assertTrue(composite.contains("VK10.VK_FORMAT_R16_SFLOAT, \"primary sky star-layer mask\""));
         int layer = composite.indexOf("skyStarLayerPipeline.dispatch");
         int exposure = composite.indexOf("exposure.record", layer);
@@ -65,8 +64,8 @@ final class SkyStarLayerContractTest {
         int mask = layer.indexOf("primarySkyMask.Load");
         int add = layer.indexOf("scene.rgb + star");
         assertTrue(mask >= 0 && add > mask);
-        assertTrue(layer.contains("primarySkyDepth.Load"));
-        assertTrue(layer.contains("if (minSource.x < 0 || minSource.y < 0"));
+        assertTrue(layer.contains("conservativePrimarySky"));
+        assertTrue(layer.contains("if (!conservativePrimarySky"));
         assertTrue(layer.contains("outputImage[pixel]"));
     }
 }

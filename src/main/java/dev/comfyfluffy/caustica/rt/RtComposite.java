@@ -2554,7 +2554,7 @@ public final class RtComposite {
 
             if ((flags & FRAME_FLAG_DIRECT_SKY_STARS) != 0
                     && gPrimarySkyMask != null && skyStarLayerPipeline != null) {
-                skyStarLayerPipeline.setImages(displayInput.view, gPrimarySkyMask.view, gDepth.view);
+                skyStarLayerPipeline.setImages(displayInput.view, gPrimarySkyMask.view);
                 skyStarLayerPipeline.dispatch(cmd, pushBuf.deviceAddress,
                         renderW, renderH, outputW, outputH);
                 VulkanCommandEncoder.memoryBarrier(cmd, stack); // direct stars visible to exposure/bloom/display
