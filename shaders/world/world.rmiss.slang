@@ -444,7 +444,7 @@ void main(inout Payload payload) {
         float2 local;
         float limb;
         float sunCoverage = solarDisc(dir, sd, pc.celestialRadii.x,
-                unpackHalf2(payload.rayCone).y, pc.skyCelestialAppearance.z, limb);
+                1.0e-4, pc.skyCelestialAppearance.z, limb);
         if (aboveHorizon && sunCoverage > 0.0) {
             col += SUN_DISC_AVG_LUMINANCE * pc.skyCelestialAppearance.x * pc.skySunTint.xyz
                     * spectralTransmittanceToSpace(dir, pc)
