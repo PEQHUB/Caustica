@@ -15,6 +15,7 @@ import org.joml.Vector3fc;
 /** Exact direct traversal for vanilla {@link ModelPart.Cube} geometry. */
 final class RtCuboidEmitter {
     private static final int STANDARD_CORNERS = 8;
+    private static final int MAX_CACHED_ROOTS = 4096;
     private static final ClassValue<Boolean> VANILLA_MODEL_CLASS = new ClassValue<>() {
         @Override
         protected Boolean computeValue(Class<?> type) {
@@ -22,7 +23,9 @@ final class RtCuboidEmitter {
         }
     };
 
-    private final IdentityHashMap<Model<?>, ModelTemplate> templates = new IdentityHashMap<>();
+    // Model.Simple wrappers are created per submission by vanilla. Their root ModelPart is the stable
+    // geometry identity: caching by the wrapper leaked one complete template tree every frame.
+    private final IdentityHashMap<ModelPart, ModelTemplate> templates = new IdentityHashMap<>();
     private final Vector3f scratch = new Vector3f();
     private final float[] quadX = new float[4];
     private final float[] quadY = new float[4];
@@ -41,16 +44,20 @@ final class RtCuboidEmitter {
         if (!VANILLA_MODEL_CLASS.get(model.getClass())) {
             return null;
         }
-        ModelTemplate template = templates.get(model);
-        if (template != null && template.matches(model.root())) {
+        ModelPart root = model.root();
+        ModelTemplate template = templates.get(root);
+        if (template != null && template.matches(root)) {
             return template;
         }
-        template = ModelTemplate.create(model.root());
+        template = ModelTemplate.create(root);
         if (template == null) {
-            templates.remove(model);
+            templates.remove(root);
             return null;
         }
-        templates.put(model, template);
+        if (templates.size() >= MAX_CACHED_ROOTS) {
+            templates.clear();
+        }
+        templates.put(root, template);
         return template;
     }
 
