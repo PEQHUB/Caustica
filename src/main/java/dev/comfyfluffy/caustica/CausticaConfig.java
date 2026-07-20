@@ -31,7 +31,7 @@ import org.slf4j.LoggerFactory;
 public final class CausticaConfig {
     private static final Logger LOGGER = LoggerFactory.getLogger("Caustica");
     private static final List<RuntimeSetting<?>> SETTINGS = new CopyOnWriteArrayList<>();
-    static final int CONFIG_SCHEMA_VERSION = 9;
+    static final int CONFIG_SCHEMA_VERSION = 10;
 
     private static final Path CONFIG_PATH = resolveConfigPath();
     private static final CommentedFileConfig FILE = loadAndMigrateFile(CONFIG_PATH);
@@ -203,6 +203,7 @@ public final class CausticaConfig {
     }
 
     private static CommentedFileConfig loadAndMigrateFile(Path path) {
+        boolean existed = Files.isRegularFile(path);
         CommentedFileConfig config = CommentedFileConfig.builder(path, TomlFormat.instance())
                 .onFileNotFound(FileNotFoundAction.CREATE_EMPTY)
                 .preserveInsertionOrder()
@@ -216,7 +217,7 @@ public final class CausticaConfig {
             config.clear();
             return config;
         }
-        if (migrateLegacySceneConfig(config)) {
+        if (existed && migrateLegacySceneConfig(config)) {
             try {
                 config.save();
                 LOGGER.info("Migrated obsolete physical-scene defaults in {} to schema {}",
@@ -311,6 +312,14 @@ public final class CausticaConfig {
                 config.set("output-scale.percent", migrated);
             }
             config.remove("output-scale.fast-percent");
+        }
+        if (version < 10) {
+            Object modeValue = config.get("frame-generation.mode");
+            if (modeValue == null && config.contains("frame-generation.enabled")) {
+                Boolean enabled = config.get("frame-generation.enabled");
+                config.set("frame-generation.mode",
+                        Boolean.TRUE.equals(enabled) ? "fixed" : "off");
+            }
         }
         config.set("config-version", CONFIG_SCHEMA_VERSION);
         return true;

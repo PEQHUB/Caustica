@@ -16,6 +16,7 @@ public final class StreamlineSwapchainCoordinator {
 
     private boolean configuring;
     private boolean configured;
+    private boolean pluginRequestedForSwapchain;
     private boolean pluginForSwapchain;
     private boolean physicalFifo;
     private boolean vsyncRequested;
@@ -59,7 +60,7 @@ public final class StreamlineSwapchainCoordinator {
         boolean desiredPlugin = CausticaConfig.Rt.Fg.requested()
                 && (!isVsyncRequested() || mailboxSupported);
         boolean desiredHdr = CausticaConfig.Rt.Hdr.enabled();
-        if (desiredPlugin != pluginForSwapchain || desiredHdr != hdrRequestForSwapchain) {
+        if (desiredPlugin != pluginRequestedForSwapchain || desiredHdr != hdrRequestForSwapchain) {
             requestReconfigure();
         }
     }
@@ -106,6 +107,7 @@ public final class StreamlineSwapchainCoordinator {
         physicalFifo = isVsyncConfiguration(configuration);
         presentMode = configuration.presentMode();
         boolean desiredPlugin = CausticaConfig.Rt.Fg.requested() && !physicalFifo;
+        pluginRequestedForSwapchain = desiredPlugin;
         // On the initial Off swapchain, capture adapter support while DLSS-G is still loaded from slInit;
         // the feature is deliberately unloaded immediately below to remove disabled-present overhead.
         RtDlssFg.INSTANCE.probeAvailabilityOnce();

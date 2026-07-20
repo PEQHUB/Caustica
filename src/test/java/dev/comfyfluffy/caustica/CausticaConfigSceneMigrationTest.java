@@ -166,4 +166,29 @@ final class CausticaConfigSceneMigrationTest {
         assertEquals(100, ((Number) config.get("output-scale.percent")).intValue());
         assertFalse(config.contains("output-scale.fast-percent"));
     }
+
+    @Test
+    void schemaTenMigratesLegacyFrameGenerationEnabledToMode() {
+        CommentedConfig disabled = CommentedConfig.inMemory();
+        disabled.set("config-version", 9);
+        disabled.set("frame-generation.enabled", false);
+        assertTrue(CausticaConfig.migrateLegacySceneConfig(disabled));
+        assertEquals("off", disabled.get("frame-generation.mode"));
+
+        CommentedConfig enabled = CommentedConfig.inMemory();
+        enabled.set("config-version", 9);
+        enabled.set("frame-generation.enabled", true);
+        assertTrue(CausticaConfig.migrateLegacySceneConfig(enabled));
+        assertEquals("fixed", enabled.get("frame-generation.mode"));
+    }
+
+    @Test
+    void schemaTenDoesNotOverwriteExplicitModeWhenEnabledExists() {
+        CommentedConfig config = CommentedConfig.inMemory();
+        config.set("config-version", 9);
+        config.set("frame-generation.enabled", false);
+        config.set("frame-generation.mode", "fixed");
+        assertTrue(CausticaConfig.migrateLegacySceneConfig(config));
+        assertEquals("fixed", config.get("frame-generation.mode"));
+    }
 }

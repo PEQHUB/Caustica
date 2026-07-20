@@ -636,7 +636,10 @@ public final class RtDlssFg {
                     generationActiveForPresent() ? framesActuallyPresented : 0L);
         }
         refreshReflexState();
-        int apiError = StreamlineAbi.pollApiError(StreamlineRuntime.library());
+        StreamlineLibrary library = StreamlineRuntime.library();
+        int apiError = StreamlineRuntime.initialized() && library != null
+                ? StreamlineAbi.pollApiError(library)
+                : 0;
         int effectiveError = apiError != 0 ? apiError : presentResult;
         if (isRecoverablePresentResult(effectiveError)) {
             // Swapchain invalidation is part of normal resize/minimize/reconfigure handling. Minecraft
