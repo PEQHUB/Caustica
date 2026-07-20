@@ -63,10 +63,15 @@ final class RtMaterialOverridesTest {
                 JsonParser.parseString("{\"format\":1,\"match\":{\"sprite\":\"minecraft:block/stone\"},"
                         + "\"base\":{\"metalness\":2}}")
                         .getAsJsonObject(), Identifier.parse("test:bad.json")));
-        assertThrows(IllegalArgumentException.class, () -> RtMaterialOverrides.parse(
+    }
+
+    @Test
+    void clampsOutOfRangeEmissionStrengthInsteadOfThrowing() {
+        var rule = RtMaterialOverrides.parse(
                 JsonParser.parseString("{\"format\":1,\"match\":{\"sprite\":\"minecraft:block/stone\"},"
                         + "\"emission\":{\"strength\":5.1}}")
-                        .getAsJsonObject(), Identifier.parse("test:bad.json")));
+                        .getAsJsonObject(), Identifier.parse("test:clamp.json"));
+        assertEquals(5.0f, rule.emissionStrength());
     }
 
     @Test
