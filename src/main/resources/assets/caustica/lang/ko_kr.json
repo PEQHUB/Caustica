@@ -1,4 +1,13 @@
 {
+	"caustica.options.rt.firstPerson.header": "First-Person View",
+	"caustica.options.rt.firstPerson.enabled": "First-Person Body",
+	"caustica.options.rt.firstPerson.enabled.tooltip": "Capture the local player's body and head for secondary rays.",
+	"caustica.options.rt.firstPerson.forward": "Forward Offset",
+	"caustica.options.rt.firstPerson.forward.tooltip": "Move submitted geometry along the player's facing direction.",
+	"caustica.options.rt.firstPerson.vertical": "Vertical Offset",
+	"caustica.options.rt.firstPerson.vertical.tooltip": "Move submitted geometry vertically.",
+	"caustica.options.rt.firstPerson.lateral": "Lateral Offset",
+	"caustica.options.rt.firstPerson.lateral.tooltip": "Move submitted geometry right or left.",
 	"caustica.options.rt.header": "레이 트레이싱",
 
 	"caustica.options.rt.exposureMode": "노출",
@@ -46,6 +55,9 @@
 	"caustica.options.rt.dlssQuality.1": "균형",
 	"caustica.options.rt.dlssQuality.2": "품질",
 	"caustica.options.rt.dlssQuality.5": "DLAA",
+	"caustica.options.rt.dlssQuality.-1": "사용자 지정",
+	"caustica.options.rt.inputScale": "입력 해상도",
+	"caustica.options.rt.inputScale.tooltip": "경로 추적 입력 해상도입니다. DLSS 프리셋이 이 값을 설정하며 직접 변경하면 사용자 지정으로 표시됩니다.",
 
 	"caustica.options.rt.debugView": "디버그 보기",
 	"caustica.options.rt.debugView.tooltip": "최종 이미지 대신 중간 레이 트레이싱 버퍼를 시각화합니다.",
@@ -56,5 +68,6 @@
 	"caustica.options.rt.debugView.4": "거칠기",
 	"caustica.options.rt.debugView.5": "모션",
 	"caustica.options.rt.debugView.6": "스페큘러",
-	"caustica.options.rt.debugView.7": "스페큘러 모션"
+	"caustica.options.rt.debugView.7": "스페큘러 모션",
+	"caustica.options.rt.debugView.8": "톤 매퍼 비교"
 }

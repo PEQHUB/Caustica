@@ -1,11 +1,15 @@
 package dev.comfyfluffy.caustica.rt.entity;
 
 import com.mojang.blaze3d.vertex.PoseStack;
+import dev.comfyfluffy.caustica.CausticaMod;
 import dev.comfyfluffy.caustica.mixin.ModelPartAccessor;
+import dev.comfyfluffy.caustica.rt.RtFrameStats;
 import java.util.Arrays;
+import java.util.HashSet;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import net.minecraft.client.model.Model;
 import net.minecraft.client.model.geom.ModelPart;
 import org.joml.Matrix4f;
@@ -15,7 +19,6 @@ import org.joml.Vector3fc;
 /** Exact direct traversal for vanilla {@link ModelPart.Cube} geometry. */
 final class RtCuboidEmitter {
     private static final int STANDARD_CORNERS = 8;
-    private static final int MAX_CACHED_ROOTS = 4096;
     private static final ClassValue<Boolean> VANILLA_MODEL_CLASS = new ClassValue<>() {
         @Override
         protected Boolean computeValue(Class<?> type) {
@@ -23,9 +26,12 @@ final class RtCuboidEmitter {
         }
     };
 
-    // Model.Simple wrappers are created per submission by vanilla. Their root ModelPart is the stable
-    // geometry identity: caching by the wrapper leaked one complete template tree every frame.
-    private final IdentityHashMap<ModelPart, ModelTemplate> templates = new IdentityHashMap<>();
+    private final IdentityHashMap<Model<?>, ModelTemplate> templates = new IdentityHashMap<>();
+    private final IdentityHashMap<Model<?>, ModelPart> structurallyRejectedRoots = new IdentityHashMap<>();
+    private final Set<Class<?>> loggedNamespaceRejects = new HashSet<>();
+    private final Set<Class<?>> loggedTopologyRejects = new HashSet<>();
+    private final Set<String> loggedSemanticRejects = new HashSet<>();
+    private final StringBuilder emfSemanticScratch = new StringBuilder(128);
     private final Vector3f scratch = new Vector3f();
     private final float[] quadX = new float[4];
     private final float[] quadY = new float[4];
@@ -42,27 +48,189 @@ final class RtCuboidEmitter {
      */
     ModelTemplate prepare(Model<?> model) {
         if (!VANILLA_MODEL_CLASS.get(model.getClass())) {
+            RtFrameStats.FRAME.count("entityDirectRejectNamespace", 1);
+            logFallbackOnce(loggedNamespaceRejects, model, "class namespace");
             return null;
         }
         ModelPart root = model.root();
-        ModelTemplate template = templates.get(root);
-        if (template != null && template.matches(root)) {
-            return template;
-        }
-        template = ModelTemplate.create(root);
-        if (template == null) {
-            templates.remove(root);
+        if (structurallyRejectedRoots.get(model) == root) {
+            RtFrameStats.FRAME.count("entityDirectRejectCachedTopology", 1);
             return null;
         }
-        if (templates.size() >= MAX_CACHED_ROOTS) {
-            templates.clear();
+        ModelTemplate template = templates.get(model);
+        // The root identity is the cheap invalidation guard. Vanilla ModelPart topology is immutable for
+        // the lifetime of a baked model and resource reload clears this cache. EMF is different: animate()
+        // may select another variant, so its complete tree is validated once below after that selection.
+        if (template != null && template.root.part != root) {
+            templates.remove(model);
+            template = null;
         }
-        templates.put(root, template);
+        if (template == null) {
+            template = ModelTemplate.create(root);
+            if (template == null) {
+                structurallyRejectedRoots.put(model, root);
+                RtFrameStats.FRAME.count("entityDirectRejectTopology", 1);
+                logFallbackOnce(loggedTopologyRejects, model,
+                        "nonstandard cube topology: " + describeRejection(root));
+                return null;
+            }
+            structurallyRejectedRoots.remove(model);
+            templates.put(model, template);
+        }
+        // EMF's render boundary performs stateful animation before emitting geometry. The current
+        // compatibility traversal cannot share that exact invocation with the generic parity oracle,
+        // so direct EMF capture is quarantined until a snapshot hook can prove same-invocation parity.
+        if (template.emf && !emfDirectCaptureProven()) {
+            rejectSemantic(model, "EMF direct capture is unavailable; preserving generic render semantics");
+            return null;
+        }
+        if (template.emf) {
+            RtEmfCompatibility.Submission submission = RtEmfCompatibility.beginSubmission();
+            if (!submission.supported()) {
+                rejectSemantic(model, submission.unsupportedReason());
+                return null;
+            }
+            String animationFailure = applyEmfPreRenderAnimation(template.root, submission);
+            if (animationFailure != null) {
+                rejectSemantic(model, animationFailure);
+                return null;
+            }
+            // EMF animation can select a state variant with different cube/child lists. Recompile the
+            // immutable template after that selection instead of traversing the pre-animation topology.
+            if (!template.matches(root)) {
+                template = ModelTemplate.create(root);
+                if (template == null) {
+                    rejectSemantic(model, "EMF animation selected unsupported cube topology");
+                    return null;
+                }
+                templates.put(model, template);
+            }
+            if (!prepareEmfSubmission(template, model, submission)) {
+                return null;
+            }
+        }
         return template;
+    }
+
+    private static boolean emfDirectCaptureProven() {
+        return false;
+    }
+
+    private boolean prepareEmfSubmission(ModelTemplate template, Model<?> model,
+                                         RtEmfCompatibility.Submission submission) {
+        emfSemanticScratch.setLength(0);
+        prepareEmfPart(template.root, submission, emfSemanticScratch);
+        if (template.root.preparedUnsupportedReason != null) {
+            rejectSemantic(model, template.root.preparedUnsupportedReason);
+            return false;
+        }
+        if (template.lastSemanticKey == null || !template.lastSemanticKey.contentEquals(emfSemanticScratch)) {
+            template.lastSemanticKey = emfSemanticScratch.toString();
+        }
+        template.preparedSemanticKey = template.lastSemanticKey;
+        if (template.quarantinedSemanticKeys.contains(template.preparedSemanticKey)) {
+            RtFrameStats.FRAME.count("entityEmfRejectQuarantined", 1);
+            return false;
+        }
+        return true;
+    }
+
+    private String applyEmfPreRenderAnimation(PartTemplate template,
+                                               RtEmfCompatibility.Submission submission) {
+        if (RtEmfCompatibility.isEmfPart(template.part)) {
+            return submission.applyPreRenderAnimation(template.part);
+        }
+        for (PartTemplate child : template.children) {
+            String result = applyEmfPreRenderAnimation(child, submission);
+            if (result == null || !"EMF topology has no EMF model part".equals(result)) {
+                return result;
+            }
+        }
+        return "EMF topology has no EMF model part";
+    }
+
+    private void prepareEmfPart(PartTemplate template, RtEmfCompatibility.Submission submission,
+                                StringBuilder semanticKey) {
+        template.preparedUnsupportedReason = null;
+        RtEmfCompatibility.PartDecision decision = submission.inspect(template.part);
+        template.skipPreparedSubtree = decision.action() == RtEmfCompatibility.Action.SKIP_SUBTREE;
+        semanticKey.append(decision.action().ordinal()).append(':').append(decision.variant()).append(';');
+        if (decision.action() == RtEmfCompatibility.Action.UNSUPPORTED) {
+            template.preparedUnsupportedReason = decision.reason();
+            return;
+        }
+        if (!template.skipPreparedSubtree) {
+            for (PartTemplate child : template.children) {
+                prepareEmfPart(child, submission, semanticKey);
+                if (child.preparedUnsupportedReason != null) {
+                    template.preparedUnsupportedReason = child.preparedUnsupportedReason;
+                    break;
+                }
+            }
+        }
+    }
+
+    private void rejectSemantic(Model<?> model, String reason) {
+        RtFrameStats.FRAME.count("entityEmfRejectSemantic", 1);
+        String key = model.getClass().getName() + '\n' + reason;
+        if (loggedSemanticRejects.add(key)) {
+            logFallback(model, reason);
+        }
     }
 
     void clear() {
         templates.clear();
+        structurallyRejectedRoots.clear();
+        loggedNamespaceRejects.clear();
+        loggedTopologyRejects.clear();
+        loggedSemanticRejects.clear();
+    }
+
+    private static void logFallbackOnce(Set<Class<?>> logged, Model<?> model, String reason) {
+        Class<?> type = model.getClass();
+        if (!logged.add(type)) {
+            return;
+        }
+        logFallback(model, reason);
+    }
+
+    private static void logFallback(Model<?> model, String reason) {
+        Class<?> type = model.getClass();
+        var codeSource = type.getProtectionDomain() != null ? type.getProtectionDomain().getCodeSource() : null;
+        CausticaMod.LOGGER.info("Entity capture backend=GENERIC_FALLBACK: reason={}, modelClass={}, codeSource={}",
+                reason, type.getName(), codeSource != null ? codeSource.getLocation() : "unknown");
+    }
+
+    private static String describeRejection(ModelPart part) {
+        ModelPartAccessor access = (ModelPartAccessor) (Object) part;
+        for (ModelPart.Cube cube : access.caustica$cubes()) {
+            if (cube.getClass() != ModelPart.Cube.class) {
+                return "cube subclass " + cube.getClass().getName();
+            }
+            for (ModelPart.Polygon polygon : cube.polygons) {
+                if (polygon == null) {
+                    return "null polygon";
+                }
+                if (polygon.normal() == null) {
+                    return "null polygon normal";
+                }
+                if (polygon.vertices().length != 4) {
+                    return "polygon vertex count " + polygon.vertices().length;
+                }
+                for (ModelPart.Vertex vertex : polygon.vertices()) {
+                    if (vertex == null) {
+                        return "null polygon vertex";
+                    }
+                }
+            }
+        }
+        for (ModelPart child : access.caustica$children().values()) {
+            String childReason = describeRejection(child);
+            if (!"unknown".equals(childReason)) {
+                return childReason;
+            }
+        }
+        return "unknown";
     }
 
     /** Return packed actual cube counts: specialized in the high 32 bits, generic in the low 32 bits. */
@@ -73,7 +241,7 @@ final class RtCuboidEmitter {
 
     private long emitPart(PartTemplate template, PoseStack poseStack, RtEntityCapture capture, int color) {
         ModelPart part = template.part;
-        if (!part.visible || template.empty()) {
+        if (!part.visible || template.empty() || template.skipPreparedSubtree) {
             return 0L;
         }
         poseStack.pushPose();
@@ -96,6 +264,27 @@ final class RtCuboidEmitter {
         }
         poseStack.popPose();
         return counts;
+    }
+
+    boolean needsCanary(ModelTemplate template) {
+        return template.emf && !template.verifiedSemanticKeys.contains(template.preparedSemanticKey);
+    }
+
+    void approveCanary(ModelTemplate template) {
+        template.verifiedSemanticKeys.add(template.preparedSemanticKey);
+        RtFrameStats.FRAME.count("entityEmfCanaryPass", 1);
+        CausticaMod.LOGGER.info("Entity capture backend=EMF_DIRECT enabled: semanticKey=0x{}",
+                Integer.toHexString(template.preparedSemanticKey.hashCode()));
+    }
+
+    void rejectCanary(ModelTemplate template, Model<?> model, String reason) {
+        template.quarantinedSemanticKeys.add(template.preparedSemanticKey);
+        RtFrameStats.FRAME.count("entityEmfCanaryReject", 1);
+        rejectSemantic(model, "strict EMF canary mismatch: " + reason);
+    }
+
+    boolean isEmf(ModelTemplate template) {
+        return template.emf;
     }
 
     private void emitEightCornerCube(EightCornerCube cube, PoseStack.Pose pose,
@@ -140,10 +329,16 @@ final class RtCuboidEmitter {
     static final class ModelTemplate {
         final PartTemplate root;
         final int maxVertices;
+        final boolean emf;
+        final Set<String> verifiedSemanticKeys = new HashSet<>();
+        final Set<String> quarantinedSemanticKeys = new HashSet<>();
+        String lastSemanticKey;
+        String preparedSemanticKey;
 
         private ModelTemplate(PartTemplate root) {
             this.root = root;
             this.maxVertices = root.maxVertices;
+            this.emf = root.emf;
         }
 
         static ModelTemplate create(ModelPart root) {
@@ -161,6 +356,9 @@ final class RtCuboidEmitter {
         final CubeTemplate[] cubes;
         final PartTemplate[] children;
         final int maxVertices;
+        final boolean emf;
+        boolean skipPreparedSubtree;
+        String preparedUnsupportedReason;
 
         private PartTemplate(ModelPart part, CubeTemplate[] cubes, PartTemplate[] children) {
             this.part = part;
@@ -174,6 +372,14 @@ final class RtCuboidEmitter {
                 vertices = Math.addExact(vertices, child.maxVertices);
             }
             this.maxVertices = vertices;
+            boolean containsEmf = RtEmfCompatibility.isEmfPart(part);
+            for (CubeTemplate cube : cubes) {
+                containsEmf |= cube.emf;
+            }
+            for (PartTemplate child : children) {
+                containsEmf |= child.emf;
+            }
+            this.emf = containsEmf;
         }
 
         static PartTemplate create(ModelPart part) {
@@ -230,19 +436,22 @@ final class RtCuboidEmitter {
             }
             return true;
         }
+
     }
 
     private static class CubeTemplate {
         final ModelPart.Cube cube;
         final int faceCount;
+        final boolean emf;
 
         CubeTemplate(ModelPart.Cube cube) {
             this.cube = cube;
             this.faceCount = cube.polygons.length;
+            this.emf = RtEmfCompatibility.isEmfCube(cube);
         }
 
         static CubeTemplate create(ModelPart.Cube cube) {
-            if (cube.getClass() != ModelPart.Cube.class) {
+            if (cube.getClass() != ModelPart.Cube.class && !RtEmfCompatibility.isEmfCube(cube)) {
                 return null;
             }
             ModelPart.Polygon[] polygons = cube.polygons;

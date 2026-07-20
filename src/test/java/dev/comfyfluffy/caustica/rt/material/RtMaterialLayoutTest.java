@@ -3,6 +3,7 @@ package dev.comfyfluffy.caustica.rt.material;
 import dev.comfyfluffy.caustica.rt.gen.MaterialHeaderData;
 import dev.comfyfluffy.caustica.rt.gen.MaterialHeaderData.Float4;
 import dev.comfyfluffy.caustica.rt.gen.WorldPushConstantsData;
+import dev.comfyfluffy.caustica.rt.gen.SharcPushAddrData;
 import org.junit.jupiter.api.Test;
 
 import java.nio.ByteBuffer;
@@ -34,12 +35,25 @@ final class RtMaterialLayoutTest {
 
     @Test
     void reflectedWorldPushConstantsIncludeMaterialTableAndDebugView() {
-        assertEquals(40, WorldPushConstantsData.BYTE_SIZE);
+        assertEquals(48, WorldPushConstantsData.BYTE_SIZE);
         ByteBuffer data = ByteBuffer.allocateDirect(WorldPushConstantsData.BYTE_SIZE)
                 .order(ByteOrder.nativeOrder());
-        new WorldPushConstantsData(1L, 2L, 3L, 4L, 5, 6).write(data);
+        new WorldPushConstantsData(1L, 2L, 3L, 4L, 5, 6, -2.5f, 512).write(data);
         assertEquals(4L, data.getLong(24));
         assertEquals(5, data.getInt(32));
         assertEquals(6, data.getInt(36));
+        assertEquals(-2.5f, data.getFloat(40));
+        assertEquals(512, data.getInt(44));
+    }
+
+    @Test
+    void reflectedSharcPushKeepsAlignedFrameAddressAfterMipBias() {
+        assertEquals(56, SharcPushAddrData.BYTE_SIZE);
+        ByteBuffer data = ByteBuffer.allocateDirect(SharcPushAddrData.BYTE_SIZE)
+                .order(ByteOrder.nativeOrder());
+        new SharcPushAddrData(1L, 2L, 3L, 4L, 5, 6, -1.5f, 512, 7L).write(data);
+        assertEquals(-1.5f, data.getFloat(40));
+        assertEquals(512, data.getInt(44));
+        assertEquals(7L, data.getLong(48));
     }
 }

@@ -1,0 +1,183 @@
+name: Production candidate
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  VULKAN_SDK_VERSION: 1.4.350.0
+  VULKAN_SDK_LINUX_SHA256: b65f068ab36263559da49d7cacd7e7b9df23824ca8b68ccc522a2b06f5725df2
+  SLANG_VERSION: "2026.13"
+  SLANG_SHA256: 6bae110faa3b51ea00316e0a1dd4f40b11eb196a2e3a135074300bf2d5d4c777
+  SLANG_LINUX_SHA256: fd86d236b31e38577eb14a040aacb8179cbd9b3289f09ca7aca483886c50f589
+
+jobs:
+  linux-nrd:
+    name: Build Linux x64 NRD payload
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Install Vulkan SDK and pinned Slang
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdk_archive="vulkansdk-linux-x86_64-${VULKAN_SDK_VERSION}.tar.xz"
+          curl --fail --location --retry 3 --output "${sdk_archive}" \
+            "https://sdk.lunarg.com/sdk/download/${VULKAN_SDK_VERSION}/linux/${sdk_archive}"
+          echo "${VULKAN_SDK_LINUX_SHA256}  ${sdk_archive}" | sha256sum --check
+          sdk_parent="${RUNNER_TEMP}/vulkan-sdk"
+          mkdir -p "${sdk_parent}"
+          tar -xf "${sdk_archive}" -C "${sdk_parent}"
+          sdk_root="${sdk_parent}/${VULKAN_SDK_VERSION}/x86_64"
+          echo "VULKAN_SDK=${sdk_root}" >> "${GITHUB_ENV}"
+          echo "${sdk_root}/bin" >> "${GITHUB_PATH}"
+          slang_archive="slang-${SLANG_VERSION}-linux-x86_64-glibc-2.27.tar.gz"
+          curl --fail --location --retry 3 --output "${slang_archive}" \
+            "https://github.com/shader-slang/slang/releases/download/v${SLANG_VERSION}/${slang_archive}"
+          echo "${SLANG_LINUX_SHA256}  ${slang_archive}" | sha256sum --check
+          slang_root="${RUNNER_TEMP}/slang-${SLANG_VERSION}"
+          mkdir -p "${slang_root}"
+          tar -xf "${slang_archive}" -C "${slang_root}"
+          slangc="$(find "${slang_root}" -type f -name slangc -perm -u+x | head -n 1)"
+          echo "CAUSTICA_SLANGC=${slangc}" >> "${GITHUB_ENV}"
+      - name: Build Linux NRD bridge
+        run: ./gradlew buildNrdBridge --stacktrace
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nrd-linux-x64
+          path: build/native/nrd_bridge/release/libnrdbridge.so
+          if-no-files-found: error
+
+  build:
+    name: Build global reconstruction candidate
+    runs-on: windows-2022
+    needs: linux-nrd
+
+    steps:
+      - name: Checkout Caustica
+        uses: actions/checkout@v4
+
+      - name: Setup Java 25
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Setup Vulkan SDK
+        uses: humbletim/setup-vulkan-sdk@v1.2.1
+        with:
+          vulkan-query-version: ${{ env.VULKAN_SDK_VERSION }}
+          vulkan-components: Vulkan-Headers, Vulkan-Loader, Glslang, SPIRV-Tools
+          vulkan-use-cache: true
+
+      - name: Install pinned Slang
+        shell: pwsh
+        run: |
+          $archive = "slang-$env:SLANG_VERSION-windows-x86_64.zip"
+          $url = "https://github.com/shader-slang/slang/releases/download/v$env:SLANG_VERSION/$archive"
+          Invoke-WebRequest -Uri $url -OutFile $archive
+          if ((Get-FileHash $archive -Algorithm SHA256).Hash -ne $env:SLANG_SHA256.ToUpperInvariant()) {
+            throw "Pinned Slang archive hash mismatch"
+          }
+          $root = Join-Path $env:RUNNER_TEMP "slang-$env:SLANG_VERSION"
+          Expand-Archive -LiteralPath $archive -DestinationPath $root
+          $slangc = Get-ChildItem $root -Recurse -Filter slangc.exe | Select-Object -First 1
+          if (-not $slangc) { throw "slangc.exe was not found" }
+          "CAUSTICA_SLANGC=$($slangc.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
+          & $slangc.FullName -version
+
+      - name: Download private Streamline 2.12 production SDK
+        shell: pwsh
+        env:
+          STREAMLINE_SDK_URL: ${{ secrets.STREAMLINE_SDK_URL }}
+          STREAMLINE_SDK_SHA256: ${{ secrets.STREAMLINE_SDK_SHA256 }}
+        run: |
+          if (-not $env:STREAMLINE_SDK_URL -or -not $env:STREAMLINE_SDK_SHA256) {
+            throw "Configure STREAMLINE_SDK_URL and STREAMLINE_SDK_SHA256 repository secrets"
+          }
+          $archive = Join-Path $env:RUNNER_TEMP 'streamline-sdk.zip'
+          Invoke-WebRequest -Uri $env:STREAMLINE_SDK_URL -OutFile $archive
+          if ((Get-FileHash $archive -Algorithm SHA256).Hash -ne $env:STREAMLINE_SDK_SHA256.ToUpperInvariant()) {
+            throw "Streamline SDK archive hash mismatch"
+          }
+          $extract = Join-Path $env:RUNNER_TEMP 'streamline-sdk'
+          Expand-Archive -LiteralPath $archive -DestinationPath $extract
+          $interposer = Get-ChildItem $extract -Recurse -Filter sl.interposer.dll |
+            Where-Object { $_.FullName -match '[\\/]bin[\\/]x64[\\/]sl\.interposer\.dll$' } |
+            Select-Object -First 1
+          if (-not $interposer) { throw "Streamline production bin/x64 directory was not found" }
+          $sdk = Split-Path (Split-Path (Split-Path $interposer.FullName -Parent) -Parent) -Parent
+          "STREAMLINE_SDK=$sdk" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Download pinned private SHaRC 1.6.5 SDK
+        shell: pwsh
+        env:
+          SHARC_SDK_URL: ${{ secrets.SHARC_SDK_URL }}
+          SHARC_SDK_SHA256: ${{ secrets.SHARC_SDK_SHA256 }}
+        run: |
+          if (-not $env:SHARC_SDK_URL -or -not $env:SHARC_SDK_SHA256) {
+            throw "Configure SHARC_SDK_URL and SHARC_SDK_SHA256 repository secrets"
+          }
+          $archive = Join-Path $env:RUNNER_TEMP 'sharc-sdk.zip'
+          Invoke-WebRequest -Uri $env:SHARC_SDK_URL -OutFile $archive
+          if ((Get-FileHash $archive -Algorithm SHA256).Hash -ne $env:SHARC_SDK_SHA256.ToUpperInvariant()) {
+            throw "SHaRC SDK archive hash mismatch"
+          }
+          $extract = Join-Path $env:RUNNER_TEMP 'sharc-sdk'
+          Expand-Archive -LiteralPath $archive -DestinationPath $extract
+          $header = Get-ChildItem $extract -Recurse -Filter SharcCommon.h | Select-Object -First 1
+          if (-not $header -or (Split-Path $header.DirectoryName -Leaf) -ne 'include') {
+            throw "SHaRC include/SharcCommon.h was not found"
+          }
+          $sdk = Split-Path $header.DirectoryName -Parent
+          "SHARC_SDK=$sdk" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Download Linux NRD payload
+        uses: actions/download-artifact@v4
+        with:
+          name: nrd-linux-x64
+          path: ${{ runner.temp }}/nrd-linux-x64
+
+      - name: Select Linux NRD payload for the global JAR
+        shell: pwsh
+        run: |
+          $payload = Get-ChildItem "$env:RUNNER_TEMP\nrd-linux-x64" -Recurse -Filter libnrdbridge.so |
+            Select-Object -First 1
+          if (-not $payload) { throw "Linux NRD payload was not downloaded" }
+          "NRD_LINUX_X64=$($payload.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Build and test exact production candidate
+        shell: pwsh
+        run: .\gradlew.bat clean build --stacktrace
+
+      - name: Record candidate hashes
+        shell: pwsh
+        run: |
+          $hashes = Get-FileHash build\libs\*.jar -Algorithm SHA256 |
+            Select-Object @{Name='File';Expression={ Split-Path $_.Path -Leaf }}, Algorithm, Hash
+          $hashes | Format-Table -AutoSize
+          New-Item -ItemType Directory -Path build\reports -Force | Out-Null
+          $hashes | ConvertTo-Json | Set-Content build\reports\production-candidate-sha256.json -Encoding UTF8
+
+      - name: Upload candidate for review
+        uses: actions/upload-artifact@v4
+        with:
+          name: caustica-production-candidate-${{ github.sha }}
+          path: |
+            build/libs/caustica-*.jar
+            !build/libs/*-sources.jar
+            !build/libs/*-dev.jar
+            build/reports/production-candidate-sha256.json
+          if-no-files-found: error
+          retention-days: 7

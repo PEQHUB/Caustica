@@ -29,15 +29,18 @@ loom {
 			setConfigName("Fabric Client")
 			ideConfigGenerated = true
 			runDir = "run"
+			// Caustica cannot render on OpenGL. An explicit launch argument also prevents Minecraft's
+			// post-crash fallback from silently overriding the persisted Vulkan preference in dev runs.
+			programArg "--graphicsBackend"
+			programArg "VULKAN"
 			// java.lang.foreign restricted methods (FFM bindings to amd_fidelityfx_vk.dll)
 			vmArg "--enable-native-access=ALL-UNNAMED"
-
             // NVIDIA NGX (DLSS) allocates ~1MB on the stack during init, which overflows Java's default 1MB thread stack.
             // pass -Xss here directly so the main render thread is resized before the VM parses JAVA_TOOL_OPTIONS.
             vmArg "-Xss16m"
 
             // NixOS fix: Gradle forks drop the dev-shell's LD_LIBRARY_PATH.
-            // We manually add the driver path so NGX can successfully dlopen libnvidia-ngx.so.1.
+            // We manually add the driver path so NVIDIA's Streamline plugins can load their driver runtime.
             if (file("/run/opengl-driver/lib").exists()) {
                 def inherited = System.getenv("LD_LIBRARY_PATH")
                 environmentVariable "LD_LIBRARY_PATH",
@@ -66,13 +69,34 @@ dependencies {
 	// ModConfigSpec is built on.
 	include implementation("com.electronwill.night-config:core:3.8.3")
 	include implementation("com.electronwill.night-config:toml:3.8.3")
+	testImplementation "org.junit.jupiter:junit-jupiter:5.11.4"
+	testRuntimeOnly "org.junit.platform:junit-platform-launcher:1.11.4"
+}
+
+// Production is the normal artifact. Development plugins remain an explicit diagnostics-only build.
+def streamlineVariant = (findProperty("streamlineVariant") ?: "production")
+		.toString().toLowerCase(java.util.Locale.ROOT)
+if (!(streamlineVariant in ["development", "production"])) {
+	throw new GradleException("Unknown Streamline variant '${streamlineVariant}'. Expected 'development' or 'production'.")
+}
+def streamlineVulkanMailboxVsync = (findProperty("streamlineVulkanMailboxVsync") ?: "false")
+		.toString().toBoolean()
+if (streamlineVulkanMailboxVsync && streamlineVariant != "development") {
+	throw new GradleException("Streamline 2.12 exposes vSyncConfig only in its development plugin; "
+			+ "use -PstreamlineVariant=development with -PstreamlineVulkanMailboxVsync=true.")
 }
 
 processResources {
 	inputs.property "version", project.version
+	inputs.property "streamlineVariant", streamlineVariant
+	inputs.property "streamlineVulkanMailboxVsync", streamlineVulkanMailboxVsync
 
 	filesMatching("fabric.mod.json") {
 		expand "version": inputs.properties.version
+	}
+	filesMatching("caustica/streamline.properties") {
+		expand "streamlineVariant": streamlineVariant,
+				"streamlineVulkanMailboxVsync": streamlineVulkanMailboxVsync
 	}
 }
 
@@ -84,12 +108,70 @@ def resolveVulkanTool = { String name ->
 	def exe = org.gradle.internal.os.OperatingSystem.current().windows ? ".exe" : ""
 	def sdk = System.getenv("VULKAN_SDK")
 	if (sdk) {
-		def fromSdk = file("${sdk}/Bin/${name}${exe}")
-		if (fromSdk.exists()) {
-			return fromSdk.absolutePath
+		for (def directory : ["Bin", "bin"]) {
+			def fromSdk = file("${sdk}/${directory}/${name}${exe}")
+			if (fromSdk.exists()) {
+				return fromSdk.absolutePath
+			}
 		}
 	}
 	return "${name}${exe}" // fall back to PATH; exec fails with a clear message if absent
+}
+
+// Keep the Vulkan SDK and shader compiler identities independent. Streamline's native bridge needs the
+// real Vulkan SDK, while production shaders are reviewed and accepted specifically with Slang 2026.13.
+def requiredSlangVersion = "2026.13"
+def configuredSlangc = (findProperty("slangc") ?: System.getenv("CAUSTICA_SLANGC"))?.toString()
+if (!configuredSlangc) {
+	throw new GradleException("Pinned Slang ${requiredSlangVersion} is required. Set CAUSTICA_SLANGC "
+			+ "or pass -Pslangc=<path-to-slangc>.")
+}
+def pinnedSlangc = file(configuredSlangc)
+if (!pinnedSlangc.isFile()) {
+	throw new GradleException("Pinned Slang compiler does not exist: ${pinnedSlangc.absolutePath}")
+}
+def slangVersionProbe = providers.exec {
+	commandLine pinnedSlangc.absolutePath, "-version"
+}
+def actualSlangVersion = (slangVersionProbe.standardOutput.asText.get()
+		+ "\n" + slangVersionProbe.standardError.asText.get()).trim()
+if (!actualSlangVersion.readLines().any { it.trim() == requiredSlangVersion }) {
+	throw new GradleException("Expected Slang ${requiredSlangVersion}, got '${actualSlangVersion}' from "
+			+ pinnedSlangc.absolutePath)
+}
+
+// NVIDIA SHaRC is an external, separately licensed shader SDK. Its source is never copied into the
+// LGPL source tree; only validated SPIR-V object code and the NVIDIA license enter a runtime JAR.
+def sharcVersion = "1.6.5.0"
+def sharcCommit = "0b9f58bbc8c41736042d4da964830a247e424a00"
+def configuredSharcSdk = (findProperty("sharcSdk") ?: System.getenv("SHARC_SDK") ?: "").toString()
+def sharcOptOut = providers.gradleProperty("withoutSharc")
+		.map { it.toBoolean() }.getOrElse(false)
+if (sharcOptOut && !configuredSharcSdk.isBlank()) {
+	throw new GradleException("Choose either a SHARC_SDK/sharcSdk input or -PwithoutSharc=true, not both")
+}
+def sharcHeaderHashes = [
+	"include/HashGridCommon.h": "980D4CE2FE53273D55FE1DD771B155F89BB28C86D19947427F318D8661F082A4",
+	"include/SharcCommon.h": "0F61B11E89E0EA80292194DDE6B33478D6E45DD2D9971A77F5658045A9F6BDC3",
+	"include/SharcGlsl.h": "C1802A975BC47196709892C89E35C7212BDBB41568A3AC60F37460AAE52F9469",
+	"include/SharcTypes.h": "0B9D8AC0A4A8C8B303F6BDD338652CA251E5E5152B47CB55972DDD5904B4CC08",
+	"License.md": "8FF8A1723EE41B2647B5B5CD5EF961C7F58FA617803D6DE3EA68F954F85FF419"
+]
+def validateSharcSdk = {
+	if (configuredSharcSdk.isBlank()) return
+	def root = file(configuredSharcSdk)
+	def digest = java.security.MessageDigest.getInstance("SHA-256")
+	def invalid = sharcHeaderHashes.findAll { relative, expected ->
+		def candidate = new File(root, relative)
+		if (!candidate.isFile()) return true
+		digest.reset()
+		def actual = digest.digest(candidate.bytes).encodeHex().toString().toUpperCase(java.util.Locale.ROOT)
+		return actual != expected
+	}.keySet()
+	if (!invalid.empty) {
+		throw new GradleException("SHARC_SDK is not the pinned NVIDIA SHaRC v${sharcVersion} (${sharcCommit}); "
+				+ "missing or hash-mismatched: ${invalid.join(', ')}")
+	}
 }
 
 abstract class CompileShaders extends DefaultTask {
@@ -97,7 +179,9 @@ abstract class CompileShaders extends DefaultTask {
 	@OutputDirectory abstract DirectoryProperty getOutDir()
 	@Input abstract Property<String> getGlslang()
 	@Input abstract Property<String> getSpirvVal()
+	@Input abstract Property<String> getSpirvDis()
 	@Input abstract Property<String> getSlangc()
+	@Input abstract Property<String> getSharcSdk()
 
 	@Inject abstract ExecOperations getExecOps()
 
@@ -131,16 +215,17 @@ abstract class CompileShaders extends DefaultTask {
 		}
 		def compileOneSlang = { File src, File spv, List<String> extra ->
 			execOps.exec {
-				// Embed Slang source and line mappings in SPIR-V for RenderDoc/Nsight source debugging.
 				commandLine([slangc.get(), src.absolutePath, "-target", "spirv",
 						"-profile", "spirv_1_5", "-matrix-layout-column-major",
-						"-warnings-as-errors", "all", "-warnings-disable", "41012", "-g"] + extra
+						"-warnings-as-errors", "all", "-warnings-disable", "41012",
+						"-I", new File(srcDir.get().asFile, "world").absolutePath] + extra
 						+ ["-o", spv.absolutePath])
 			}
 			validate(spv)
 		}
 		def shaderFiles = srcDir.get().asFileTree.matching {
 			include stageIncludes
+			exclude "sharc/**"
 		}.files.sort { it.absolutePath }
 		def duplicateOutputs = shaderFiles
 				.groupBy { "${outBase(it)}.spv" }
@@ -160,17 +245,224 @@ abstract class CompileShaders extends DefaultTask {
 			def base = outBase(src)
 			def spv = new File(scratchDir, "${base}.spv")
 			if (src.name.endsWith(".slang")) {
-				// Build both SER encodings from one source; RtDeviceBringup selects the supported variant.
+				// Build both hit-object encodings from one source; RtDeviceBringup selects the supported backend.
+				// Live rendering omits invocation reordering. Offline is an independent throughput specialization.
 				compileOneSlang(src, spv, base == "world.rgen"
-						? ["-capability", "spvShaderInvocationReorderEXT"] : [])
+						? ["-DCAUSTICA_OFFLINE=0", "-DCAUSTICA_SER=0", "-DCAUSTICA_PORTABLE_TRACE=0",
+						   "-DCAUSTICA_TRANSPARENCY_HQ=0", "-O2", "-fp-mode", "precise",
+						   "-capability", "spvShaderInvocationReorderEXT"] : [])
 				if (base == "world.rgen") {
+					compileOneSlang(src, new File(scratchDir, "world_base.rgen.spv"),
+							["-DCAUSTICA_OFFLINE=0", "-DCAUSTICA_SER=0", "-DCAUSTICA_PORTABLE_TRACE=1",
+							 "-DCAUSTICA_TRANSPARENCY_HQ=0", "-O2", "-fp-mode", "precise"])
 					compileOneSlang(src, new File(scratchDir, "world_nv.rgen.spv"),
-							["-capability", "spvShaderInvocationReorderNV"])
+							["-DCAUSTICA_OFFLINE=0", "-DCAUSTICA_SER=0", "-DCAUSTICA_PORTABLE_TRACE=0",
+							 "-DCAUSTICA_TRANSPARENCY_HQ=0", "-O2", "-fp-mode", "precise",
+							 "-capability", "spvShaderInvocationReorderNV"])
+					compileOneSlang(src, new File(scratchDir, "world_base_hq.rgen.spv"),
+							["-DCAUSTICA_OFFLINE=0", "-DCAUSTICA_SER=0", "-DCAUSTICA_PORTABLE_TRACE=1",
+							 "-DCAUSTICA_TRANSPARENCY_HQ=1", "-O2", "-fp-mode", "precise"])
+					compileOneSlang(src, new File(scratchDir, "world_hq.rgen.spv"),
+							["-DCAUSTICA_OFFLINE=0", "-DCAUSTICA_SER=0", "-DCAUSTICA_PORTABLE_TRACE=0",
+							 "-DCAUSTICA_TRANSPARENCY_HQ=1", "-O2", "-fp-mode", "precise",
+							 "-capability", "spvShaderInvocationReorderEXT"])
+					compileOneSlang(src, new File(scratchDir, "world_nv_hq.rgen.spv"),
+							["-DCAUSTICA_OFFLINE=0", "-DCAUSTICA_SER=0", "-DCAUSTICA_PORTABLE_TRACE=0",
+							 "-DCAUSTICA_TRANSPARENCY_HQ=1", "-O2", "-fp-mode", "precise",
+							 "-capability", "spvShaderInvocationReorderNV"])
+					def nrdDefines = ["-DCAUSTICA_OFFLINE=0", "-DCAUSTICA_SER=0", "-DCAUSTICA_NRD=1",
+							"-DCAUSTICA_TRANSPARENCY_HQ=0", "-O2", "-fp-mode", "precise"]
+					compileOneSlang(src, new File(scratchDir, "world_nrd_base.rgen.spv"),
+							nrdDefines + ["-DCAUSTICA_PORTABLE_TRACE=1"])
+					compileOneSlang(src, new File(scratchDir, "world_nrd.rgen.spv"),
+							nrdDefines + ["-DCAUSTICA_PORTABLE_TRACE=0", "-capability", "spvShaderInvocationReorderEXT"])
+					compileOneSlang(src, new File(scratchDir, "world_nrd_nv.rgen.spv"),
+							nrdDefines + ["-DCAUSTICA_PORTABLE_TRACE=0", "-capability", "spvShaderInvocationReorderNV"])
+					// Offline uses the same transport/material source but a separate entrypoint binary and sampler.
+					compileOneSlang(src, new File(scratchDir, "world_offline_base.rgen.spv"),
+							["-DCAUSTICA_OFFLINE=1", "-DCAUSTICA_SER=0", "-DCAUSTICA_PORTABLE_TRACE=1", "-O2", "-fp-mode", "precise"])
+					compileOneSlang(src, new File(scratchDir, "world_offline.rgen.spv"),
+							["-DCAUSTICA_OFFLINE=1", "-DCAUSTICA_SER=1", "-DCAUSTICA_PORTABLE_TRACE=0", "-O2", "-fp-mode", "precise",
+							 "-capability", "spvShaderInvocationReorderEXT"])
+					compileOneSlang(src, new File(scratchDir, "world_offline_nv.rgen.spv"),
+							["-DCAUSTICA_OFFLINE=1", "-DCAUSTICA_SER=1", "-DCAUSTICA_PORTABLE_TRACE=0", "-O2", "-fp-mode", "precise",
+							 "-capability", "spvShaderInvocationReorderNV"])
 				}
 			} else {
-				compileOne(src, spv, [])
+				def particleHistory = base == "dlssd_disocclusion.comp"
+				compileOne(src, spv, particleHistory ? ["-DCAUSTICA_PARTICLE_TEMPORAL_HISTORY=0"] : [])
+				if (particleHistory) {
+					compileOne(src, new File(scratchDir, "dlssd_disocclusion_particle_history.comp.spv"),
+							["-DCAUSTICA_PARTICLE_TEMPORAL_HISTORY=1"])
+				}
 			}
 		}
+		def sharcRootPath = sharcSdk.get()
+		if (!sharcRootPath.isBlank()) {
+			def sharcRoot = new File(sharcRootPath)
+			def sharcInclude = ["-I", new File(srcDir.get().asFile, "world").absolutePath,
+					"-I", new File(srcDir.get().asFile, "sharc").absolutePath,
+					"-I", new File(sharcRoot, "include").absolutePath]
+			def variantDefines = ["-DCAUSTICA_SHARC=1", "-DCAUSTICA_OFFLINE=0", "-DCAUSTICA_SER=0",
+					"-O2", "-fp-mode", "precise"]
+			def queryDefines = variantDefines + ["-DCAUSTICA_SHARC_QUERY=1", "-DCAUSTICA_SHARC_UPDATE=0",
+					"-DCAUSTICA_SHARC_DIAGNOSTICS=0"]
+			def diffuseQueryDefines = queryDefines + ["-DCAUSTICA_SHARC_GLOSSY=0",
+					"-DCAUSTICA_SHARC_LIVE_SECONDARY_DIRECT=1"]
+			def primaryQueryDefines = queryDefines + ["-DCAUSTICA_SHARC_PRIMARY_DIFFUSE=1"]
+			def updateDefines = variantDefines + ["-DCAUSTICA_SHARC_QUERY=0", "-DCAUSTICA_SHARC_UPDATE=1",
+					"-DCAUSTICA_SHARC_DIAGNOSTICS=0",
+					"-warnings-disable", "41000"]
+			def diagnosticQueryDefines = variantDefines + ["-DCAUSTICA_SHARC_QUERY=1",
+					"-DCAUSTICA_SHARC_UPDATE=0", "-DCAUSTICA_SHARC_DIAGNOSTICS=1"]
+			def primaryDiagnosticQueryDefines = diagnosticQueryDefines +
+					["-DCAUSTICA_SHARC_PRIMARY_DIFFUSE=1"]
+			def diagnosticUpdateDefines = variantDefines + ["-DCAUSTICA_SHARC_QUERY=0",
+					"-DCAUSTICA_SHARC_UPDATE=1", "-DCAUSTICA_SHARC_DIAGNOSTICS=1",
+					"-warnings-disable", "41000"]
+			def world = new File(srcDir.get().asFile, "world")
+			def sharc = new File(srcDir.get().asFile, "sharc")
+			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc.rgen.spv"),
+					queryDefines + sharcInclude + ["-capability", "spvShaderInvocationReorderEXT"])
+			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_base.rgen.spv"),
+					queryDefines + sharcInclude + ["-DCAUSTICA_PORTABLE_TRACE=1"])
+			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_nv.rgen.spv"),
+					queryDefines + sharcInclude + ["-capability", "spvShaderInvocationReorderNV"])
+			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_diffuse.rgen.spv"),
+					diffuseQueryDefines + sharcInclude + ["-capability", "spvShaderInvocationReorderEXT"])
+			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_diffuse_base.rgen.spv"),
+					diffuseQueryDefines + sharcInclude + ["-DCAUSTICA_PORTABLE_TRACE=1"])
+			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_diffuse_nv.rgen.spv"),
+					diffuseQueryDefines + sharcInclude + ["-capability", "spvShaderInvocationReorderNV"])
+			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_primary.rgen.spv"),
+					primaryQueryDefines + sharcInclude + ["-capability", "spvShaderInvocationReorderEXT"])
+			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_primary_base.rgen.spv"),
+					primaryQueryDefines + sharcInclude + ["-DCAUSTICA_PORTABLE_TRACE=1"])
+			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_primary_nv.rgen.spv"),
+					primaryQueryDefines + sharcInclude + ["-capability", "spvShaderInvocationReorderNV"])
+			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_update.rgen.spv"),
+					updateDefines + sharcInclude + ["-capability", "spvShaderInvocationReorderEXT"])
+			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_update_base.rgen.spv"),
+					updateDefines + sharcInclude + ["-DCAUSTICA_PORTABLE_TRACE=1"])
+			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_update_nv.rgen.spv"),
+					updateDefines + sharcInclude + ["-capability", "spvShaderInvocationReorderNV"])
+			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_diagnostic.rgen.spv"),
+					diagnosticQueryDefines + sharcInclude + ["-capability", "spvShaderInvocationReorderEXT"])
+			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_diagnostic_base.rgen.spv"),
+					diagnosticQueryDefines + sharcInclude + ["-DCAUSTICA_PORTABLE_TRACE=1"])
+			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_diagnostic_nv.rgen.spv"),
+					diagnosticQueryDefines + sharcInclude + ["-capability", "spvShaderInvocationReorderNV"])
+			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_primary_diagnostic.rgen.spv"),
+					primaryDiagnosticQueryDefines + sharcInclude + ["-capability", "spvShaderInvocationReorderEXT"])
+			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_primary_diagnostic_base.rgen.spv"),
+					primaryDiagnosticQueryDefines + sharcInclude + ["-DCAUSTICA_PORTABLE_TRACE=1"])
+			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_primary_diagnostic_nv.rgen.spv"),
+					primaryDiagnosticQueryDefines + sharcInclude + ["-capability", "spvShaderInvocationReorderNV"])
+			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_update_diagnostic.rgen.spv"),
+					diagnosticUpdateDefines + sharcInclude + ["-capability", "spvShaderInvocationReorderEXT"])
+			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_update_diagnostic_base.rgen.spv"),
+					diagnosticUpdateDefines + sharcInclude + ["-DCAUSTICA_PORTABLE_TRACE=1"])
+			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_update_diagnostic_nv.rgen.spv"),
+					diagnosticUpdateDefines + sharcInclude + ["-capability", "spvShaderInvocationReorderNV"])
+			[
+					"world.rchit.slang": "world_sharc.rchit.spv",
+					"world.rahit.slang": "world_sharc.rahit.spv",
+					"world.rmiss.slang": "world_sharc.rmiss.spv",
+					"world_guide.rmiss.slang": "world_sharc_guide.rmiss.spv"
+			].each { sourceName, outputName ->
+				compileOneSlang(new File(world, sourceName), new File(scratchDir, outputName),
+						variantDefines + sharcInclude)
+			}
+			compileOneSlang(new File(sharc, "sharc_resolve.comp.slang"),
+					new File(scratchDir, "sharc_resolve.comp.spv"), sharcInclude)
+			// Prove the exact BDA + native 64-bit atomic contract independently of the runtime shaders.
+			compileOneSlang(new File(sharc, "sharc_atomic_probe.comp.slang"),
+					new File(temporaryDir, "sharc_atomic_probe.comp.spv"), sharcInclude)
+			["world_sharc.rgen.spv", "world_sharc_nv.rgen.spv"].each { name ->
+				def raygen = new File(scratchDir, name)
+				if (!raygen.isFile() || raygen.length() > 180_000L) {
+					throw new GradleException("SHaRC query raygen complexity budget exceeded: ${name} is "
+							+ "${raygen.isFile() ? raygen.length() : 'missing'} bytes (limit 180000)")
+				}
+			}
+			["world_sharc_diffuse.rgen.spv", "world_sharc_diffuse_nv.rgen.spv"].each { name ->
+				def raygen = new File(scratchDir, name)
+				if (!raygen.isFile() || raygen.length() > 180_000L) {
+					throw new GradleException("SHaRC diffuse-query raygen complexity budget exceeded: ${name} is "
+							+ "${raygen.isFile() ? raygen.length() : 'missing'} bytes (limit 180000)")
+				}
+			}
+			["world_sharc_primary.rgen.spv", "world_sharc_primary_nv.rgen.spv"].each { name ->
+				def raygen = new File(scratchDir, name)
+				if (!raygen.isFile() || raygen.length() > 180_000L) {
+					throw new GradleException("SHaRC primary-query raygen complexity budget exceeded: ${name} is "
+							+ "${raygen.isFile() ? raygen.length() : 'missing'} bytes (limit 180000)")
+				}
+			}
+		}
+		// The live raygen owns the camera-only physical atmosphere boundary and vanilla-controlled section
+		// reveal. Keep that intentional presentation path inside a tight 128 KB ceiling; transport variants
+		// still share the same visibility traversal and sampler-inlining checks below.
+		["world_base.rgen.spv", "world.rgen.spv", "world_nv.rgen.spv"].each { name ->
+			def raygen = new File(scratchDir, name)
+			if (!raygen.isFile() || raygen.length() > 132_000L) {
+				throw new GradleException("Glass-only world raygen complexity budget exceeded: ${name} is "
+						+ "${raygen.isFile() ? raygen.length() : 'missing'} bytes (limit 132000)")
+			}
+			def disassembly = new File(temporaryDir, "${name}.spvasm")
+			execOps.exec {
+				commandLine spirvDis.get(), "--raw-id", raygen.absolutePath, "-o", disassembly.absolutePath
+			}
+			def assembly = disassembly.getText("UTF-8")
+			if (assembly.contains("OpFunctionCall")) {
+				throw new GradleException("Live world raygen must not contain callable shader functions: ${name}")
+			}
+			// Upstream's live renderer deliberately performs hit-object invocation reordering before
+			// divergent material evaluation. Both EXT and NV variants are emitted and selected at runtime.
+			["sampleHash", "owenScramble", "beginBounce", "rndf"].each { functionName ->
+				def nameMatch = (assembly =~ /OpName\s+(%\d+)\s+"${functionName}"/)
+				if (nameMatch.find()) {
+					def functionId = java.util.regex.Pattern.quote(nameMatch.group(1))
+					if ((assembly =~ /OpFunctionCall[^\r\n]*${functionId}(?:\s|$)/).find()) {
+						throw new GradleException("Live raygen sampler must be fully inlined: ${name} calls ${functionName}")
+					}
+				}
+			}
+		}
+		["world_nrd_base.rgen.spv", "world_nrd.rgen.spv", "world_nrd_nv.rgen.spv"].each { name ->
+			def raygen = new File(scratchDir, name)
+			if (!raygen.isFile() || raygen.length() > 175_000L) {
+				throw new GradleException("NRD world raygen complexity budget exceeded: ${name} is "
+						+ "${raygen.isFile() ? raygen.length() : 'missing'} bytes (limit 175000)")
+			}
+		}
+		["world_offline_base.rgen.spv", "world_offline.rgen.spv", "world_offline_nv.rgen.spv"].each { name ->
+			def raygen = new File(scratchDir, name)
+			if (!raygen.isFile() || raygen.length() > 124_000L) {
+				throw new GradleException("Offline world raygen complexity budget exceeded: ${name} is "
+						+ "${raygen.isFile() ? raygen.length() : 'missing'} bytes (limit 124000)")
+			}
+			def disassembly = new File(temporaryDir, "${name}.spvasm")
+			execOps.exec {
+				commandLine spirvDis.get(), "--raw-id", raygen.absolutePath, "-o", disassembly.absolutePath
+			}
+			def hasReorder = (disassembly.getText("UTF-8") =~ /OpReorderThreadWithHitObject(?:EXT|NV)/).find()
+			if (name == "world_offline_base.rgen.spv" ? hasReorder : !hasReorder) {
+				throw new GradleException(name == "world_offline_base.rgen.spv"
+						? "Baseline offline world raygen unexpectedly contains invocation reorder"
+						: "Offline world raygen is missing its independent invocation reorder: ${name}")
+			}
+		}
+		scratchDir.listFiles().findAll { it.name.startsWith("world_sharc") && it.name.endsWith(".rgen.spv") }
+				.each { raygen ->
+					def disassembly = new File(temporaryDir, "${raygen.name}.spvasm")
+					execOps.exec {
+						commandLine spirvDis.get(), "--raw-id", raygen.absolutePath, "-o", disassembly.absolutePath
+					}
+					if ((disassembly.getText("UTF-8") =~ /OpReorderThreadWithHitObject(?:EXT|NV)/).find()) {
+						throw new GradleException("Live SHaRC raygen unexpectedly contains invocation reorder: ${raygen.name}")
+					}
+				}
 		outDirFile.mkdirs()
 		outDirFile.listFiles().findAll { it.isFile() && it.name.endsWith(".spv") }.each { it.delete() }
 		scratchDir.listFiles().findAll { it.isFile() }.each { src ->
@@ -187,7 +479,14 @@ def compileShaders = tasks.register("compileShaders", CompileShaders) {
 	outDir = layout.buildDirectory.dir("generated/shaders/caustica/rt")
 	glslang = resolveVulkanTool("glslangValidator")
 	spirvVal = resolveVulkanTool("spirv-val")
-	slangc = resolveVulkanTool("slangc")
+	spirvDis = resolveVulkanTool("spirv-dis")
+	slangc = pinnedSlangc.absolutePath
+	sharcSdk = configuredSharcSdk
+	if (!configuredSharcSdk.isBlank()) {
+		inputs.files(sharcHeaderHashes.keySet().collect { new File(file(configuredSharcSdk), it) })
+				.withPropertyName("sharcSdk.${sharcVersion}")
+	}
+	doFirst { validateSharcSdk() }
 }
 
 def generateShaderRecords = tasks.register("generateShaderRecords", GenerateShaderRecords) {
@@ -195,7 +494,7 @@ def generateShaderRecords = tasks.register("generateShaderRecords", GenerateShad
 	description = "Generates typed Java shader records and serializers from Slang reflection."
 	worldSourceDir = file("shaders/world")
 	probeSource = file("shaders/world/world_layout_probe.slang")
-	slangc = resolveVulkanTool("slangc")
+	slangc = pinnedSlangc.absolutePath
 	spirvVal = resolveVulkanTool("spirv-val")
 	outDir = layout.buildDirectory.dir("generated/sources/shaderRecords")
 }
@@ -210,154 +509,347 @@ sourceSets.main.java.srcDir(files(layout.buildDirectory.dir("generated/sources/s
 // same /caustica/rt/ path the loader (RtPipeline/RtBlendPipeline) reads. builtBy wires the dependency.
 sourceSets.main.resources.srcDir(files(shaderGenRoot).builtBy(compileShaders))
 
-def ngxNativeGenRoot = layout.buildDirectory.dir("generated/ngx-natives")
-def requestedTaskNames = gradle.startParameter.taskNames.collect { it.toLowerCase(java.util.Locale.ROOT) }
-def isRunClientInvocation = requestedTaskNames.any { it == "runclient" || it.endsWith(":runclient") }
-def ngxShimConfig = (findProperty("ngxShimConfig") ?: findProperty("ngxNativeConfig") ?: "release")
-		.toString().toLowerCase(java.util.Locale.ROOT)
-def normalizeNgxVendorConfig = { String config ->
-	def normalized = config.toLowerCase(java.util.Locale.ROOT)
-	if (normalized == "release") {
-		return "rel"
+def sharcMetadataRoot = layout.buildDirectory.dir("generated/sharc-metadata")
+def generateSharcMetadata = tasks.register("generateSharcMetadata") {
+	group = "build"
+	description = "Emits SHaRC packaged-capability metadata and the NVIDIA license when available."
+	inputs.property("sharcSdk", configuredSharcSdk)
+	inputs.property("sharcVersion", sharcVersion)
+	inputs.property("sharcCommit", sharcCommit)
+	inputs.property("sharcOptOut", sharcOptOut)
+	outputs.dir(sharcMetadataRoot)
+	doLast {
+		validateSharcSdk()
+		delete(sharcMetadataRoot)
+		def root = sharcMetadataRoot.get().asFile
+		def marker = new File(root, "caustica/sharc.properties")
+		marker.parentFile.mkdirs()
+		marker.setText("version=${sharcVersion}\ncommit=${sharcCommit}\nartifacts=${!configuredSharcSdk.isBlank()}\n"
+				+ "explicitOptOut=${sharcOptOut}\n", "UTF-8")
+		if (!configuredSharcSdk.isBlank()) {
+			copy {
+				from(new File(file(configuredSharcSdk), "License.md")) {
+					rename { "NVIDIA-SHARC-SDK.txt" }
+					into "META-INF/licenses/nvidia"
+				}
+				into root
+			}
+		}
 	}
-	if (normalized == "debug") {
-		return "dev"
-	}
-	if (normalized != "rel" && normalized != "dev") {
-		throw new GradleException("Unknown NGX vendor config '${config}'. Expected 'rel' or 'dev'.")
-	}
-	return normalized
 }
-def ngxVendorConfig = normalizeNgxVendorConfig(
-		(findProperty("ngxVendorConfig") ?: (isRunClientInvocation ? "dev" : "rel")).toString())
-def ngxNativeRoot = layout.buildDirectory.dir("native/ngx_shim").get().asFile
-def ngxShimOutDir = new File(ngxNativeRoot, ngxShimConfig)
-def currentNgxPlatform = {
+sourceSets.main.resources.srcDir(files(sharcMetadataRoot).builtBy(generateSharcMetadata))
+
+// Streamline is the sole DLSS-RR and DLSSG runtime. The SDK zip is intentionally not checked into
+// the repository; STREAMLINE_SDK must point at the verified NVIDIA Streamline 2.12.0 extraction.
+def streamlineNativeGenRoot = layout.buildDirectory.dir("generated/streamline-natives")
+def streamlineSdkEnv = providers.environmentVariable("STREAMLINE_SDK")
+def streamlineSdkRootProvider = streamlineSdkEnv.map { file(it) }
+def streamlineBridgeConfig = (findProperty("streamlineBridgeConfig") ?: "release")
+		.toString().toLowerCase(java.util.Locale.ROOT)
+def streamlinePlatform = {
 	def os = org.gradle.internal.os.OperatingSystem.current()
 	def arch = System.getProperty("os.arch", "").toLowerCase(java.util.Locale.ROOT)
-	def x64 = arch == "x86_64" || arch == "amd64"
-	if (os.windows && x64) {
-		return "windows-x64"
-	}
-	if (os.linux && x64) {
-		return "linux-x64"
-	}
-	return null
+	return os.windows && (arch == "x86_64" || arch == "amd64") ? "windows-x64" : null
 }()
-def ngxNativePlatforms = [
-	[
-		name: "windows-x64",
-		shimIncludes: [
-			"ngxshim.dll"
-		],
-		vendorRoot: { dlssSdkRoot, vendorConfig -> new File(dlssSdkRoot, "lib/Windows_x86_64/${vendorConfig}") },
-		vendorIncludes: [
-			"nvngx_dlssd.dll",
-			"nvngx_dlssg.dll"
-		]
-	],
-	[
-		name: "linux-x64",
-		shimIncludes: [
-			"libngxshim.so"
-		],
-		vendorRoot: { dlssSdkRoot, vendorConfig -> new File(dlssSdkRoot, "lib/Linux_x86_64/${vendorConfig}") },
-		vendorIncludes: [
-			"libnvidia-ngx-dlssd.so*",
-			"libnvidia-ngx-dlssg.so*"
-		]
-	]
+def streamlineVendorNames = [
+	"sl.interposer.dll",
+	"sl.common.dll",
+	"sl.dlss_d.dll",
+	"sl.dlss_g.dll",
+	"sl.reflex.dll",
+	"sl.pcl.dll",
+	"nvngx_dlssd.dll",
+	"nvngx_dlssg.dll",
+	"NvLowLatencyVk.dll",
+	"reflex.license.txt",
+	"nvngx_dlss.license.txt"
 ]
-def ngxNativePlatformByName = ngxNativePlatforms.collectEntries { platform -> [(platform.name): platform] }
-def requestedNgxPlatformsRaw = (findProperty("ngxPlatforms") ?: "current").toString()
-		.split(",")
-		.collect { it.trim() }
-		.findAll { !it.isEmpty() }
-def selectedNgxNativePlatforms
-if (requestedNgxPlatformsRaw.size() == 1 && requestedNgxPlatformsRaw[0].equalsIgnoreCase("all")) {
-	selectedNgxNativePlatforms = ngxNativePlatforms
-} else if (requestedNgxPlatformsRaw.size() == 1 && requestedNgxPlatformsRaw[0].equalsIgnoreCase("current")) {
-	if (currentNgxPlatform == null || !ngxNativePlatformByName.containsKey(currentNgxPlatform)) {
-		throw new GradleException("No NGX native platform is configured for this host.")
+def streamlineSdkVendorRoot = { File sdkRoot ->
+	new File(sdkRoot, streamlineVariant == "development" ? "bin/x64/development" : "bin/x64")
+}
+def streamlineNoticeFiles = [
+	"license.txt": "STREAMLINE-SDK-MIT.txt",
+	"3rd-party-licenses.md": "STREAMLINE-THIRD-PARTY.md"
+]
+
+def streamlineBridgeSourceDir = file("native/streamline_bridge")
+def streamlineBridgeBuildDir = file("native/streamline_bridge/build")
+def streamlineBridgeCmakeConfig = streamlineBridgeConfig.capitalize()
+def streamlineBridgeOutput = new File(layout.buildDirectory.get().asFile,
+		"native/streamline_bridge/${streamlineBridgeConfig}/streamlinebridge.dll")
+def streamlineBridgeInitTestOutput = new File(layout.buildDirectory.get().asFile,
+		"native/streamline_bridge/${streamlineBridgeConfig}/streamlinebridge_production_init_test.exe")
+def vulkanSdkEnv = providers.environmentVariable("VULKAN_SDK")
+
+def configureStreamlineBridge = tasks.register("configureStreamlineBridge", Exec) {
+	group = "build"
+	description = "Configures the Windows x64 Streamline bridge."
+	onlyIf { streamlinePlatform != null }
+	inputs.files(fileTree(streamlineBridgeSourceDir) { include "CMakeLists.txt", "*.h" })
+	inputs.property("streamlineSdk", streamlineSdkEnv.orElse(""))
+	inputs.property("vulkanSdk", vulkanSdkEnv.orElse(""))
+	outputs.file(new File(streamlineBridgeBuildDir, "CMakeCache.txt"))
+	doFirst {
+		def sdkRoot = streamlineSdkRootProvider.orNull
+		def vulkanRoot = vulkanSdkEnv.orNull
+		if (sdkRoot == null) {
+			throw new GradleException("STREAMLINE_SDK environment variable is not set.")
+		}
+		if (!vulkanRoot) {
+			throw new GradleException("VULKAN_SDK environment variable is not set.")
+		}
+		commandLine "cmake", "-S", streamlineBridgeSourceDir.absolutePath,
+				"-B", streamlineBridgeBuildDir.absolutePath, "-A", "x64",
+				"-DSTREAMLINE_SDK=${sdkRoot.absolutePath}", "-DVULKAN_SDK=${file(vulkanRoot).absolutePath}"
 	}
-	selectedNgxNativePlatforms = [ngxNativePlatformByName[currentNgxPlatform]]
-} else {
-	def unknownPlatforms = requestedNgxPlatformsRaw.findAll { !ngxNativePlatformByName.containsKey(it) }
-	if (!unknownPlatforms.empty) {
-		throw new GradleException("Unknown NGX platform(s): ${unknownPlatforms.join(', ')}")
-	}
-	selectedNgxNativePlatforms = requestedNgxPlatformsRaw.collect { ngxNativePlatformByName[it] }
 }
 
-def dlssSdkEnv = providers.environmentVariable("DLSS_SDK")
-def dlssSdkRootProvider = dlssSdkEnv.map { file(it) }
-
-def bundleNgxNatives = tasks.register("bundleNgxNatives") {
+def buildStreamlineBridge = tasks.register("buildStreamlineBridge", Exec) {
 	group = "build"
-	description = "Bundles NGX shim and ${ngxVendorConfig} DLSS native libraries into the mod resources."
-
-	inputs.property "ngxShimConfig", ngxShimConfig
-	inputs.property "ngxVendorConfig", ngxVendorConfig
-
-	selectedNgxNativePlatforms.each { platform ->
-		inputs.files(fileTree(ngxShimOutDir) {
-			include platform.shimIncludes
-		}).withPropertyName("ngxNatives.${platform.name}.shim")
-		inputs.files(fileTree(platform.vendorRoot(dlssSdkRootProvider.getOrElse(file("__missing_dlss_sdk__")), ngxVendorConfig)) {
-			include platform.vendorIncludes
-		}).withPropertyName("ngxNatives.${platform.name}.vendor")
+	description = "Builds the Windows x64 Streamline bridge."
+	onlyIf { streamlinePlatform != null }
+	dependsOn(configureStreamlineBridge)
+	inputs.files(fileTree(streamlineBridgeSourceDir) { include "*.cpp", "*.h", "CMakeLists.txt" })
+	outputs.file(streamlineBridgeOutput)
+	doFirst {
+		commandLine "cmake", "--build", streamlineBridgeBuildDir.absolutePath,
+				"--config", streamlineBridgeCmakeConfig, "--parallel"
 	}
-	outputs.dir(ngxNativeGenRoot)
+}
+
+def testStreamlineBridge = tasks.register("testStreamlineBridge", Exec) {
+	group = "verification"
+	description = "Runs the native Streamline bridge ABI tests."
+	onlyIf { streamlinePlatform != null }
+	dependsOn(buildStreamlineBridge)
+	commandLine "ctest", "--test-dir", streamlineBridgeBuildDir.absolutePath,
+			"-C", streamlineBridgeCmakeConfig, "--output-on-failure"
+}
+
+def testPackagedStreamlineBridge = tasks.register("testPackagedStreamlineBridge", Exec) {
+	group = "verification"
+	description = "Initializes the exact packaged production Streamline directory."
+	onlyIf { streamlinePlatform != null && streamlineVariant == "production" }
+	dependsOn("bundleStreamlineNatives")
+	doFirst {
+		def packagedDirectory = new File(streamlineNativeGenRoot.get().asFile,
+				"caustica/natives/windows-x64")
+		if (!streamlineBridgeInitTestOutput.isFile()) {
+			throw new GradleException("Missing production initialization test: ${streamlineBridgeInitTestOutput}")
+		}
+		commandLine streamlineBridgeInitTestOutput.absolutePath,
+				packagedDirectory.absolutePath,
+				new File(layout.buildDirectory.get().asFile,
+						"test-results/streamline-production-init").absolutePath
+	}
+}
+
+def verifyStreamlineProductionInputs = tasks.register("verifyStreamlineProductionInputs") {
+	group = "verification"
+	description = "Verifies the production Streamline SDK variant and Authenticode signatures."
+	onlyIf { streamlineVariant == "production" && streamlinePlatform != null }
+	doLast {
+		if (streamlinePlatform == null) {
+			throw new GradleException("Streamline production artifacts are Windows x64 only.")
+		}
+		def sdkRoot = streamlineSdkRootProvider.orNull
+		if (sdkRoot == null) {
+			throw new GradleException("STREAMLINE_SDK environment variable is not set.")
+		}
+		def vendorRoot = streamlineSdkVendorRoot(sdkRoot)
+		if (vendorRoot.path.toLowerCase(java.util.Locale.ROOT).contains("development")) {
+			throw new GradleException("Production Streamline packaging cannot use the development SDK directory.")
+		}
+		def missingNotices = streamlineNoticeFiles.keySet().findAll { !new File(sdkRoot, it).isFile() }
+		if (!missingNotices.empty) {
+			throw new GradleException("Missing Streamline distribution notice(s): ${missingNotices.join(', ')}")
+		}
+		def unsigned = streamlineVendorNames.findAll { name ->
+			def candidate = new File(vendorRoot, name)
+			if (!candidate.isFile() || !name.toLowerCase(java.util.Locale.ROOT).endsWith(".dll")) {
+				return false
+			}
+			def process = new ProcessBuilder("powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+					"(Get-AuthenticodeSignature -LiteralPath '${candidate.absolutePath.replace("'", "''")}').Status")
+					.redirectErrorStream(true).start()
+			def status = process.inputStream.getText("UTF-8").trim()
+			process.waitFor()
+			return status != "Valid"
+		}
+		if (!unsigned.empty) {
+			throw new GradleException("Unsigned or unverifiable production Streamline binaries: ${unsigned.join(', ')}")
+		}
+	}
+}
+
+def bundleStreamlineNatives = tasks.register("bundleStreamlineNatives") {
+	group = "build"
+	description = "Bundles the pinned Streamline bridge and Windows x64 SDK binaries."
+	inputs.property "streamlineVariant", streamlineVariant
+	inputs.property "streamlineBridgeConfig", streamlineBridgeConfig
+	if (streamlinePlatform != null) {
+		def sdkForInputs = streamlineSdkRootProvider.getOrElse(file("__missing_streamline_sdk__"))
+		inputs.files(fileTree(streamlineSdkVendorRoot(sdkForInputs)) {
+			include streamlineVendorNames
+		}).withPropertyName("streamlineSdk.${streamlineVariant}")
+		inputs.files(streamlineNoticeFiles.keySet().collect { new File(sdkForInputs, it) })
+			.withPropertyName("streamlineSdk.notices")
+		inputs.file(streamlineBridgeOutput)
+			.withPropertyName("streamlineBridge")
+	}
+	outputs.dir(streamlineNativeGenRoot)
 	outputs.upToDateWhen { false }
+	dependsOn(verifyStreamlineProductionInputs, buildStreamlineBridge)
 
 	doLast {
-		delete(ngxNativeGenRoot)
+		delete(streamlineNativeGenRoot)
+		if (streamlinePlatform == null) {
+			return
+		}
+		def sdkRoot = streamlineSdkRootProvider.orNull
+		if (sdkRoot == null) {
+			throw new GradleException("STREAMLINE_SDK environment variable is not set.")
+		}
+		def vendorRoot = streamlineSdkVendorRoot(sdkRoot)
+		def bridge = streamlineBridgeOutput
 		def missing = []
-		def dlssSdkRoot = dlssSdkRootProvider.orNull
-		if (dlssSdkRoot == null) {
-			throw new GradleException("DLSS_SDK environment variable is not set.")
+		if (!bridge.isFile()) {
+			missing << "${bridge} (build native/streamline_bridge first)"
 		}
-		selectedNgxNativePlatforms.each { platform ->
-			def platformShimFiles = fileTree(ngxShimOutDir) {
-				include platform.shimIncludes
-			}.files
-			if (platformShimFiles.empty) {
-				missing += "${platform.name} shim library in ${ngxShimOutDir}"
+		streamlineVendorNames.each { name ->
+			if (!new File(vendorRoot, name).isFile()) {
+				missing << new File(vendorRoot, name)
 			}
 		}
-		selectedNgxNativePlatforms.each { platform ->
-			def platformVendorRoot = platform.vendorRoot(dlssSdkRoot, ngxVendorConfig)
-			def missingVendorIncludes = platform.vendorIncludes.findAll { vendorInclude ->
-				fileTree(platformVendorRoot) {
-					include vendorInclude
-				}.files.empty
-			}
-			if (!missingVendorIncludes.empty) {
-				missing += "${platform.name} vendor libraries ${missingVendorIncludes.join(', ')} in ${platformVendorRoot}"
+		streamlineNoticeFiles.keySet().each { name ->
+			if (!new File(sdkRoot, name).isFile()) {
+				missing << new File(sdkRoot, name)
 			}
 		}
 		if (!missing.empty) {
-			throw new GradleException("Missing NGX native inputs:\n - " + missing.join("\n - "))
+			throw new GradleException("Missing Streamline ${streamlineVariant} Windows x64 inputs:\n - "
+					+ missing.join("\n - "))
 		}
-
 		copy {
-			selectedNgxNativePlatforms.each { platform ->
-				from(fileTree(ngxShimOutDir) {
-					include platform.shimIncludes
-				}) {
-					into "caustica/natives/${platform.name}"
-				}
-				from(fileTree(platform.vendorRoot(dlssSdkRoot, ngxVendorConfig))) {
-					include platform.vendorIncludes
-					into "caustica/natives/${platform.name}"
+			from(bridge) {
+				into "caustica/natives/windows-x64"
+			}
+			from(vendorRoot) {
+				include streamlineVendorNames
+				into "caustica/natives/windows-x64"
+			}
+			from(new File(vendorRoot, "nvngx_dlss.license.txt")) {
+				rename { "NVIDIA-RTX-SDKS.txt" }
+				into "META-INF/licenses/nvidia"
+			}
+			from(new File(vendorRoot, "reflex.license.txt")) {
+				rename { "NVIDIA-REFLEX-SDK.txt" }
+				into "META-INF/licenses/nvidia"
+			}
+			streamlineNoticeFiles.each { sourceName, packagedName ->
+				from(new File(sdkRoot, sourceName)) {
+					rename { packagedName }
+					into "META-INF/licenses/nvidia"
 				}
 			}
-			into ngxNativeGenRoot
+			into streamlineNativeGenRoot
 		}
 	}
 }
 
-sourceSets.main.resources.srcDir(files(ngxNativeGenRoot).builtBy(bundleNgxNatives))
+sourceSets.main.resources.srcDir(files(streamlineNativeGenRoot).builtBy(bundleStreamlineNatives))
+
+// NRD is the cross-platform Vulkan reconstruction backend. Unlike Streamline it is built from a pinned
+// public source revision and contains no vendor runtime DLL. CI builds this target once on Windows and
+// once on Linux, then the release assembly can provide both payloads through NRD_WINDOWS_X64/NRD_LINUX_X64.
+def nrdNativeGenRoot = layout.buildDirectory.dir("generated/nrd-natives")
+def nrdBridgeSourceDir = file("native/nrd_bridge")
+def nrdBridgeBuildDir = file("native/nrd_bridge/build-gradle")
+def nrdOs = org.gradle.internal.os.OperatingSystem.current()
+def nrdArch = System.getProperty("os.arch", "").toLowerCase(java.util.Locale.ROOT)
+def nrdPlatform = (nrdArch == "x86_64" || nrdArch == "amd64")
+		? (nrdOs.windows ? "windows-x64" : nrdOs.linux ? "linux-x64" : null) : null
+def nrdFilename = nrdOs.windows ? "nrdbridge.dll" : "libnrdbridge.so"
+def nrdLocalOutput = new File(layout.buildDirectory.get().asFile,
+		"native/nrd_bridge/release/${nrdFilename}")
+def nrdExtensionFilterTestOutput = new File(nrdBridgeBuildDir,
+		nrdOs.windows ? "Release/nrdbridge_extension_filter_test.exe" : "nrdbridge_extension_filter_test")
+
+def configureNrdBridge = tasks.register("configureNrdBridge", Exec) {
+	group = "build"
+	description = "Configures the pinned cross-platform NRD 4.17.3 Vulkan bridge."
+	onlyIf { nrdPlatform != null }
+	inputs.files(fileTree(nrdBridgeSourceDir) { include "CMakeLists.txt", "*.cpp", "*.h" })
+	outputs.file(new File(nrdBridgeBuildDir, "CMakeCache.txt"))
+	doFirst {
+		def arguments = ["cmake", "-S", nrdBridgeSourceDir.absolutePath,
+				"-B", nrdBridgeBuildDir.absolutePath, "-DCMAKE_BUILD_TYPE=Release"]
+		if (nrdOs.windows) arguments.addAll(["-A", "x64"])
+		commandLine arguments
+	}
+}
+
+def buildNrdBridge = tasks.register("buildNrdBridge", Exec) {
+	group = "build"
+	description = "Builds NRD/NRI and Caustica's Vulkan bridge for the host platform."
+	onlyIf { nrdPlatform != null }
+	dependsOn(configureNrdBridge)
+	inputs.files(fileTree(nrdBridgeSourceDir) { include "CMakeLists.txt", "*.cpp", "*.h" })
+	outputs.files(nrdLocalOutput, nrdExtensionFilterTestOutput)
+	commandLine "cmake", "--build", nrdBridgeBuildDir.absolutePath,
+			"--config", "Release", "--target", "nrdbridge", "nrdbridge_extension_filter_test", "--parallel"
+}
+
+def testNrdBridge = tasks.register("testNrdBridge", Exec) {
+	group = "verification"
+	description = "Runs native NRD bridge contract tests."
+	onlyIf { nrdPlatform != null }
+	dependsOn(buildNrdBridge)
+	commandLine "ctest", "--test-dir", nrdBridgeBuildDir.absolutePath,
+			"--build-config", "Release", "--output-on-failure"
+}
+
+def bundleNrdNatives = tasks.register("bundleNrdNatives") {
+	group = "build"
+	description = "Bundles host NRD plus optional cross-platform release payloads."
+	dependsOn(buildNrdBridge)
+	outputs.dir(nrdNativeGenRoot)
+	outputs.upToDateWhen { false }
+	doLast {
+		delete(nrdNativeGenRoot)
+		def candidates = [
+				"windows-x64": providers.environmentVariable("NRD_WINDOWS_X64").orNull,
+				"linux-x64": providers.environmentVariable("NRD_LINUX_X64").orNull
+		]
+		if (nrdPlatform != null && nrdLocalOutput.isFile()) candidates[nrdPlatform] = nrdLocalOutput.absolutePath
+		candidates.each { platform, candidatePath ->
+			if (!candidatePath) return
+			def candidate = file(candidatePath)
+			if (!candidate.isFile()) throw new GradleException("Missing NRD ${platform} payload: ${candidate}")
+			copy {
+				from(candidate)
+				into(new File(nrdNativeGenRoot.get().asFile, "caustica/natives/${platform}"))
+			}
+		}
+		def license = new File(nrdBridgeBuildDir, "_deps/nrd-src/LICENSE.txt")
+		if (license.isFile()) {
+			copy {
+				from(license) { rename { "NVIDIA-NRD.txt" } }
+				into(new File(nrdNativeGenRoot.get().asFile, "META-INF/licenses/nvidia"))
+			}
+		}
+	}
+}
+
+sourceSets.main.resources.srcDir(files(nrdNativeGenRoot).builtBy(bundleNrdNatives))
+
+tasks.withType(Test).configureEach {
+	useJUnitPlatform()
+}
+
+tasks.named("check").configure {
+	dependsOn(testStreamlineBridge, testPackagedStreamlineBridge, testNrdBridge)
+}
 
 tasks.withType(JavaCompile).configureEach {
 	it.options.release = 25
@@ -369,10 +861,172 @@ java {
 	withSourcesJar()
 }
 
+// Source distributions contain project source, not generated shaders or NVIDIA's proprietary runtime payloads.
+tasks.named("sourcesJar", Jar).configure {
+	from("shaders/display/output_scale.comp") {
+		into "shaders/display"
+	}
+	from("licenses/AMD-FidelityFX-FSR1.txt") {
+		into "META-INF/licenses/amd"
+	}
+	exclude "caustica/natives/**"
+	exclude "caustica/rt/*.spv"
+	exclude "caustica/streamline.properties"
+	exclude "caustica/sharc.properties"
+	exclude "META-INF/licenses/nvidia/NVIDIA-SHARC-SDK.txt"
+}
+
 tasks.named("jar", Jar).configure {
-	from(rootProject.files("LICENSE.md", "COPYING", "COPYING.LESSER", "THIRD_PARTY_NOTICES.md")) {
+	doFirst {
+		if (streamlineVariant == "production" && configuredSharcSdk.isBlank() && !sharcOptOut) {
+			throw new GradleException("Production JARs include SHaRC by default. Configure SHARC_SDK/sharcSdk "
+					+ "or explicitly request a SHaRC-free artifact with -PwithoutSharc=true.")
+		}
+	}
+	from(rootProject.files("LICENSE.md", "COPYING", "COPYING.LESSER", "THIRD_PARTY_NOTICES.md",
+			"DISTRIBUTION_NOTICE.md")) {
 		into "META-INF"
 	}
+	from(rootProject.file("licenses/AMD-FidelityFX-FSR1.txt")) {
+		into "META-INF/licenses/amd"
+	}
+}
+
+def verifyProductionArtifact = tasks.register("verifyProductionArtifact") {
+	group = "verification"
+	description = "Verifies the exact production runtime and source JAR distribution boundary."
+	dependsOn(tasks.named("jar"), tasks.named("sourcesJar"))
+	onlyIf { streamlinePlatform != null && streamlineVariant == "production" }
+	doLast {
+		def runtimeJar = tasks.named("jar", Jar).get().archiveFile.get().asFile
+		def sourceJar = tasks.named("sourcesJar", Jar).get().archiveFile.get().asFile
+		def required = [
+			"fabric.mod.json",
+			"caustica/rt/world.rgen.spv",
+			"caustica/rt/world_nv.rgen.spv",
+			"caustica/rt/world_base.rgen.spv",
+			"caustica/rt/world_hq.rgen.spv",
+			"caustica/rt/world_nv_hq.rgen.spv",
+			"caustica/rt/world_base_hq.rgen.spv",
+			"caustica/rt/world_nrd_base.rgen.spv",
+			"caustica/rt/world_nrd.rgen.spv",
+			"caustica/rt/world_nrd_nv.rgen.spv",
+			"caustica/rt/world_offline_base.rgen.spv",
+			"caustica/rt/world_offline.rgen.spv",
+			"caustica/rt/world_offline_nv.rgen.spv",
+			"caustica/rt/world_shadow.rchit.spv",
+			"caustica/rt/world_shadow.rmiss.spv",
+			"caustica/rt/nrd_resolve.comp.spv",
+			"caustica/rt/nrd_spatial_upscale.comp.spv",
+			"caustica/rt/dlssd_disocclusion.comp.spv",
+			"caustica/rt/dlssd_disocclusion_particle_history.comp.spv",
+			"caustica/rt/sky_stars.comp.spv",
+			"caustica/streamline.properties",
+			"caustica/sharc.properties",
+			"caustica/natives/windows-x64/nrdbridge.dll",
+			"caustica/natives/windows-x64/streamlinebridge.dll",
+			"caustica/natives/windows-x64/sl.interposer.dll",
+			"caustica/natives/windows-x64/sl.dlss_d.dll",
+			"caustica/natives/windows-x64/sl.dlss_g.dll",
+			"caustica/natives/windows-x64/nvngx_dlssd.dll",
+			"caustica/natives/windows-x64/nvngx_dlssg.dll",
+			"META-INF/DISTRIBUTION_NOTICE.md",
+			"META-INF/THIRD_PARTY_NOTICES.md",
+			"META-INF/licenses/amd/AMD-FidelityFX-FSR1.txt",
+			"META-INF/licenses/nvidia/STREAMLINE-SDK-MIT.txt",
+			"META-INF/licenses/nvidia/STREAMLINE-THIRD-PARTY.md",
+			"META-INF/licenses/nvidia/NVIDIA-RTX-SDKS.txt",
+			"META-INF/licenses/nvidia/NVIDIA-REFLEX-SDK.txt",
+			"META-INF/licenses/nvidia/NVIDIA-NRD.txt"
+		]
+		if (providers.environmentVariable("NRD_LINUX_X64").isPresent()) {
+			required.add("caustica/natives/linux-x64/libnrdbridge.so")
+		}
+		if (!configuredSharcSdk.isBlank()) {
+				required.addAll([
+				"caustica/rt/world_sharc_base.rgen.spv",
+				"caustica/rt/world_sharc.rgen.spv",
+				"caustica/rt/world_sharc_nv.rgen.spv",
+				"caustica/rt/world_sharc_diffuse.rgen.spv",
+				"caustica/rt/world_sharc_diffuse_nv.rgen.spv",
+				"caustica/rt/world_sharc_diffuse_base.rgen.spv",
+				"caustica/rt/world_sharc_primary.rgen.spv",
+				"caustica/rt/world_sharc_primary_nv.rgen.spv",
+				"caustica/rt/world_sharc_primary_base.rgen.spv",
+				"caustica/rt/world_sharc_update.rgen.spv",
+				"caustica/rt/world_sharc_update_nv.rgen.spv",
+				"caustica/rt/world_sharc_update_base.rgen.spv",
+				"caustica/rt/world_sharc_diagnostic.rgen.spv",
+				"caustica/rt/world_sharc_diagnostic_nv.rgen.spv",
+				"caustica/rt/world_sharc_diagnostic_base.rgen.spv",
+				"caustica/rt/world_sharc_primary_diagnostic.rgen.spv",
+				"caustica/rt/world_sharc_primary_diagnostic_nv.rgen.spv",
+				"caustica/rt/world_sharc_primary_diagnostic_base.rgen.spv",
+				"caustica/rt/world_sharc_update_diagnostic.rgen.spv",
+				"caustica/rt/world_sharc_update_diagnostic_nv.rgen.spv",
+				"caustica/rt/world_sharc_update_diagnostic_base.rgen.spv",
+				"caustica/rt/world_sharc.rchit.spv",
+				"caustica/rt/world_sharc.rahit.spv",
+				"caustica/rt/world_sharc.rmiss.spv",
+				"caustica/rt/world_sharc_guide.rmiss.spv",
+				"caustica/rt/sharc_resolve.comp.spv",
+				"META-INF/licenses/nvidia/NVIDIA-SHARC-SDK.txt"
+			])
+		}
+		def runtimeZip = new java.util.zip.ZipFile(runtimeJar)
+		try {
+			def names = runtimeZip.entries().collect { it.name } as Set
+			def missing = required.findAll { !names.contains(it) }
+			if (!missing.empty) {
+				throw new GradleException("Production JAR is missing release entries: ${missing.join(', ')}")
+			}
+			def forbidden = names.findAll { name ->
+				name.toLowerCase(java.util.Locale.ROOT).contains("/development/")
+						|| name.toLowerCase(java.util.Locale.ROOT).endsWith(".pdb")
+						|| name.startsWith("include/") || name.endsWith(".h")
+			}
+			if (!forbidden.empty) {
+				throw new GradleException("Production JAR contains non-redistributable development inputs: "
+						+ forbidden.join(', '))
+			}
+			def properties = runtimeZip.getInputStream(runtimeZip.getEntry("caustica/streamline.properties"))
+					.getText("UTF-8")
+			if (!properties.readLines().contains("variant=production")) {
+				throw new GradleException("Production JAR does not identify the production Streamline variant")
+			}
+			def sharcProperties = new Properties()
+			runtimeZip.getInputStream(runtimeZip.getEntry("caustica/sharc.properties")).withCloseable {
+				sharcProperties.load(it)
+			}
+			def expectedSharcArtifacts = configuredSharcSdk.isBlank() ? "false" : "true"
+			if (sharcProperties.getProperty("artifacts") != expectedSharcArtifacts
+					|| sharcProperties.getProperty("explicitOptOut") != Boolean.toString(sharcOptOut)
+					|| sharcProperties.getProperty("version") != sharcVersion
+					|| sharcProperties.getProperty("commit") != sharcCommit) {
+				throw new GradleException("Production JAR SHaRC capability marker is inconsistent")
+			}
+		} finally {
+			runtimeZip.close()
+		}
+
+		def sourceZip = new java.util.zip.ZipFile(sourceJar)
+		try {
+			def leaked = sourceZip.entries().collect { it.name }.findAll { name ->
+				name.startsWith("caustica/natives/") || name.endsWith(".spv")
+						|| name == "caustica/streamline.properties" || name == "caustica/sharc.properties"
+						|| name == "META-INF/licenses/nvidia/NVIDIA-SHARC-SDK.txt"
+			}
+			if (!leaked.empty) {
+				throw new GradleException("Sources JAR leaks generated/proprietary payloads: ${leaked.join(', ')}")
+			}
+		} finally {
+			sourceZip.close()
+		}
+	}
+}
+
+tasks.named("build").configure {
+	dependsOn(verifyProductionArtifact)
 }
 
 publishing {

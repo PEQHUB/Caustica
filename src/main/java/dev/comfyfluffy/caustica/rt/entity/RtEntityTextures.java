@@ -68,6 +68,7 @@ public final class RtEntityTextures {
     // file). Seeded with the block atlas = slot 0 (also the fallback). Items use a separate item atlas.
     private final Map<Identifier, Integer> atlasSlotCache = new HashMap<>();
     private final List<Pending> pending = new ArrayList<>(); // albedo slots awaiting descriptor upload
+    private final List<Pending> bound = new ArrayList<>();
     // Descriptor array capacity of the currently alive world pipeline. A higher config value applies after
     // reset/recreate; a lower value stops allocating new slots immediately without invalidating old ones.
     private int capacity = maxTextures();
@@ -171,7 +172,9 @@ public final class RtEntityTextures {
         }
         int slot = nextSlot++;
         viewSlotCache.put(view, slot);
-        pending.add(new Pending(slot, view));
+        Pending descriptor = new Pending(slot, view);
+        pending.add(descriptor);
+        bound.add(descriptor);
         return slot;
     }
 
@@ -185,6 +188,25 @@ public final class RtEntityTextures {
         }
         pending.clear();
     }
+
+    /** Publish new stable entity slots to every specialized world pipeline before tracing. */
+    public void uploadPending(long sampler, RtPipeline... pipelines) {
+        if (pending.isEmpty()) return;
+        for (Pending p : pending) {
+            for (RtPipeline pipeline : pipelines) {
+                if (pipeline != null) pipeline.setEntityAlbedoTexture(p.slot(), p.view(), sampler);
+            }
+        }
+        pending.clear();
+    }
+
+    public void bindAll(long sampler, RtPipeline pipeline) {
+        for (Pending p : bound) pipeline.setEntityAlbedoTexture(p.slot(), p.view(), sampler);
+    }
+
+    public int usedSlots() { return nextSlot - 1; }
+
+    public int pendingUploads() { return pending.size(); }
 
     /** Drop the registry (call when the world pipeline / bindless set is recreated, or textures reload). */
     public void reset() {
@@ -200,6 +222,7 @@ public final class RtEntityTextures {
         atlasSlotCache.clear();
         atlasSlotCache.put(TextureAtlas.LOCATION_BLOCKS, 0); // block atlas = the slot-0 fallback
         pending.clear();
+        bound.clear();
         nextSlot = 1;
     }
 

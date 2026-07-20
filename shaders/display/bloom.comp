@@ -1,0 +1,113 @@
+#version 460
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(binding = 0, set = 0, rgba16f) uniform readonly image2D sourceImage;
+layout(binding = 1, set = 0, r32f) uniform readonly image2D exposureImage;
+layout(binding = 2, set = 0, rgba16f) uniform image2D bloomHalf;
+layout(binding = 3, set = 0, rgba16f) uniform image2D bloomQuarter;
+layout(binding = 4, set = 0, rgba16f) uniform image2D bloomEighth;
+
+layout(push_constant) uniform Push {
+    int pass;
+} pc;
+
+const vec3 LUMA_BT2020 = vec3(0.2627, 0.6780, 0.0593);
+
+ivec2 clampPixel(ivec2 p, ivec2 size) {
+    return clamp(p, ivec2(0), size - 1);
+}
+
+vec3 loadHalf(ivec2 p) {
+    return imageLoad(bloomHalf, clampPixel(p, imageSize(bloomHalf))).rgb;
+}
+
+vec3 loadQuarter(ivec2 p) {
+    return imageLoad(bloomQuarter, clampPixel(p, imageSize(bloomQuarter))).rgb;
+}
+
+vec3 loadEighth(ivec2 p) {
+    return imageLoad(bloomEighth, clampPixel(p, imageSize(bloomEighth))).rgb;
+}
+
+vec2 sourceCenter(ivec2 p, ivec2 sourceSize, ivec2 destinationSize) {
+    return (vec2(p) + 0.5) * vec2(sourceSize) / vec2(destinationSize) - 0.5;
+}
+
+vec3 tentQuarter(ivec2 p, ivec2 destinationSize) {
+    ivec2 sourceSize = imageSize(bloomQuarter);
+    vec2 center = sourceCenter(p, sourceSize, destinationSize);
+    ivec2 first = ivec2(floor(center)) - 1;
+    vec3 color = vec3(0.0);
+    float weightSum = 0.0;
+    for (int y = 0; y < 4; ++y) {
+        for (int x = 0; x < 4; ++x) {
+            ivec2 samplePixel = first + ivec2(x, y);
+            vec2 tentWeight = max(vec2(0.0), vec2(2.0) - abs(vec2(samplePixel) - center));
+            float weight = tentWeight.x * tentWeight.y;
+            color += loadQuarter(samplePixel) * weight;
+            weightSum += weight;
+        }
+    }
+    return color / weightSum;
+}
+
+vec3 tentEighth(ivec2 p, ivec2 destinationSize) {
+    ivec2 sourceSize = imageSize(bloomEighth);
+    vec2 center = sourceCenter(p, sourceSize, destinationSize);
+    ivec2 first = ivec2(floor(center)) - 1;
+    vec3 color = vec3(0.0);
+    float weightSum = 0.0;
+    for (int y = 0; y < 4; ++y) {
+        for (int x = 0; x < 4; ++x) {
+            ivec2 samplePixel = first + ivec2(x, y);
+            vec2 tentWeight = max(vec2(0.0), vec2(2.0) - abs(vec2(samplePixel) - center));
+            float weight = tentWeight.x * tentWeight.y;
+            color += loadEighth(samplePixel) * weight;
+            weightSum += weight;
+        }
+    }
+    return color / weightSum;
+}
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (pc.pass == 0) {
+        ivec2 size = imageSize(bloomHalf);
+        if (any(greaterThanEqual(p, size))) return;
+        ivec2 srcSize = imageSize(sourceImage);
+        ivec2 q = p * 2;
+        vec3 color = (imageLoad(sourceImage, clampPixel(q, srcSize)).rgb
+            + imageLoad(sourceImage, clampPixel(q + ivec2(1, 0), srcSize)).rgb
+            + imageLoad(sourceImage, clampPixel(q + ivec2(0, 1), srcSize)).rgb
+            + imageLoad(sourceImage, clampPixel(q + ivec2(1, 1), srcSize)).rgb) * 0.25;
+        float exposedLuminance = dot(max(color, vec3(0.0)), LUMA_BT2020)
+                * max(imageLoad(exposureImage, ivec2(0)).r, 0.0);
+        float highlight = smoothstep(1.0, 4.0, exposedLuminance);
+        imageStore(bloomHalf, p, vec4(max(color, vec3(0.0)) * highlight, 1.0));
+    } else if (pc.pass == 1) {
+        ivec2 size = imageSize(bloomQuarter);
+        if (any(greaterThanEqual(p, size))) return;
+        ivec2 q = p * 2;
+        vec3 color = (loadHalf(q) + loadHalf(q + ivec2(1, 0))
+                + loadHalf(q + ivec2(0, 1)) + loadHalf(q + ivec2(1, 1))) * 0.25;
+        imageStore(bloomQuarter, p, vec4(color, 1.0));
+    } else if (pc.pass == 2) {
+        ivec2 size = imageSize(bloomEighth);
+        if (any(greaterThanEqual(p, size))) return;
+        ivec2 q = p * 2;
+        vec3 color = (loadQuarter(q) + loadQuarter(q + ivec2(1, 0))
+                + loadQuarter(q + ivec2(0, 1)) + loadQuarter(q + ivec2(1, 1))) * 0.25;
+        imageStore(bloomEighth, p, vec4(color, 1.0));
+    } else if (pc.pass == 3) {
+        ivec2 size = imageSize(bloomQuarter);
+        if (any(greaterThanEqual(p, size))) return;
+        vec3 wide = tentEighth(p, size);
+        imageStore(bloomQuarter, p, vec4(loadQuarter(p) * 0.55 + wide * 0.45, 1.0));
+    } else {
+        ivec2 size = imageSize(bloomHalf);
+        if (any(greaterThanEqual(p, size))) return;
+        vec3 medium = tentQuarter(p, size);
+        imageStore(bloomHalf, p, vec4(loadHalf(p) * 0.35 + medium * 0.65, 1.0));
+    }
+}

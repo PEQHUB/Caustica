@@ -3,14 +3,10 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    dlssSdk = {
-      url = "github:NVIDIA/DLSS/v310.7.0";
-      flake = false;
-    };
   };
 
   outputs =
-    { nixpkgs, dlssSdk, ... }:
+    { nixpkgs, ... }:
     let
       systems = [
         "x86_64-linux"
@@ -102,14 +98,12 @@
               export CMAKE_GENERATOR=Ninja
               export JAVA_HOME="${jdk.home}"
               export VULKAN_SDK="${vulkanSdk}"
-              export DLSS_SDK="${dlssSdk}"
               export PATH="$VULKAN_SDK/bin:$PATH"
 
               echo "caustica dev shell"
               echo "  Java:       $JAVA_HOME"
               echo "  C compiler: $CC"
               echo "  C++ compiler: $CXX"
-              echo "  DLSS_SDK:   $DLSS_SDK"
               echo "  VULKAN_SDK: $VULKAN_SDK"
             '';
           };

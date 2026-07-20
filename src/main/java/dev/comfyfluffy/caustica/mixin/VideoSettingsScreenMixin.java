@@ -7,6 +7,7 @@ import java.util.List;
 import net.minecraft.client.OptionInstance;
 import net.minecraft.client.Options;
 import net.minecraft.client.gui.components.OptionsList;
+import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.client.gui.screens.options.VideoSettingsScreen;
 import net.minecraft.network.chat.Component;
 import org.spongepowered.asm.mixin.Mixin;
@@ -35,8 +36,6 @@ public abstract class VideoSettingsScreenMixin {
         throw new AssertionError("mixin stub");
     }
 
-    private static final Component CAUSTICA$RT_HEADER = Component.translatable("caustica.options.rt.header");
-
     @Redirect(
         method = "addOptions",
         at = @At(
@@ -60,15 +59,16 @@ public abstract class VideoSettingsScreenMixin {
 
     @Inject(method = "addOptions", at = @At("HEAD"))
     private void caustica$addRtOptions(CallbackInfo ci) {
-        if (!CausticaConfig.Rt.ENABLED.value()) {
-            return;
-        }
         OptionsList list = ((OptionsSubScreenAccessor) (Object) this).getList();
         if (list == null) {
             return;
         }
-        list.addHeader(CAUSTICA$RT_HEADER);
-        list.addSmall(RtVideoOptions.runtimeOptions());
+        list.addBig(RtVideoOptions.causticaButton((Screen) (Object) this, list::applyUnsavedChanges));
+        if (CausticaConfig.Rt.ENABLED.value()) {
+            list.addHeader(Component.translatable("caustica.options.rt.header"));
+            list.addBig(RtVideoOptions.outputScale());
+            list.addBig(RtVideoOptions.inputScale());
+        }
     }
 
     @Inject(method = "removed", at = @At("TAIL"))

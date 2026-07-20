@@ -1,0 +1,109 @@
+#version 460
+
+#ifndef CAUSTICA_PARTICLE_TEMPORAL_HISTORY
+#define CAUSTICA_PARTICLE_TEMPORAL_HISTORY 0
+#endif
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(binding = 0, set = 0, r32f) uniform readonly image2D depthImage;
+layout(binding = 1, set = 0, rg16f) uniform readonly image2D motionImage;
+layout(binding = 2, set = 0, r32f) uniform readonly image2D previousDepthHistory;
+layout(binding = 3, set = 0, r32f) uniform writeonly image2D currentDepthHistory;
+layout(binding = 4, set = 0, r16f) uniform writeonly image2D disocclusionImage;
+layout(binding = 5, set = 0, r16f) uniform writeonly image2D biasCurrentColorImage;
+layout(binding = 6, set = 0, r16f) uniform readonly image2D animatedGuideImage;
+#if CAUSTICA_PARTICLE_TEMPORAL_HISTORY
+layout(binding = 7, set = 0, r16f) uniform readonly image2D previousTemporalGuideHistory;
+layout(binding = 8, set = 0, r16f) uniform writeonly image2D currentTemporalGuideHistory;
+layout(binding = 9, set = 0, r16f) uniform writeonly image2D particleHintImage;
+#endif
+
+layout(push_constant) uniform Push {
+    uint width;
+    uint height;
+    uint resetHistory;
+} pc;
+
+bool finiteValue(float value) {
+    return !isnan(value) && !isinf(value);
+}
+
+#if CAUSTICA_PARTICLE_TEMPORAL_HISTORY
+float particleAt(ivec2 pixel) {
+    if (pixel.x < 0 || pixel.y < 0 || pixel.x >= int(pc.width) || pixel.y >= int(pc.height)) return 0.0;
+    float guide = imageLoad(animatedGuideImage, pixel).x;
+    return finiteValue(guide) && guide >= 1.5 ? 1.0 : 0.0;
+}
+
+float previousParticleAt(ivec2 pixel) {
+    if (pixel.x < 0 || pixel.y < 0 || pixel.x >= int(pc.width) || pixel.y >= int(pc.height)) return 0.0;
+    float particle = imageLoad(previousTemporalGuideHistory, pixel).x;
+    return finiteValue(particle) ? clamp(particle, 0.0, 1.0) : 1.0;
+}
+#endif
+
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    if (pixel.x >= int(pc.width) || pixel.y >= int(pc.height)) return;
+
+    float currentDepth = imageLoad(depthImage, pixel).x;
+    vec2 motion = imageLoad(motionImage, pixel).xy;
+    if (!finiteValue(currentDepth) || any(isnan(motion)) || any(isinf(motion))) {
+        currentDepth = 0.0;
+        motion = vec2(0.0);
+    }
+    imageStore(currentDepthHistory, pixel, vec4(currentDepth));
+
+    float disocclusion = pc.resetHistory != 0u ? 1.0 : 0.0;
+    if (pc.resetHistory == 0u) {
+        ivec2 center = ivec2(floor(vec2(pixel) + motion + 0.5));
+        bool currentHit = currentDepth > 0.0;
+        bool matched = false;
+        for (int y = -1; y <= 1 && !matched; y++) {
+            for (int x = -1; x <= 1; x++) {
+                ivec2 samplePixel = center + ivec2(x, y);
+                if (samplePixel.x < 0 || samplePixel.y < 0
+                        || samplePixel.x >= int(pc.width) || samplePixel.y >= int(pc.height)) continue;
+                float historicalDepth = imageLoad(previousDepthHistory, samplePixel).x;
+                if (!finiteValue(historicalDepth)) continue;
+                float threshold = max(0.00002, 0.015 * max(abs(currentDepth), abs(historicalDepth)));
+                bool depthMatches = currentHit
+                        ? historicalDepth > 0.0 && abs(historicalDepth - currentDepth) <= threshold
+                        : abs(historicalDepth) <= threshold;
+                if (depthMatches) {
+                    matched = true;
+                    break;
+                }
+            }
+        }
+        disocclusion = matched ? 0.0 : 1.0;
+    }
+
+    float rawGuide = imageLoad(animatedGuideImage, pixel).x;
+    if (!finiteValue(rawGuide)) rawGuide = 1.0;
+    float animated = clamp(rawGuide, 0.0, 1.0);
+#if CAUSTICA_PARTICLE_TEMPORAL_HISTORY
+    float particle = rawGuide >= 1.5 ? 1.0 : 0.0;
+    imageStore(currentTemporalGuideHistory, pixel, vec4(particle));
+    imageStore(particleHintImage, pixel, vec4(particle));
+
+    float particleHistoryReject = 0.0;
+    for (int y = -1; y <= 1 && particleHistoryReject < 1.0; y++) {
+        for (int x = -1; x <= 1; x++) {
+            ivec2 samplePixel = pixel + ivec2(x, y);
+            particleHistoryReject = max(particleHistoryReject, particleAt(samplePixel));
+            if (pc.resetHistory == 0u) {
+                particleHistoryReject = max(particleHistoryReject, previousParticleAt(samplePixel));
+            }
+            if (particleHistoryReject >= 1.0) break;
+        }
+    }
+    float currentBias = max(disocclusion, animated);
+    imageStore(disocclusionImage, pixel, vec4(max(disocclusion, particleHistoryReject)));
+    imageStore(biasCurrentColorImage, pixel, vec4(max(currentBias, particleHistoryReject)));
+#else
+    imageStore(disocclusionImage, pixel, vec4(disocclusion));
+    imageStore(biasCurrentColorImage, pixel, vec4(max(disocclusion, animated)));
+#endif
+}

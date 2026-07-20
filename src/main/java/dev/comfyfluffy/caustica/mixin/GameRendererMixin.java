@@ -3,15 +3,18 @@ package dev.comfyfluffy.caustica.mixin;
 import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
 import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
 import com.mojang.blaze3d.pipeline.RenderTarget;
-import com.mojang.blaze3d.systems.RenderSystem;
-import com.mojang.blaze3d.vulkan.VulkanDevice;
+import dev.comfyfluffy.caustica.CausticaConfig;
 import dev.comfyfluffy.caustica.client.VanillaRenderController;
+import dev.comfyfluffy.caustica.client.UltraScreenshot;
+import dev.comfyfluffy.caustica.client.OfflineGroundTruth;
 import dev.comfyfluffy.caustica.client.WorldRenderScaler;
 import dev.comfyfluffy.caustica.rt.RtComposite;
-import dev.comfyfluffy.caustica.rt.RtReflex;
 import dev.comfyfluffy.caustica.rt.RtUiOverlay;
+import dev.comfyfluffy.caustica.rt.entity.RtEntities;
 import dev.comfyfluffy.caustica.rt.overlay.RtWorldOverlay;
+import dev.comfyfluffy.caustica.rt.pipeline.RtDlssFg;
 import net.minecraft.client.DeltaTracker;
+import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.GameRenderer;
 import net.minecraft.client.renderer.SubmitNodeStorage;
 import net.minecraft.client.renderer.feature.FeatureRenderDispatcher;
@@ -49,19 +52,15 @@ public abstract class GameRendererMixin {
 		RtComposite.INSTANCE.beginFrame();
 		// Reflex RENDERSUBMIT_START: render-graph recording begins here; RENDERSUBMIT_END is set at
 		// VulkanGpuSurface.present() HEAD (VulkanGpuSurfaceMixin), just before the real present.
-		if (RtReflex.enabled()) {
-			long swapchain = RtReflex.INSTANCE.appliedSwapchain();
-			if (swapchain != 0L
-					&& ((GpuDeviceAccessor) RenderSystem.getDevice()).caustica$getBackend() instanceof VulkanDevice device) {
-				RtReflex.INSTANCE.marker(device.vkDevice(), swapchain, RtReflex.MARKER_RENDERSUBMIT_START,
-						RtReflex.INSTANCE.currentSimFrameId());
-			}
-		}
+		RtDlssFg.INSTANCE.ensurePresentToken();
+		RtDlssFg.INSTANCE.marker(RtDlssFg.PCL_RENDER_SUBMIT_START);
 	}
 
 	@Inject(method = "render(Lnet/minecraft/client/DeltaTracker;Z)V", at = @At("TAIL"))
 	private void caustica$endRtFrameStats(DeltaTracker deltaTracker, boolean advanceGameTime, CallbackInfo ci) {
 		RtComposite.INSTANCE.endFrame();
+		UltraScreenshot.INSTANCE.frameRendered(net.minecraft.client.Minecraft.getInstance());
+		OfflineGroundTruth.INSTANCE.frameRendered();
 	}
 
 	@Inject(method = "render(Lnet/minecraft/client/DeltaTracker;Z)V",
@@ -79,6 +78,14 @@ public abstract class GameRendererMixin {
 					target = "Lnet/minecraft/client/renderer/GameRenderer;renderItemInHand(Lnet/minecraft/client/renderer/state/level/CameraRenderState;FLorg/joml/Matrix4fc;)V"))
 	private void caustica$redirectHandToOverlay(GameRenderer self, CameraRenderState cameraState, float deltaPartialTick,
 			Matrix4fc modelViewMatrix, Operation<Void> original) {
+		boolean disableVanillaModel = VanillaRenderController.rtRuntimeWorkRequested()
+				&& RtEntities.enabled()
+				&& CausticaConfig.Rt.FirstPerson.ENABLED.value()
+				&& CausticaConfig.Rt.FirstPerson.DISABLE_VANILLA_MODEL.value()
+				&& Minecraft.getInstance().options.getCameraType().isFirstPerson();
+		if (disableVanillaModel) {
+			return;
+		}
 		boolean redirect = RtUiOverlay.enabled();
 		if (redirect) {
 			RtUiOverlay.beginOutputRedirect(this.mainRenderTarget);

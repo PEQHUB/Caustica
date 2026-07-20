@@ -1,4 +1,13 @@
 {
+	"caustica.options.rt.firstPerson.header": "First-Person View",
+	"caustica.options.rt.firstPerson.enabled": "First-Person Body",
+	"caustica.options.rt.firstPerson.enabled.tooltip": "Capture the local player's body and head for secondary rays.",
+	"caustica.options.rt.firstPerson.forward": "Forward Offset",
+	"caustica.options.rt.firstPerson.forward.tooltip": "Move submitted geometry along the player's facing direction.",
+	"caustica.options.rt.firstPerson.vertical": "Vertical Offset",
+	"caustica.options.rt.firstPerson.vertical.tooltip": "Move submitted geometry vertically.",
+	"caustica.options.rt.firstPerson.lateral": "Lateral Offset",
+	"caustica.options.rt.firstPerson.lateral.tooltip": "Move submitted geometry right or left.",
 	"caustica.options.rt.header": "光線追蹤",
 
 	"caustica.options.rt.exposureMode": "曝光",
@@ -46,6 +55,9 @@
 	"caustica.options.rt.dlssQuality.1": "平衡",
 	"caustica.options.rt.dlssQuality.2": "品質",
 	"caustica.options.rt.dlssQuality.5": "DLAA",
+	"caustica.options.rt.dlssQuality.-1": "自訂",
+	"caustica.options.rt.inputScale": "輸入解析度",
+	"caustica.options.rt.inputScale.tooltip": "路徑追蹤輸入解析度。DLSS預設會設定此值；直接變更後顯示為自訂。",
 
 	"caustica.options.rt.debugView": "偵錯檢視",
 	"caustica.options.rt.debugView.tooltip": "顯示光線追蹤的中間緩衝區，而不是最終影像。",
@@ -56,5 +68,6 @@
 	"caustica.options.rt.debugView.4": "粗糙度",
 	"caustica.options.rt.debugView.5": "運動",
 	"caustica.options.rt.debugView.6": "鏡面反射",
-	"caustica.options.rt.debugView.7": "鏡面運動"
+	"caustica.options.rt.debugView.7": "鏡面運動",
+	"caustica.options.rt.debugView.8": "色調映射器比較"
 }

@@ -241,6 +241,9 @@ public final class VulkanDiagnostics {
     }
 
     public static void breadcrumb(String label) {
+        if (!detailedBreadcrumbsEnabled()) {
+            return;
+        }
         String entry = Instant.now() + " [" + Thread.currentThread().getName() + "] " + label;
         synchronized (BREADCRUMBS) {
             if (BREADCRUMBS.size() == MAX_BREADCRUMBS) {
@@ -248,6 +251,10 @@ public final class VulkanDiagnostics {
             }
             BREADCRUMBS.addLast(entry);
         }
+    }
+
+    public static boolean detailedBreadcrumbsEnabled() {
+        return CausticaConfig.Rt.Diagnostics.HEAVY_CRASH_DIAGNOSTICS.value();
     }
 
     public static void setInFlight(String lane, String state) {

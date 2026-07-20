@@ -95,10 +95,12 @@ public final class RtPipeline {
     private final long bindlessPool;
     private final long bindlessSet;
     private final int skyAtlasBinding;
+    private final int skyViewLutBinding;
     private boolean destroyed;
 
     private RtPipeline(RtContext ctx, long dsl, long pool, long[] sets, long layout, long pipeline, RtBuffer sbt, long stride, int missCount, int hitGroupCount, int pushConstantSize, int pushConstantStages, int firstExtraBinding,
-                       long bindlessLayout, long bindlessPool, long bindlessSet, int skyAtlasBinding) {
+                       long bindlessLayout, long bindlessPool, long bindlessSet,
+                       int skyAtlasBinding, int skyViewLutBinding) {
         this.ctx = ctx;
         this.descriptorSetLayout = dsl;
         this.descriptorPool = pool;
@@ -117,6 +119,7 @@ public final class RtPipeline {
         this.bindlessPool = bindlessPool;
         this.bindlessSet = bindlessSet;
         this.skyAtlasBinding = skyAtlasBinding;
+        this.skyViewLutBinding = skyViewLutBinding;
     }
 
     /**
@@ -126,7 +129,10 @@ public final class RtPipeline {
      * adds that many raygen-visible storage images at bindings 3.. (the DLSS-RR guide buffers);
      * write them with {@link #setExtraStorageImage}.
      */
-    public static RtPipeline create(RtContext ctx, String rgen, String[] rmiss, String rchit, String rahit, int pushConstantSize, boolean withBlockAlbedoAtlas, int extraStorageImages, int bindlessTextures, boolean skyAtlas) {
+    public static RtPipeline create(RtContext ctx, String rgen, String[] rmiss, String rchit, String shadowRchit,
+                                    String rahit,
+                                    int pushConstantSize, boolean withBlockAlbedoAtlas, int extraStorageImages,
+                                    int bindlessTextures, boolean blockMaterialAtlases, boolean skyAtlas) {
         VkDevice vk = ctx.vk();
         boolean hasAhit = rahit != null;
         String label = "world RT pipeline";
@@ -144,11 +150,12 @@ public final class RtPipeline {
         try (MemoryStack stack = MemoryStack.stackPush()) {
             int firstExtraBinding = withBlockAlbedoAtlas ? 3 : 2;
             int materialBase = firstExtraBinding + extraStorageImages;
-            // Sky rewrite: the vanilla celestials atlas (sun + moon phases), sampled by world.rmiss to
-            // draw the sun/moon discs. Canonical material pages live in the bindless set, not set 0.
-            int skyBinding = skyAtlas ? materialBase : -1;
-            int skySamplers = skyAtlas ? 1 : 0;
-            int bindingCount = firstExtraBinding + extraStorageImages + skySamplers;
+            // Reconstruction guides occupy a variable prefix ending at binding 13 (base) or 19 (NRD).
+            // Keep one fixed miss ABI above both ranges so backend changes cannot move sky descriptors.
+            int skyBinding = skyAtlas ? 20 : -1;
+            int skyLutBinding = skyAtlas ? 21 : -1;
+            int skyDescriptors = skyAtlas ? 2 : 0;
+            int bindingCount = materialBase + skyDescriptors;
             VkDescriptorSetLayoutBinding.Buffer binds = VkDescriptorSetLayoutBinding.calloc(bindingCount, stack);
             binds.get(0).binding(0).descriptorType(VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR)
                     .descriptorCount(1).stageFlags(VK_SHADER_STAGE_RAYGEN_BIT_KHR);
@@ -164,8 +171,10 @@ public final class RtPipeline {
                         .descriptorCount(1).stageFlags(VK_SHADER_STAGE_RAYGEN_BIT_KHR);
             }
             if (skyAtlas) {
-                binds.get(skyBinding).binding(skyBinding).descriptorType(VK10.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
+                binds.get(materialBase).binding(skyBinding).descriptorType(VK10.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
                         .descriptorCount(1).stageFlags(VK_SHADER_STAGE_MISS_BIT_KHR);
+                binds.get(materialBase + 1).binding(skyLutBinding).descriptorType(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
+                        .descriptorCount(1).stageFlags(VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR);
             }
             VkDescriptorSetLayoutCreateInfo dslci = VkDescriptorSetLayoutCreateInfo.calloc(stack).sType$Default().pBindings(binds);
             LongBuffer p = stack.mallocLong(1);
@@ -173,12 +182,13 @@ public final class RtPipeline {
             long dsl = p.get(0);
             RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT, dsl, label + " descriptor set layout");
 
-            int combinedSamplers = (withBlockAlbedoAtlas ? 1 : 0) + skySamplers;
+            int combinedSamplers = (withBlockAlbedoAtlas ? 1 : 0) + (skyAtlas ? 1 : 0);
             int poolSizeCount = 2 + (combinedSamplers > 0 ? 1 : 0);
             VkDescriptorPoolSize.Buffer poolSizes = VkDescriptorPoolSize.calloc(poolSizeCount, stack);
             poolSizes.get(0).type(VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR).descriptorCount(RING);
             // output image (binding 1) + the extra guide images share the storage-image type.
-            poolSizes.get(1).type(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).descriptorCount(RING * (1 + extraStorageImages));
+            poolSizes.get(1).type(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
+                    .descriptorCount(RING * (1 + extraStorageImages + (skyAtlas ? 1 : 0)));
             if (combinedSamplers > 0) {
                 poolSizes.get(2).type(VK10.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER).descriptorCount(RING * combinedSamplers);
             }
@@ -264,8 +274,10 @@ public final class RtPipeline {
             int groupCount = 1 + missCount + hitGroupCount;
             int hitGroupIdx = 1 + missCount;
             int chitStage = 1 + missCount;
-            int ahitStage = chitStage + 1;
-            int stageCount = 1 + missCount + 1 + (hasAhit ? 1 : 0);
+            boolean hasShadowChit = shadowRchit != null;
+            int shadowChitStage = hasShadowChit ? chitStage + 1 : VK_SHADER_UNUSED_KHR;
+            int ahitStage = chitStage + 1 + (hasShadowChit ? 1 : 0);
+            int stageCount = 1 + missCount + 1 + (hasShadowChit ? 1 : 0) + (hasAhit ? 1 : 0);
             long mGen = loadModule(vk, stack, rgen);
             RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_SHADER_MODULE, mGen, label + " " + rgen);
             long[] mMiss = new long[missCount];
@@ -275,6 +287,10 @@ public final class RtPipeline {
             }
             long mHit = loadModule(vk, stack, rchit);
             RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_SHADER_MODULE, mHit, label + " " + rchit);
+            long mShadowHit = hasShadowChit ? loadModule(vk, stack, shadowRchit) : 0L;
+            if (hasShadowChit) {
+                RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_SHADER_MODULE, mShadowHit, label + " " + shadowRchit);
+            }
             long mAhit = hasAhit ? loadModule(vk, stack, rahit) : 0L;
             if (hasAhit) {
                 RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_SHADER_MODULE, mAhit, label + " " + rahit);
@@ -286,6 +302,10 @@ public final class RtPipeline {
                 stages.get(1 + m).sType$Default().stage(VK_SHADER_STAGE_MISS_BIT_KHR).module(mMiss[m]).pName(entry);
             }
             stages.get(chitStage).sType$Default().stage(VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR).module(mHit).pName(entry);
+            if (hasShadowChit) {
+                stages.get(shadowChitStage).sType$Default().stage(VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR)
+                        .module(mShadowHit).pName(entry);
+            }
             if (hasAhit) {
                 stages.get(ahitStage).sType$Default().stage(VK_SHADER_STAGE_ANY_HIT_BIT_KHR).module(mAhit).pName(entry);
             }
@@ -299,7 +319,9 @@ public final class RtPipeline {
             }
             for (int h = 0; h < hitGroupCount; h++) {
                 groups.get(hitGroupIdx + h).sType$Default().type(VK_RAY_TRACING_SHADER_GROUP_TYPE_TRIANGLES_HIT_GROUP_KHR)
-                        .generalShader(VK_SHADER_UNUSED_KHR).closestHitShader(chitStage)
+                        .generalShader(VK_SHADER_UNUSED_KHR)
+                        .closestHitShader(hasShadowChit && hitGroupUsesShadowClosestHit(h)
+                                ? shadowChitStage : chitStage)
                         .anyHitShader(hasAhit && hitGroupUsesAnyHit(h) ? ahitStage : VK_SHADER_UNUSED_KHR)
                         .intersectionShader(VK_SHADER_UNUSED_KHR);
             }
@@ -322,12 +344,12 @@ public final class RtPipeline {
                 VK10.vkDestroyShaderModule(vk, mMiss[m], null);
             }
             VK10.vkDestroyShaderModule(vk, mHit, null);
+            if (hasShadowChit) VK10.vkDestroyShaderModule(vk, mShadowHit, null);
             if (hasAhit) {
                 VK10.vkDestroyShaderModule(vk, mAhit, null);
             }
 
-            // SBT: one record per group. Over-align the stride so every region start is base-aligned and
-            // every individual record satisfies shaderGroupHandleAlignment.
+            // Over-align the stride so every region and individual record satisfies the queried device limits.
             int handleSize = ctx.shaderGroupHandleSize();
             ByteBuffer handles = stack.malloc(groupCount * handleSize);
             check(vkGetRayTracingShaderGroupHandlesKHR(vk, pipeline, 0, groupCount, handles), "vkGetRayTracingShaderGroupHandlesKHR");
@@ -345,7 +367,7 @@ public final class RtPipeline {
             }
             sbt.flush();
             return new RtPipeline(ctx, dsl, pool, sets, layout, pipeline, sbt, stride, missCount, hitGroupCount, pushConstantSize, pcStages, firstExtraBinding,
-                    bindlessLayout, bindlessPool, bindlessSet, skyBinding);
+                    bindlessLayout, bindlessPool, bindlessSet, skyBinding, skyLutBinding);
         }
     }
 
@@ -360,6 +382,13 @@ public final class RtPipeline {
         }
         int entityBucket = (relativeHitGroup - RtAccel.SBT_ENTITY_OFFSET) % RtAccel.TERRAIN_BUCKETS;
         return entityBucket == RtAccel.ENTITY_BUCKET_ANY_HIT;
+    }
+
+    private static boolean hitGroupUsesShadowClosestHit(int relativeHitGroup) {
+        int rayType = relativeHitGroup < RtAccel.SBT_ENTITY_OFFSET
+                ? relativeHitGroup / RtAccel.TERRAIN_BUCKETS
+                : (relativeHitGroup - RtAccel.SBT_ENTITY_OFFSET) / RtAccel.TERRAIN_BUCKETS;
+        return rayType == RtAccel.SBT_RAY_SHADOW;
     }
 
     /**
@@ -406,6 +435,19 @@ public final class RtPipeline {
         }
     }
 
+    /** Update one guide binding only in the descriptor-ring slot selected for the current frame. */
+    public void setCurrentExtraStorageImage(int slot, long imageView) {
+        try (MemoryStack stack = MemoryStack.stackPush()) {
+            VkDescriptorImageInfo.Buffer imgInfo = VkDescriptorImageInfo.calloc(1, stack);
+            imgInfo.get(0).imageView(imageView).imageLayout(VK10.VK_IMAGE_LAYOUT_GENERAL);
+            VkWriteDescriptorSet.Buffer write = VkWriteDescriptorSet.calloc(1, stack);
+            write.get(0).sType$Default().dstSet(descriptorSets[currentSet])
+                    .dstBinding(firstExtraBinding + slot).descriptorCount(1)
+                    .descriptorType(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).pImageInfo(imgInfo);
+            VK10.vkUpdateDescriptorSets(ctx.vk(), write, null);
+        }
+    }
+
     /** Bind the block albedo atlas into every ring slot. */
     public void setBlockAlbedoAtlas(long imageView, long sampler) {
         try (MemoryStack stack = MemoryStack.stackPush()) {
@@ -423,6 +465,21 @@ public final class RtPipeline {
     /** Bind the vanilla celestials atlas (sun + moon phases), sampled by world.rmiss for the discs. */
     public void setSkyAtlas(long imageView, long sampler) {
         writeAtlasBinding(skyAtlasBinding, imageView, sampler);
+    }
+
+    /** Bind the physical sky-view storage image sampled by the miss shader at binding 21. */
+    public void setSkyViewLut(long imageView) {
+        if (skyViewLutBinding < 0) return;
+        try (MemoryStack stack = MemoryStack.stackPush()) {
+            VkDescriptorImageInfo.Buffer info = VkDescriptorImageInfo.calloc(1, stack);
+            info.get(0).imageView(imageView).imageLayout(VK10.VK_IMAGE_LAYOUT_GENERAL);
+            VkWriteDescriptorSet.Buffer write = VkWriteDescriptorSet.calloc(RING, stack);
+            for (int i = 0; i < RING; i++) {
+                write.get(i).sType$Default().dstSet(descriptorSets[i]).dstBinding(skyViewLutBinding)
+                        .descriptorCount(1).descriptorType(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).pImageInfo(info);
+            }
+            VK10.vkUpdateDescriptorSets(ctx.vk(), write, null);
+        }
     }
 
     public boolean hasSkyAtlas() {

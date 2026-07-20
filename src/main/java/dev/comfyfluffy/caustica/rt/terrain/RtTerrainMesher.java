@@ -32,6 +32,7 @@ import net.minecraft.client.color.block.BlockColors;
 import net.minecraft.client.color.block.BlockTintSource;
 import net.minecraft.client.multiplayer.ClientChunkCache;
 import net.minecraft.client.multiplayer.ClientLevel;
+import net.minecraft.client.renderer.BiomeColors;
 import net.minecraft.client.renderer.block.BlockAndTintGetter;
 import net.minecraft.client.renderer.block.BlockStateModelSet;
 import net.minecraft.client.renderer.block.FluidRenderer;
@@ -46,7 +47,13 @@ import net.minecraft.core.SectionPos;
 import net.minecraft.tags.FluidTags;
 import net.minecraft.util.RandomSource;
 import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.BaseTorchBlock;
+import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.IceBlock;
 import net.minecraft.world.level.block.RenderShape;
+import net.minecraft.world.level.block.StainedGlassBlock;
+import net.minecraft.world.level.block.StainedGlassPaneBlock;
+import net.minecraft.world.level.block.TintedGlassBlock;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.material.FluidState;
 import net.minecraft.world.phys.Vec3;
@@ -56,6 +63,9 @@ import java.util.ArrayList;
 import java.util.List;
 
 final class RtTerrainMesher {
+    private static final int PRIM_FLAG_TORCH = 1;
+    private static final int PRIM_FLAG_LAVA = 1 << 1;
+
     /**
      * Reusable per-worker-thread meshing state. The mesh + captures are reset between tasks so their
      * backing arrays amortize across sections instead of re-growing per task. Everything the result carries out —
@@ -103,37 +113,14 @@ final class RtTerrainMesher {
         if (mesh.isEmpty()) {
             return new CpuSection(null, null);
         }
-        // RIS emitter-NEE light collection — BEFORE packing: it also stamps NEE membership into the prim
-        // records, which packSection then copies out. Only opaque + cutout can emit (glass is shaded
-        // emission-free, water never emits; lava lives in the opaque bucket).
-        float[] lights = EMPTY_LIGHTS;
-        if (CausticaConfig.Rt.Lights.RIS_CANDIDATES.value() > 0) {
-            FloatArrayList collected = new FloatArrayList();
-            float minFill = CausticaConfig.Rt.Lights.MIN_FILL_RATIO.value();
-            collectLights(collected, mesh.opaque, materials, minFill);
-            collectLights(collected, mesh.cutout, materials, minFill);
-            if (!collected.isEmpty()) {
-                lights = collected.toFloatArray();
-            }
-        }
         Geom cutout = mesh.cutoutOrEmpty();
         RtAccel.OpacityMicromapInput ommInput =
                 RtTerrainOmm.buildInput(cutout.triCount(), cutout.cornerUv.elements(),
                         cutout.ommSprites.elements(), cutout.ommSprites.size());
-        return new CpuSection(packSection(mesh, lights), ommInput);
+        return new CpuSection(packSection(mesh), ommInput);
     }
 
-    private static final float[] EMPTY_LIGHTS = new float[0];
-
-    private static void collectLights(FloatArrayList out, Geom geom,
-                                      RtMaterialRegistry.Snapshot materials, float minFillRatio) {
-        if (geom != null && !geom.idx.isEmpty()) {
-            RtLightCollector.collectBucket(out, geom.verts, geom.prim, geom.cornerUv,
-                    geom.ommSprites.elements(), materials, minFillRatio);
-        }
-    }
-
-    private static PackedSection packSection(SectionMesh mesh, float[] lights) {
+    private static PackedSection packSection(SectionMesh mesh) {
         Geom[] buckets = mesh.buckets(); // { solid, cutout, translucent, water }, indexed by RtAccel.BUCKET_*
         int vertFloats = 0, idxCount = 0, uvFloats = 0, primFloats = 0, triCount = 0;
         int[] bucketTris = new int[buckets.length];
@@ -178,7 +165,7 @@ final class RtTerrainMesher {
             vertBase += vertSize / 3;
             triAcc += bucketTris[b];
         }
-        return new PackedSection(positions, indices, uvs, material, bucketTris, triBase, lights);
+        return new PackedSection(positions, indices, uvs, material, bucketTris, triBase);
     }
 
     private static void tessellate(BlockAndTintGetter region, BlockStateModelSet modelSet,
@@ -208,6 +195,7 @@ final class RtTerrainMesher {
                         // Water is the dielectric fluid; lava stays an opaque emitter. Tagged per-prim
                         // so the path tracer can branch (see emitQuad).
                         fluidCapture.water = fluid.is(FluidTags.WATER);
+                        fluidCapture.lava = fluid.is(FluidTags.LAVA);
                         RtFluidMesher.tesselate(region, m, fluidCapture, fluidRenderer.fluidModels, state, fluid);
                     }
                     if (state.getRenderShape() != RenderShape.MODEL) {
@@ -236,10 +224,9 @@ final class RtTerrainMesher {
     record CpuSection(PackedSection packed, RtAccel.OpacityMicromapInput opacityMicromap) {
     }
 
-    /** Worker-packed terrain payload; native preparation allocates buffers and bulk-copies these arrays.
-     *  {@code lights} = packed section-local RIS light records (possibly empty), CPU-side only. */
+    /** Worker-packed terrain payload; native preparation allocates buffers and bulk-copies these arrays. */
     record PackedSection(float[] positions, int[] indices, float[] uvs, float[] material,
-                         int[] bucketTris, int[] triBase, float[] lights) {
+                         int[] bucketTris, int[] triBase) {
     }
 
 
@@ -416,6 +403,11 @@ final class RtTerrainMesher {
         // separates from the front). Pooled — reset each block, never reallocated steady-state.
         private static final float OFFSET = 2.0e-4f;         // outward nudge (blocks) to break coplanar depth ties
         private static final float TRANSLUCENT_INSET = 2.0e-4f; // inward recess (blocks) for glass/ice vs coplanar neighbours
+        private static final int OPTICAL_THIN_GLASS = 2;
+        private static final int OPTICAL_SOLID_GLASS = 3;
+        private static final int OPTICAL_SOLID_ICE = 4;
+        private static final int OPTICAL_TRANSLUCENT_SURFACE = 5;
+        private static final int OPTICAL_EXTERIOR_WATER = 1 << 4;
         private static final float COINCIDENT_EPS = 1.0e-4f; // verts this close are "the same" point
         private static final int RESOLVE_CAP = 128;          // skip the O(n^2) resolve for pathological blocks
         private final List<PendingQuad> pending = new ArrayList<>(8);
@@ -442,6 +434,17 @@ final class RtTerrainMesher {
             ChunkSectionLayer layer = quad.chunkLayer();
             q.cutout = layer != ChunkSectionLayer.SOLID;
             q.translucent = layer == ChunkSectionLayer.TRANSLUCENT;
+            q.opticalClass = q.translucent ? opticalClass(state) : 0;
+            q.opticalWaterTint = 0;
+            Direction opticalFace = quad.nominalFace();
+            if (q.translucent && opticalFace != null
+                    && view.getFluidState(cullPos.setWithOffset(pos, opticalFace)).is(FluidTags.WATER)) {
+                q.opticalClass |= OPTICAL_EXTERIOR_WATER;
+                // The coincident fluid face is deliberately culled, so this glass primitive owns the
+                // complete glass/water transition. Preserve the missing face's actual biome tint in the
+                // already-reserved aux1 lane instead of falling back to the camera biome in raygen.
+                q.opticalWaterTint = BiomeColors.getAverageWaterColor(view, cullPos) & 0x00ff_ffff;
+            }
 
             // Fabric colors are authored albedo. Continuity uses them for already-resolved overlay tint;
             // ordinary biome-tinted quads retain tintIndex and are multiplied by the world tint below.
@@ -469,9 +472,21 @@ final class RtTerrainMesher {
             q.tr = tr; q.tg = tg; q.tb = tb;
 
             q.emission = quad.emissive() ? 1f : (state != null ? state.getLightEmission() / 15f : 0f);
+            q.torch = state != null && state.getBlock() instanceof BaseTorchBlock;
             TextureAtlasSprite sprite = spriteFinder.find(quad);
             q.sprite = sprite;
             q.materialId = materials.resolve(sprite, state, q.translucent);
+        }
+
+        private static int opticalClass(BlockState state) {
+            if (state == null) return OPTICAL_TRANSLUCENT_SURFACE;
+            var block = state.getBlock();
+            if (block == Blocks.GLASS_PANE || block instanceof StainedGlassPaneBlock) return OPTICAL_THIN_GLASS;
+            if (block == Blocks.GLASS || block instanceof StainedGlassBlock || block instanceof TintedGlassBlock) {
+                return OPTICAL_SOLID_GLASS;
+            }
+            if (block instanceof IceBlock) return OPTICAL_SOLID_ICE;
+            return OPTICAL_TRANSLUCENT_SURFACE;
         }
 
         /** Fabric's cull predicate returns true when the nominal face should be discarded. */
@@ -628,9 +643,9 @@ final class RtTerrainMesher {
                 prim.add(q.tb);
                 prim.add(0f);
                 prim.add(Float.intBitsToFloat(q.materialId)); // TerrainPrim.materialId uint bits
-                prim.add(0f); // flags
-                prim.add(0f); // aux0
-                prim.add(0f); // aux1
+                prim.add(Float.intBitsToFloat(q.torch ? PRIM_FLAG_TORCH : 0));
+                prim.add(Float.intBitsToFloat(q.opticalClass));
+                prim.add(Float.intBitsToFloat(q.opticalWaterTint)); // aux1: adjacent-water RGB8, or zero
                 g.ommSprites.add(q.sprite);
             }
         }
@@ -644,6 +659,9 @@ final class RtTerrainMesher {
         boolean cutout; // non-SOLID render layer (alpha-tested) — also an overlay candidate
         boolean translucent; // TRANSLUCENT layer (stained glass / ice): colored-transmission dielectric
         boolean tinted; // tintIndex >= 0 — the tinted member of a base+overlay pair
+        boolean torch;
+        int opticalClass;
+        int opticalWaterTint;
         float tr, tg, tb, emission;
         int materialId;
         TextureAtlasSprite sprite;
@@ -690,6 +708,7 @@ final class RtTerrainMesher {
         RtMaterialRegistry.Snapshot materials;
         float emission;      // set per fluid block (lava = 1, water = 0)
         boolean water;       // set per fluid block: true for water (dielectric), false for lava
+        boolean lava;        // true only for FluidTags.LAVA; other modded fluids keep the legacy material path
         private int n;
         private final float[] qx = new float[4], qy = new float[4], qz = new float[4], qu = new float[4], qv = new float[4];
         private final int[] qc = new int[4]; // per-vertex packed ARGB (vanilla bakes the biome water tint here)
@@ -720,33 +739,11 @@ final class RtTerrainMesher {
             // opaque emitter → opaque bucket (no any-hit at all).
             Geom g = water ? cur.water() : cur.opaque();
             FloatArrayList verts = g.verts;
-            IntArrayList idx = g.idx;
             int base = verts.size() / 3;
             for (int i = 0; i < 4; i++) {
                 verts.add(qx[i]);
                 verts.add(qy[i]);
                 verts.add(qz[i]);
-            }
-            idx.add(base);
-            idx.add(base + 1);
-            idx.add(base + 2);
-            idx.add(base);
-            idx.add(base + 2);
-            idx.add(base + 3);
-            // Per-triangle corner UVs (primitive order: 0,1,2 then 0,2,3), matching the two triangles above.
-            addTriUv(g, qu[0], qv[0], qu[1], qv[1], qu[2], qv[2]);
-            addTriUv(g, qu[0], qv[0], qu[2], qv[2], qu[3], qv[3]);
-
-            float ex1 = qx[1] - qx[0], ey1 = qy[1] - qy[0], ez1 = qz[1] - qz[0];
-            float ex2 = qx[2] - qx[0], ey2 = qy[2] - qy[0], ez2 = qz[2] - qz[0];
-            float nx = ey1 * ez2 - ez1 * ey2;
-            float ny = ez1 * ex2 - ex1 * ez2;
-            float nz = ex1 * ey2 - ey1 * ex2;
-            float len = (float) Math.sqrt(nx * nx + ny * ny + nz * nz);
-            if (len > 1.0e-6f) {
-                nx /= len;
-                ny /= len;
-                nz /= len;
             }
             int materialId = water ? materials.waterId() : materials.lavaId();
             // Biome water tint: vanilla's FluidRenderer bakes BiomeColors.getAverageWaterColor into the
@@ -765,22 +762,46 @@ final class RtTerrainMesher {
                 tg = sg / 1020f;
                 tb = sb / 1020f;
             }
-            FloatArrayList prim = g.prim;
-            for (int t = 0; t < 2; t++) { // one {normal+emission, tint, mat} record per triangle
-                prim.add(nx);
-                prim.add(ny);
-                prim.add(nz);
-                prim.add(emission);
-                prim.add(tr);
-                prim.add(tg);
-                prim.add(tb);
-                prim.add(0f);
-                prim.add(Float.intBitsToFloat(materialId));
-                prim.add(0f);
-                prim.add(0f);
-                prim.add(0f);
-                g.ommSprites.add(null);
+            // Flowing-fluid top quads can be non-planar, so each BLAS triangle needs its own normal.
+            // Sharing triangle 0's normal with triangle 1 can invert the latter's medium classification.
+            emitTriangle(g, base, 0, 1, 2, materialId, tr, tg, tb);
+            emitTriangle(g, base, 0, 2, 3, materialId, tr, tg, tb);
+        }
+
+        private void emitTriangle(Geom g, int base, int a, int b, int c,
+                                  int materialId, float tr, float tg, float tb) {
+            float ex1 = qx[b] - qx[a], ey1 = qy[b] - qy[a], ez1 = qz[b] - qz[a];
+            float ex2 = qx[c] - qx[a], ey2 = qy[c] - qy[a], ez2 = qz[c] - qz[a];
+            float nx = ey1 * ez2 - ez1 * ey2;
+            float ny = ez1 * ex2 - ex1 * ez2;
+            float nz = ex1 * ey2 - ey1 * ex2;
+            float len = (float) Math.sqrt(nx * nx + ny * ny + nz * nz);
+            if (len <= 1.0e-6f) {
+                return;
             }
+            nx /= len;
+            ny /= len;
+            nz /= len;
+
+            g.idx.add(base + a);
+            g.idx.add(base + b);
+            g.idx.add(base + c);
+            addTriUv(g, qu[a], qv[a], qu[b], qv[b], qu[c], qv[c]);
+
+            FloatArrayList prim = g.prim;
+            prim.add(nx);
+            prim.add(ny);
+            prim.add(nz);
+            prim.add(emission);
+            prim.add(tr);
+            prim.add(tg);
+            prim.add(tb);
+            prim.add(0f);
+            prim.add(Float.intBitsToFloat(materialId));
+            prim.add(Float.intBitsToFloat(lava ? PRIM_FLAG_LAVA : 0));
+            prim.add(0f);
+            prim.add(0f);
+            g.ommSprites.add(null);
         }
 
         // Unused VertexConsumer surface — FluidRenderer only calls the bulk addVertex above.

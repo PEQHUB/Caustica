@@ -6,36 +6,40 @@ import com.mojang.blaze3d.textures.GpuTextureView;
 import com.mojang.blaze3d.vulkan.VulkanCommandEncoder;
 import com.mojang.blaze3d.vulkan.VulkanDevice;
 import com.mojang.blaze3d.vulkan.VulkanGpuSurface;
+import com.llamalad7.mixinextras.injector.wrapmethod.WrapMethod;
+import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
 import dev.comfyfluffy.caustica.CausticaConfig;
 import dev.comfyfluffy.caustica.CausticaMod;
 import dev.comfyfluffy.caustica.rt.RtComposite;
-import dev.comfyfluffy.caustica.rt.RtDeviceBringup;
-import dev.comfyfluffy.caustica.rt.RtFramePresenter;
+import dev.comfyfluffy.caustica.rt.RtFrameStats;
 import dev.comfyfluffy.caustica.rt.RtHdr;
-import dev.comfyfluffy.caustica.rt.RtReflex;
+import dev.comfyfluffy.caustica.rt.pipeline.RtDlssFg;
+import dev.comfyfluffy.caustica.streamline.StreamlineRuntime;
+import dev.comfyfluffy.caustica.streamline.StreamlineSwapchainCoordinator;
 import it.unimi.dsi.fastutil.longs.LongList;
-import org.lwjgl.system.MemoryStack;
-import org.lwjgl.vulkan.KHRSwapchain;
 import org.lwjgl.vulkan.VkAllocationCallbacks;
 import org.lwjgl.vulkan.VkDevice;
-import org.lwjgl.vulkan.VkPresentIdKHR;
 import org.lwjgl.vulkan.VkPresentInfoKHR;
 import org.lwjgl.vulkan.VkQueue;
 import org.lwjgl.vulkan.VkSurfaceFormatKHR;
 import org.lwjgl.vulkan.VkSwapchainCreateInfoKHR;
-import org.lwjgl.vulkan.VkSwapchainLatencyCreateInfoNV;
+import org.lwjgl.system.MemoryStack;
 import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.Mixin;
+import org.spongepowered.asm.mixin.Mutable;
 import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.ModifyArg;
+import org.spongepowered.asm.mixin.injection.ModifyVariable;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.Redirect;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 import java.nio.LongBuffer;
+import java.nio.IntBuffer;
+import java.util.Set;
 
 /**
  * HDR Phase 0 capability logging + PQ swapchain selection.
@@ -63,13 +67,10 @@ public abstract class VulkanGpuSurfaceMixin {
 	private long surface;
 
 	@Shadow
-	@Final
-	private org.lwjgl.vulkan.VkQueue presentQueue;
-
-	@Shadow
 	private long swapchain;
 
 	@Shadow
+	@Mutable
 	@Final
 	private int swapchainImageFormat;
 
@@ -91,13 +92,77 @@ public abstract class VulkanGpuSurfaceMixin {
 	private long[] acquireSemaphores;
 
 	@Shadow
+	@Final
+	private Set<GpuSurface.PresentMode> supportedPresentModes;
+
+	@Shadow
 	private int currentAcquireSemaphore;
 
 	@Shadow
 	private long[] presentSemaphores;
 
+	@Redirect(method = "<init>(Lcom/mojang/blaze3d/vulkan/VulkanDevice;J)V",
+			at = @At(value = "INVOKE",
+				target = "Lorg/lwjgl/glfw/GLFWVulkan;glfwCreateWindowSurface(Lorg/lwjgl/vulkan/VkInstance;JLorg/lwjgl/vulkan/VkAllocationCallbacks;Ljava/nio/LongBuffer;)I"))
+	private int caustica$createSurfaceThroughStreamline(org.lwjgl.vulkan.VkInstance instance, long window,
+			VkAllocationCallbacks allocator, LongBuffer surfaceOut) {
+		return StreamlineRuntime.vkCreateWin32Surface(instance, window, allocator, surfaceOut);
+	}
+
+	@Redirect(method = "close()V",
+			at = @At(value = "INVOKE",
+				target = "Lorg/lwjgl/vulkan/KHRSurface;vkDestroySurfaceKHR(Lorg/lwjgl/vulkan/VkInstance;JLorg/lwjgl/vulkan/VkAllocationCallbacks;)V"))
+	private void caustica$destroySurfaceThroughStreamline(org.lwjgl.vulkan.VkInstance instance, long surface,
+			VkAllocationCallbacks allocator) {
+		StreamlineRuntime.vkDestroySurface(instance, surface, allocator);
+	}
+
+	@Inject(method = "close()V", at = @At("HEAD"))
+	private void caustica$streamlineSurfaceClosing(CallbackInfo ci) {
+		StreamlineSwapchainCoordinator.INSTANCE.closing();
+		RtHdr.clearSwapchainSelection();
+	}
+
+	@Redirect(method = "destroySwapchain()V",
+			at = @At(value = "INVOKE",
+				target = "Lorg/lwjgl/vulkan/KHRSwapchain;vkDestroySwapchainKHR(Lorg/lwjgl/vulkan/VkDevice;JLorg/lwjgl/vulkan/VkAllocationCallbacks;)V"))
+	private void caustica$destroySwapchainThroughStreamline(VkDevice device, long swapchain,
+			VkAllocationCallbacks allocator) {
+		StreamlineRuntime.vkDestroySwapchain(device, swapchain, allocator);
+	}
+
+	@Redirect(method = "configure(Lcom/mojang/blaze3d/systems/GpuSurface$Configuration;)V",
+			at = @At(value = "INVOKE",
+				target = "Lorg/lwjgl/vulkan/KHRSwapchain;vkGetSwapchainImagesKHR(Lorg/lwjgl/vulkan/VkDevice;JLjava/nio/IntBuffer;Ljava/nio/LongBuffer;)I"))
+	private int caustica$getSwapchainImagesThroughStreamline(VkDevice device, long swapchain, IntBuffer count,
+			LongBuffer images) {
+		int result = StreamlineRuntime.vkGetSwapchainImages(device, swapchain, count, images);
+		if (result != org.lwjgl.vulkan.VK10.VK_SUCCESS) {
+			StreamlineSwapchainCoordinator.INSTANCE.configureFailed();
+		}
+		return result;
+	}
+
+	@Redirect(method = "acquireNextTexture()V",
+			at = @At(value = "INVOKE",
+				target = "Lorg/lwjgl/vulkan/KHRSwapchain;vkAcquireNextImageKHR(Lorg/lwjgl/vulkan/VkDevice;JJJJLjava/nio/IntBuffer;)I"))
+	private int caustica$acquireNextImageThroughStreamline(VkDevice device, long swapchain, long timeout,
+			long semaphore, long fence, IntBuffer imageIndex) {
+		int result = StreamlineRuntime.vkAcquireNextImage(device, swapchain, timeout, semaphore, fence, imageIndex);
+		if (result == org.lwjgl.vulkan.VK10.VK_SUCCESS || result == org.lwjgl.vulkan.KHRSwapchain.VK_SUBOPTIMAL_KHR) {
+			RtDlssFg.INSTANCE.onImageAcquired(imageIndex.get(0));
+		}
+		return result;
+	}
+
 	@Unique
 	private int caustica$colorSpace = 0;
+
+	@Unique
+	private int caustica$sdrFormat;
+
+	@Unique
+	private int caustica$sdrColorSpace = RtHdr.SDR_COLOR_SPACE;
 
 	@Inject(method = "<init>(Lcom/mojang/blaze3d/vulkan/VulkanDevice;J)V", at = @At("TAIL"))
 	private void caustica$logHdrCapabilities(VulkanDevice device, long windowHandle, CallbackInfo ci) {
@@ -110,138 +175,211 @@ public abstract class VulkanGpuSurfaceMixin {
 
 	/**
 	 * Pick a PQ (HDR10_ST2084) surface format when requested + available, before vanilla's SDR-only selection
-	 * runs. Scans for any format the surface pairs with that color space rather than assuming a specific one
-	 * (IHVs commonly pair it with a 10-bit UNORM like A2R10G10B10, but this must not be hardcoded). Sets
+	 * runs. Accepts the implemented 10-bit UNORM formats paired with that color space. Sets
 	 * {@link #caustica$colorSpace} so {@code configure} can pass the matching color space.
 	 */
 	@Inject(method = "pickSwapchainSurfaceFormat", at = @At("HEAD"), cancellable = true)
 	private void caustica$pickPqFormat(VkSurfaceFormatKHR.Buffer formats, CallbackInfoReturnable<VkSurfaceFormatKHR> cir) {
+		this.caustica$colorSpace = RtHdr.resetColorSpaceForSurfaceScan(this.caustica$colorSpace);
+		RtHdr.clearSwapchainSelection();
 		if (!CausticaConfig.Rt.Hdr.enabled()) {
 			return;
 		}
+		boolean unsupportedPqAdvertised = false;
 		for (int i = 0; i < formats.capacity(); i++) {
 			VkSurfaceFormatKHR f = formats.get(i);
 			if (f.colorSpace() == VK_COLOR_SPACE_HDR10_ST2084_EXT) {
+				if (!RtHdr.isSupportedPqFormat(f.format())) {
+					unsupportedPqAdvertised = true;
+					continue;
+				}
 				this.caustica$colorSpace = VK_COLOR_SPACE_HDR10_ST2084_EXT;
+				RtHdr.stageSwapchainSelection(true, f.format(), f.colorSpace(), 0, RtHdr.SDR_COLOR_SPACE, "");
 				CausticaMod.LOGGER.info("HDR: selecting PQ swapchain (format={}, colorSpace=HDR10_ST2084)", f.format());
 				cir.setReturnValue(f);
 				return;
 			}
 		}
-		CausticaMod.LOGGER.warn("HDR: PQ swapchain requested but HDR10_ST2084 was not advertised by the surface; "
-				+ "using SDR (enable OS/display HDR; on Linux use a native Wayland session with HDR enabled in the compositor)");
+		CausticaMod.LOGGER.warn(unsupportedPqAdvertised
+				? "HDR: HDR10_ST2084 was advertised only with unsupported non-10-bit formats; using SDR"
+				: "HDR: PQ swapchain requested but HDR10_ST2084 was not advertised by the surface; "
+						+ "using SDR (enable OS/display HDR; on Linux use a native Wayland session with HDR enabled in the compositor)");
 	}
 
-	/** Replace the hardcoded {@code imageColorSpace(0)} with the PQ color space when one was selected. */
+	/** Record the format vanilla actually selected on every SDR/fallback return path. */
+	@Inject(method = "pickSwapchainSurfaceFormat", at = @At("RETURN"))
+	private void caustica$recordSelectedSurfaceFormat(VkSurfaceFormatKHR.Buffer formats,
+			CallbackInfoReturnable<VkSurfaceFormatKHR> cir) {
+		VkSurfaceFormatKHR selected = cir.getReturnValue();
+		if (selected == null) {
+			RtHdr.clearSwapchainSelection();
+			return;
+		}
+		this.caustica$colorSpace = selected.colorSpace();
+		RtHdr.stageSwapchainSelection(CausticaConfig.Rt.Hdr.enabled(),
+				selected.format(), selected.colorSpace(), selected.format(), selected.colorSpace(),
+				CausticaConfig.Rt.Hdr.enabled() && !RtHdr.effectiveHdrForSelection(true,
+						selected.format(), selected.colorSpace()) ? "HDR10_ST2084 unavailable; using SDR" : "");
+	}
+
+	/** Re-select the pair on every configure; Minecraft's field was initialized only in the constructor. */
+	@ModifyArg(method = "configure",
+			at = @At(value = "INVOKE",
+					target = "Lorg/lwjgl/vulkan/VkSwapchainCreateInfoKHR;imageFormat(I)Lorg/lwjgl/vulkan/VkSwapchainCreateInfoKHR;"),
+			index = 0)
+	private int caustica$selectConfigureFormat(int original) {
+		int sdrFormat = original;
+		int sdrColorSpace = RtHdr.SDR_COLOR_SPACE;
+		int pqFormat = 0;
+		boolean unsupportedPq = false;
+		try (MemoryStack stack = MemoryStack.stackPush()) {
+			IntBuffer count = stack.callocInt(1);
+			int result = org.lwjgl.vulkan.KHRSurface.vkGetPhysicalDeviceSurfaceFormatsKHR(
+					this.device.vkDevice().getPhysicalDevice(), this.surface, count, null);
+			if (result >= 0 && count.get(0) > 0) {
+				VkSurfaceFormatKHR.Buffer formats = VkSurfaceFormatKHR.calloc(count.get(0), stack);
+				org.lwjgl.vulkan.KHRSurface.vkGetPhysicalDeviceSurfaceFormatsKHR(
+						this.device.vkDevice().getPhysicalDevice(), this.surface, count, formats);
+				for (int i = 0; i < formats.capacity(); i++) {
+					VkSurfaceFormatKHR f = formats.get(i);
+					if (f.colorSpace() == RtHdr.SDR_COLOR_SPACE
+							&& (f.format() == 37 || f.format() == 44)) {
+						if (sdrFormat == original || sdrFormat != 37 && sdrFormat != 44) {
+							sdrFormat = f.format();
+						}
+					}
+				}
+				for (int i = 0; i < formats.capacity(); i++) {
+					VkSurfaceFormatKHR f = formats.get(i);
+					if (f.colorSpace() != RtHdr.HDR10_ST2084_COLOR_SPACE) {
+						continue;
+					}
+					if (RtHdr.isSupportedPqFormat(f.format())) {
+						pqFormat = f.format();
+						break;
+					}
+					unsupportedPq = true;
+				}
+			}
+		} catch (Throwable t) {
+			CausticaMod.LOGGER.warn("HDR: configure-time surface format enumeration failed; retaining format {}: {}",
+					original, t.toString());
+		}
+
+		boolean request = CausticaConfig.Rt.Hdr.enabled();
+		if (request && pqFormat != 0) {
+			this.caustica$sdrFormat = sdrFormat;
+			this.caustica$sdrColorSpace = sdrColorSpace;
+			this.swapchainImageFormat = pqFormat;
+			this.caustica$colorSpace = RtHdr.HDR10_ST2084_COLOR_SPACE;
+			RtHdr.stageSwapchainSelection(true, pqFormat, RtHdr.HDR10_ST2084_COLOR_SPACE,
+					sdrFormat, sdrColorSpace, "");
+			return pqFormat;
+		}
+
+		String reason = request
+				? (unsupportedPq ? "HDR10_ST2084 advertised only with unsupported formats; using SDR"
+						: "HDR10_ST2084 unavailable; using SDR")
+				: "";
+		this.caustica$sdrFormat = sdrFormat;
+		this.caustica$sdrColorSpace = sdrColorSpace;
+		this.swapchainImageFormat = sdrFormat;
+		this.caustica$colorSpace = sdrColorSpace;
+		RtHdr.stageSwapchainSelection(request, sdrFormat, sdrColorSpace, sdrFormat, sdrColorSpace, reason);
+		return sdrFormat;
+	}
+
+	/** Replace the hardcoded {@code imageColorSpace(0)} with the pair selected for this configure. */
 	@ModifyArg(method = "configure",
 			at = @At(value = "INVOKE",
 					target = "Lorg/lwjgl/vulkan/VkSwapchainCreateInfoKHR;imageColorSpace(I)Lorg/lwjgl/vulkan/VkSwapchainCreateInfoKHR;"),
 			index = 0)
 	private int caustica$overrideColorSpace(int original) {
-		return this.caustica$colorSpace != 0 ? this.caustica$colorSpace : original;
+		return this.caustica$colorSpace;
 	}
 
-	/**
-	 * Reflex Phase 1a: chain {@code VkSwapchainLatencyCreateInfoNV{latencyModeEnable=true}} into the
-	 * swapchain's pNext at creation. Per spec {@code vkSetLatencySleepModeNV} (not called yet — lands with
-	 * the sleep loop) only takes effect on a swapchain created with this flag, so it has to be set here,
-	 * before there's any other reason to touch swapchain creation. Preserves whatever pNext was already
-	 * there (currently nothing else chains one). The extra struct is stack-allocated and only needs to
-	 * survive this call — Vulkan reads pNext chains synchronously during {@code vkCreateSwapchainKHR}, it
-	 * doesn't retain the pointer afterward, so freeing it when this method's stack frame pops is safe even
-	 * though {@code pCreateInfo} isn't touched again after this point in {@code configure()}. No-op (calls
-	 * through unchanged) when Reflex isn't enabled + device-supported.
-	 */
+	/** Streamline owns the swapchain proxy; Minecraft retains the configure transaction and object lifetime. */
 	@Redirect(method = "configure",
 			at = @At(value = "INVOKE",
 					target = "Lorg/lwjgl/vulkan/KHRSwapchain;vkCreateSwapchainKHR(Lorg/lwjgl/vulkan/VkDevice;Lorg/lwjgl/vulkan/VkSwapchainCreateInfoKHR;Lorg/lwjgl/vulkan/VkAllocationCallbacks;Ljava/nio/LongBuffer;)I"))
-	private int caustica$createSwapchainWithReflex(VkDevice device, VkSwapchainCreateInfoKHR pCreateInfo,
+	private int caustica$createSwapchainThroughStreamline(VkDevice device, VkSwapchainCreateInfoKHR pCreateInfo,
 			VkAllocationCallbacks pAllocator, LongBuffer pSwapchain) {
-		if (!RtDeviceBringup.reflexEnabled()) {
-			return KHRSwapchain.vkCreateSwapchainKHR(device, pCreateInfo, pAllocator, pSwapchain);
+		int result = StreamlineRuntime.vkCreateSwapchain(device, pCreateInfo, pAllocator, pSwapchain);
+		if (RtHdr.shouldRetrySdr(result, RtHdr.stagedEffective())) {
+			CausticaMod.LOGGER.warn("HDR: PQ swapchain creation failed with {}; retrying once with SDR", result);
+			pCreateInfo.imageFormat(RtHdr.stagedSdrFormat()).imageColorSpace(RtHdr.stagedSdrColorSpace());
+			this.swapchainImageFormat = RtHdr.stagedSdrFormat();
+			this.caustica$colorSpace = RtHdr.stagedSdrColorSpace();
+			RtHdr.stageSdrFallback("PQ swapchain creation failed; retried with SDR");
+			result = StreamlineRuntime.vkCreateSwapchain(device, pCreateInfo, pAllocator, pSwapchain);
 		}
-		try (MemoryStack stack = MemoryStack.stackPush()) {
-			VkSwapchainLatencyCreateInfoNV latency = VkSwapchainLatencyCreateInfoNV.calloc(stack).sType$Default();
-			latency.pNext(pCreateInfo.pNext());
-			latency.latencyModeEnable(true);
-			pCreateInfo.pNext(latency.address());
-			return KHRSwapchain.vkCreateSwapchainKHR(device, pCreateInfo, pAllocator, pSwapchain);
+		if (result != org.lwjgl.vulkan.VK10.VK_SUCCESS) {
+			StreamlineSwapchainCoordinator.INSTANCE.configureFailed();
 		}
-	}
-
-	/**
-	 * Reflex Phase 1b: (re)apply the sleep-mode config for the just-(re)configured swapchain. Per spec this
-	 * is scoped to a specific swapchain object, so it must be re-called whenever {@code configure()} builds a
-	 * new one (e.g. resize) — {@link RtReflex#applySleepMode} is idempotent (no-op if unchanged), so calling
-	 * it unconditionally here is cheap. No-op when Reflex isn't enabled + device-supported.
-	 */
-	@Inject(method = "configure", at = @At("TAIL"))
-	private void caustica$applyReflexSleepMode(GpuSurface.Configuration config, CallbackInfo ci) {
-		if (RtDeviceBringup.reflexEnabled()) {
-			RtReflex.INSTANCE.applySleepMode(this.device.vkDevice(), this.swapchain);
-		}
-		// DLSS-FG diagnostic: MAILBOX/IMMEDIATE present modes let a later present silently replace/skip an
-		// earlier queued-but-not-yet-scanned-out one, which would drop FG's generated frame before the
-		// display ever shows it — even though our vkQueuePresentKHR call itself reports success. FIFO is the
-		// only mode that guarantees every queued present gets its own vblank. Log once per (re)configure so
-		// this is checkable without guessing at the in-game V-Sync setting.
-		if (dev.comfyfluffy.caustica.rt.pipeline.RtDlssFg.enabled()) {
-			CausticaMod.LOGGER.info("DLSS-FG: swapchain present mode = {} (FIFO required for generated frames "
-					+ "to actually display; MAILBOX/IMMEDIATE will silently drop them — enable V-Sync if not FIFO)",
-					config.presentMode());
-		}
-	}
-
-	/**
-	 * Reflex Phase 1b: PRESENT_START/END markers around the real frame's present, plus (when
-	 * {@code VK_KHR_present_id} is enabled) chaining a {@code VkPresentIdKHR} onto it so the marker's
-	 * {@code presentID} correlates with this exact present call. The FG-generated extra presents
-	 * ({@link RtFramePresenter}) are deliberately NOT marked/present-id'd — Reflex paces/measures the real
-	 * frame only. No-op passthrough unless Reflex has successfully applied sleep mode for this swapchain.
-	 */
-	@Redirect(method = "present",
-			at = @At(value = "INVOKE",
-					target = "Lorg/lwjgl/vulkan/KHRSwapchain;vkQueuePresentKHR(Lorg/lwjgl/vulkan/VkQueue;Lorg/lwjgl/vulkan/VkPresentInfoKHR;)I"))
-	private int caustica$presentWithReflex(VkQueue queue, VkPresentInfoKHR presentInfo) {
-		boolean reflexActive = RtReflex.enabled() && this.swapchain == RtReflex.INSTANCE.appliedSwapchain();
-		if (!reflexActive) {
-			return KHRSwapchain.vkQueuePresentKHR(queue, presentInfo);
-		}
-		VkDevice vkDevice = this.device.vkDevice();
-		// Own counter (not currentSimFrameId()): Minecraft can present outside the normal tick loop (e.g.
-		// Minecraft.setScreenAndShow's synchronous redraw when opening a world), so presentID must advance on
-		// every actual vkQueuePresentKHR call, not just once per sleep()/runTick — otherwise a stale, already-
-		// used id gets resent and VUID-VkPresentIdKHR-presentIds-04999 fires.
-		long presentId = RtReflex.INSTANCE.advancePresentId();
-		RtReflex.INSTANCE.marker(vkDevice, this.swapchain, RtReflex.MARKER_RENDERSUBMIT_END, presentId);
-		RtReflex.INSTANCE.marker(vkDevice, this.swapchain, RtReflex.MARKER_PRESENT_START, presentId);
-		int result;
-		if (RtDeviceBringup.presentIdEnabled()) {
-			try (MemoryStack stack = MemoryStack.stackPush()) {
-				VkPresentIdKHR vkPresentId = VkPresentIdKHR.calloc(stack).sType$Default()
-						.pNext(presentInfo.pNext())
-						.swapchainCount(1)
-						.pPresentIds(stack.longs(presentId));
-				presentInfo.pNext(vkPresentId.address());
-				result = KHRSwapchain.vkQueuePresentKHR(queue, presentInfo);
-			}
-		} else {
-			result = KHRSwapchain.vkQueuePresentKHR(queue, presentInfo);
-		}
-		RtReflex.INSTANCE.marker(vkDevice, this.swapchain, RtReflex.MARKER_PRESENT_END, presentId);
 		return result;
 	}
 
-	/**
-	 * Step C — world-only HDR present. When the RT renderer has a fresh PQ HDR image and the swapchain is
-	 * PQ, blit that image straight into the swapchain instead of Minecraft's SDR main target. Replaces the
-	 * vanilla blit entirely (the SDR target + its UI are bypassed for now; UI compositing is a later step).
-	 *
-	 * <p>Because this cancels {@code blitFromTexture} at HEAD, the normal {@code caustica$presentGeneratedFrames}
-	 * TAIL inject below never runs on HDR frames — so DLSS-FG's extra-present step is invoked explicitly here,
-	 * right after the real HDR frame is recorded, using the just-composited {@code hdrDisplayImage} (already
-	 * UI-composited by {@code presentHdr}) as the interpolation source instead of the SDR main target.
-	 */
+	@ModifyVariable(method = "configure(Lcom/mojang/blaze3d/systems/GpuSurface$Configuration;)V",
+			at = @At("HEAD"), argsOnly = true)
+	private GpuSurface.Configuration caustica$normalizeStreamlinePresentMode(GpuSurface.Configuration config) {
+		StreamlineSwapchainCoordinator.INSTANCE.configureStarting();
+		return StreamlineSwapchainCoordinator.INSTANCE.normalizeConfiguration(config, this.supportedPresentModes);
+	}
+
+	@Inject(method = "configure", at = @At(value = "INVOKE",
+			target = "Lcom/mojang/blaze3d/vulkan/VulkanGpuSurface;destroySwapchain()V",
+			shift = At.Shift.AFTER))
+	private void caustica$prepareStreamlineSwapchain(GpuSurface.Configuration config, CallbackInfo ci) {
+		StreamlineSwapchainCoordinator.INSTANCE.prepareReplacement(config);
+	}
+
+	/** Publish the successfully created swapchain generation to the Streamline controller. */
+	@Inject(method = "configure", at = @At("TAIL"))
+	private void caustica$streamlineSwapchainConfigured(GpuSurface.Configuration config, CallbackInfo ci) {
+		StreamlineSwapchainCoordinator.INSTANCE.configured(config, this.swapchainWidth, this.swapchainHeight,
+				this.swapchainImageFormat,
+				this.caustica$colorSpace,
+				this.swapchainImages.size());
+	}
+
+	/** Minecraft throws after any failed create/enumeration; clear all staged/effective HDR truth transactionally. */
+	@WrapMethod(method = "configure")
+	private void caustica$configureWithHdrFailureCleanup(GpuSurface.Configuration config, Operation<Void> original) {
+		try {
+			original.call(config);
+		} catch (Throwable t) {
+			RtHdr.failSwapchainConfiguration("swapchain configure failed");
+			StreamlineSwapchainCoordinator.INSTANCE.configureFailed();
+			throw caustica$rethrow(t);
+		}
+	}
+
+	@Unique
+	private static <T extends Throwable> RuntimeException caustica$rethrow(Throwable throwable) throws T {
+		throw (T) throwable;
+	}
+
+	/** Attach Streamline PCL markers to the same token used by the one real proxy present. */
+	@Redirect(method = "present",
+			at = @At(value = "INVOKE",
+					target = "Lorg/lwjgl/vulkan/KHRSwapchain;vkQueuePresentKHR(Lorg/lwjgl/vulkan/VkQueue;Lorg/lwjgl/vulkan/VkPresentInfoKHR;)I"))
+	private int caustica$presentThroughStreamline(VkQueue queue, VkPresentInfoKHR presentInfo) {
+		RtDlssFg.INSTANCE.beforePresent();
+		int result;
+		if (RtFrameStats.enabled()) {
+			RtFrameStats.FRAME.count("fgPresentActive", RtDlssFg.INSTANCE.generationActiveForPresent() ? 1L : 0L);
+			RtFrameStats.FRAME.count("fgQueueParallel", RtDlssFg.INSTANCE.parallelQueueActive() ? 1L : 0L);
+			try (RtFrameStats.Scope ignored = RtFrameStats.FRAME.stage("frame.present")) {
+				result = StreamlineRuntime.vkQueuePresent(queue, presentInfo);
+			}
+		} else {
+			result = StreamlineRuntime.vkQueuePresent(queue, presentInfo);
+		}
+		RtDlssFg.INSTANCE.afterPresent(result);
+		return result;
+	}
+
+	/** Present Caustica's HDR10 image, then tag its final depth, motion, hudless color, and UI inputs. */
 	@Inject(method = "blitFromTexture", at = @At("HEAD"), cancellable = true)
 	private void caustica$presentHdr(CommandEncoderBackend commandEncoder, GpuTextureView textureView, CallbackInfo ci) {
 		if (this.currentImageIndex < 0) {
@@ -253,8 +391,10 @@ public abstract class VulkanGpuSurfaceMixin {
 		long presentSem = this.presentSemaphores[this.currentImageIndex];
 		if (rt.isHdrPresentActive()) {
 			VulkanCommandEncoder enc = (VulkanCommandEncoder) commandEncoder;
-			rt.presentHdr(enc, swapchainImage, this.swapchainWidth, this.swapchainHeight, acquireSem, presentSem);
-			caustica$presentGeneratedFramesHdr(enc, rt);
+			rt.presentHdr(enc, swapchainImage, this.swapchainWidth, this.swapchainHeight,
+					this.swapchainImageFormat, acquireSem, presentSem);
+			rt.submitStreamlineFrame(enc, this.swapchainWidth, this.swapchainHeight,
+					this.swapchainImageFormat, true);
 			ci.cancel();
 			return;
 		}
@@ -275,58 +415,14 @@ public abstract class VulkanGpuSurfaceMixin {
 		return view instanceof com.mojang.blaze3d.vulkan.VulkanGpuTextureView v ? v.vkImageView() : 0L;
 	}
 
-	/**
-	 * DLSS Frame Generation (slice 2): after Minecraft blits the real frame into its acquired swapchain image
-	 * (but before {@code present()} shows it), present the generated frame(s) into additional swapchain images
-	 * via {@link RtFramePresenter}, so the display order is generated-then-real. Runs only on the normal
-	 * present path — the HDR/PQ present hooks cancel {@code blitFromTexture} at HEAD, so this TAIL is
-	 * skipped there (HDR+FG deferred). Iteration 1 duplicates the final frame (no DLSSG eval yet).
-	 */
+	/** Tag the completed SDR frame immediately before Minecraft's normal present. */
 	@Inject(method = "blitFromTexture", at = @At("TAIL"))
-	private void caustica$presentGeneratedFrames(CommandEncoderBackend commandEncoder, GpuTextureView textureView, CallbackInfo ci) {
-		if (this.currentImageIndex < 0 || !RtFramePresenter.INSTANCE.isActive()) {
+	private void caustica$submitStreamlineFrame(CommandEncoderBackend commandEncoder, GpuTextureView textureView,
+			CallbackInfo ci) {
+		if (this.currentImageIndex < 0) {
 			return;
 		}
-		long srcImage = textureView.texture() instanceof com.mojang.blaze3d.vulkan.VulkanGpuTexture t ? t.vkImage() : 0L;
-		long srcView = caustica$vkImageView(textureView);
-		if (srcImage == 0L) {
-			return;
-		}
-		int generatedCount = dev.comfyfluffy.caustica.rt.pipeline.RtDlssFg.INSTANCE.effectiveMultiFrameCount();
-		RtFramePresenter.INSTANCE.prepareExtraFrames((VulkanCommandEncoder) commandEncoder, this.device,
-				this.swapchain, this.swapchainImages, this.presentSemaphores,
-				this.swapchainWidth, this.swapchainHeight,
-				srcView, srcImage, textureView.getWidth(0), textureView.getHeight(0), generatedCount, false);
-	}
-
-	/**
-	 * DLSS-FG on the HDR present path: same extra-present mechanism as {@link #caustica$presentGeneratedFrames},
-	 * but sourced from the HDR backbuffer ({@link RtComposite#hdrBackbufferView()}/{@code hdrBackbufferImage()})
-	 * since HDR frames never reach that TAIL inject (HEAD cancels {@code blitFromTexture} above). No-op if FG
-	 * isn't active or the HDR backbuffer isn't available (shouldn't happen right after a successful
-	 * {@code presentHdr} call, but mirrors the defensive {@code srcImage == 0L} check in the SDR path).
-	 */
-	@Unique
-	private void caustica$presentGeneratedFramesHdr(VulkanCommandEncoder enc, RtComposite rt) {
-		if (this.currentImageIndex < 0 || !RtFramePresenter.INSTANCE.isActive()) {
-			return;
-		}
-		long hdrView = rt.hdrBackbufferView();
-		long hdrImage = rt.hdrBackbufferImage();
-		if (hdrImage == 0L) {
-			return;
-		}
-		int generatedCount = dev.comfyfluffy.caustica.rt.pipeline.RtDlssFg.INSTANCE.effectiveMultiFrameCount();
-		RtFramePresenter.INSTANCE.prepareExtraFrames(enc, this.device, this.swapchain, this.swapchainImages,
-				this.presentSemaphores, this.swapchainWidth, this.swapchainHeight,
-				hdrView, hdrImage, this.swapchainWidth, this.swapchainHeight, generatedCount, true);
-	}
-
-	// Present the FG-generated frame(s) acquired/recorded at blitFromTexture TAIL — at present() HEAD, after
-	// Minecraft.java's encoder.submit() has flushed (so our present semaphores are signaled) and before MC
-	// presents the real frame, giving display order generated-then-real.
-	@Inject(method = "present", at = @At("HEAD"))
-	private void caustica$flushGeneratedPresents(CallbackInfo ci) {
-		RtFramePresenter.INSTANCE.flushPendingPresents(this.swapchain, this.presentQueue);
+		RtComposite.INSTANCE.submitStreamlineFrame((VulkanCommandEncoder) commandEncoder,
+				this.swapchainWidth, this.swapchainHeight, this.swapchainImageFormat, false);
 	}
 }

@@ -22,7 +22,14 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.Font;
 import net.minecraft.client.gui.font.TextRenderable;
 import net.minecraft.client.model.Model;
+import net.minecraft.client.model.HumanoidModel;
 import net.minecraft.client.model.geom.ModelPart;
+import net.minecraft.client.model.object.skull.SkullModelBase;
+import net.minecraft.client.model.player.PlayerCapeModel;
+import net.minecraft.client.model.player.PlayerEarsModel;
+import net.minecraft.client.model.player.PlayerModel;
+import net.minecraft.client.model.animal.sheep.SheepFurModel;
+import net.minecraft.client.renderer.RenderPipelines;
 import net.minecraft.client.renderer.OrderedSubmitNodeCollector;
 import net.minecraft.client.renderer.SubmitNodeCollector;
 import net.minecraft.client.color.block.BlockTintSource;
@@ -75,6 +82,12 @@ import java.util.function.Predicate;
  * EntityRenderDispatcher.submit} fans out into {@code submitModel} here. Reused across entities.
  */
 public final class RtEntityCollector implements SubmitNodeCollector {
+    public enum CaptureMode {
+        FULL,
+        FIRST_PERSON_BODY,
+        FIRST_PERSON_HEAD
+    }
+
     private static final Direction[] DIRECTIONS = Direction.values();
     private static final Predicate<Direction> NEVER_CULL = direction -> false;
     // Vanilla leash constants (LeashFeatureRenderer.LEASH_RENDER_STEPS / LEASH_WIDTH).
@@ -85,6 +98,15 @@ public final class RtEntityCollector implements SubmitNodeCollector {
 
     private RtEntityCapture capture;
     private boolean profileDynamicEntity;
+    private CaptureMode captureMode = CaptureMode.FULL;
+    // True only while submitItem emits the non-head item layer of a directly visible first-person body.
+    // Per-quad material classification still decides whether the presentation flag is written.
+    private boolean firstPersonHeldItem;
+    private boolean currentItemEnchanted;
+    private Model<?> lastBaseModel;
+    private final Matrix4f lastBasePose = new Matrix4f();
+    private int lastBasePrimStart;
+    private int lastBasePrimEnd;
     private final RtEntityCapture parityCapture = new RtEntityCapture();
     private final RtCuboidEmitter cuboidEmitter = new RtCuboidEmitter();
     // Lazy FRAPI emitter used for contained and moving block models. Its callback reads the synchronous
@@ -118,11 +140,19 @@ public final class RtEntityCollector implements SubmitNodeCollector {
      * call must NOT reset it — {@link RtEntities} reads {@link #outlineColor()} after that detach.
      */
     public void begin(RtEntityCapture capture, boolean profileDynamicEntity) {
+        begin(capture, profileDynamicEntity, CaptureMode.FULL);
+    }
+
+    public void begin(RtEntityCapture capture, boolean profileDynamicEntity, CaptureMode captureMode) {
         this.capture = capture;
         this.profileDynamicEntity = capture != null && profileDynamicEntity;
+        this.captureMode = capture != null ? captureMode : CaptureMode.FULL;
         if (capture != null) {
             this.outlineColor = 0;
             this.pendingOrder = 0;
+            this.currentItemEnchanted = false;
+            this.lastBaseModel = null;
+            this.lastBasePrimStart = this.lastBasePrimEnd = 0;
         }
     }
 
@@ -142,6 +172,23 @@ public final class RtEntityCollector implements SubmitNodeCollector {
                                 int lightCoords, int overlayCoords, int tintedColor, TextureAtlasSprite sprite,
                                 int outlineColor, ModelFeatureRenderer.CrumblingOverlay crumblingOverlay) {
         if (capture == null) {
+            return;
+        }
+        if (isGlint(renderType)) {
+            pendingOrder = 0;
+            boolean matched = lastBaseModel == model
+                    && lastBasePose.equals(poseStack.last().pose(), 1.0e-6f)
+                    && lastBasePrimEnd > lastBasePrimStart;
+            if (matched) {
+                capture.orPrimitiveFlags(lastBasePrimStart, lastBasePrimEnd, RtEntityCapture.PRIM_ENCHANTED);
+            }
+            if (profileDynamicEntity) {
+                RtFrameStats.FRAME.count("entityGlintSubmissionsSuppressed", 1);
+                RtFrameStats.FRAME.count(matched ? "entityGlintModelRangesTagged" : "entityGlintUnmatched", 1);
+            }
+            return;
+        }
+        if (!capturesModel(model)) {
             return;
         }
         if (outlineColor != 0) {
@@ -188,6 +235,10 @@ public final class RtEntityCollector implements SubmitNodeCollector {
         } finally {
             RtFrameStats.FRAME.endStage("entity.capture.submit.material", materialStart);
         }
+        if (model instanceof SheepFurModel) {
+            capture.currentMaterialId = RtMaterialRegistry.INSTANCE.withFamily(
+                    capture.currentMaterialId, RtMaterials.Profile.WOOL);
+        }
         // Pose the model from its render state (idempotent re-pose; mirrors what the renderer does for
         // its feature layers), then render the posed parts into the capture. renderToBuffer applies the
         // PoseStack to every vertex/normal, so the capture receives world-/camera-relative geometry.
@@ -210,18 +261,42 @@ public final class RtEntityCollector implements SubmitNodeCollector {
         int idxStart = capture.idx.size();
         int uvStart = capture.uvList.size();
         int primStart = capture.prim.size();
-        RtCuboidEmitter.ModelTemplate directTemplate = cuboidEmitter.prepare(model);
+        long prepareStart = profileDynamicEntity ? RtFrameStats.FRAME.startStage() : 0L;
+        RtCuboidEmitter.ModelTemplate directTemplate;
+        try {
+            directTemplate = captureMode == CaptureMode.FULL
+                    ? cuboidEmitter.prepare(model) : null;
+        } finally {
+            RtFrameStats.FRAME.endStage("entity.capture.submit.prepare", prepareStart);
+        }
+        boolean emfCanary = directTemplate != null && cuboidEmitter.needsCanary(directTemplate);
+        boolean directUsed = directTemplate != null && !emfCanary;
         long directCubeCounts = 0L;
         long drawStart = profileDynamicEntity ? RtFrameStats.FRAME.startStage() : 0L;
         try {
-            if (directTemplate != null) {
+            if (emfCanary) {
+                parityCapture.reset(directTemplate.maxVertices);
+                capture.copySubmissionStateTo(parityCapture);
+                directCubeCounts = cuboidEmitter.emit(directTemplate, poseStack, parityCapture, color);
+                model.renderToBuffer(poseStack, capture, lightCoords, overlayCoords, color);
+                try {
+                    capture.assertSubmissionBitwiseIdentical(vertStart, idxStart, uvStart, primStart,
+                            parityCapture, "EMF canary " + model.getClass().getName());
+                    cuboidEmitter.approveCanary(directTemplate);
+                } catch (IllegalStateException mismatch) {
+                    cuboidEmitter.rejectCanary(directTemplate, model, mismatch.getMessage());
+                }
+            } else if (directUsed) {
                 directCubeCounts = cuboidEmitter.emit(directTemplate, poseStack, capture, color);
+            } else if (captureMode != CaptureMode.FULL && model instanceof HumanoidModel<?> humanoid) {
+                renderFilteredHumanoid(model, humanoid, poseStack, capture, lightCoords, overlayCoords, color);
             } else {
                 model.renderToBuffer(poseStack, capture, lightCoords, overlayCoords, color);
             }
         } finally {
-            RtFrameStats.FRAME.endStage(directTemplate != null
+            RtFrameStats.FRAME.endStage(directUsed
                     ? "entity.capture.submit.modelDraw.direct"
+                    : emfCanary ? "entity.capture.submit.modelDraw.emfCanary"
                     : "entity.capture.submit.modelDraw.fallback", drawStart);
             RtFrameStats.FRAME.endStage("entity.capture.submit.modelDraw", drawStart);
         }
@@ -230,8 +305,15 @@ public final class RtEntityCollector implements SubmitNodeCollector {
         if (profileDynamicEntity) {
             RtFrameStats.FRAME.count("entityModelVertices", addedVertices);
             RtFrameStats.FRAME.count("entityModelQuads", addedQuads);
-            RtFrameStats.FRAME.count(directTemplate != null ? "entityDirectSubmissions" : "entityDirectFallbacks", 1);
-            if (directTemplate != null) {
+            RtFrameStats.FRAME.count(directUsed ? "entityDirectSubmissions" : "entityDirectFallbacks", 1);
+            RtFrameStats.FRAME.count(directUsed
+                    ? cuboidEmitter.isEmf(directTemplate)
+                            ? "entityCaptureBackendEmfDirect" : "entityCaptureBackendVanillaDirect"
+                    : "entityCaptureBackendGenericFallback", 1);
+            if (emfCanary) {
+                RtFrameStats.FRAME.count("entityEmfCanarySubmissions", 1);
+            }
+            if (directUsed) {
                 RtFrameStats.FRAME.count("entityDirectVertices", addedVertices);
                 RtFrameStats.FRAME.count("entityDirectQuads", addedQuads);
                 RtFrameStats.FRAME.count("entitySpecializedCuboids", directCubeCounts >>> 32);
@@ -239,7 +321,7 @@ public final class RtEntityCollector implements SubmitNodeCollector {
             }
         }
 
-        if (CausticaConfig.Rt.Entities.CAPTURE_PARITY.value()) {
+        if (captureMode == CaptureMode.FULL && CausticaConfig.Rt.Entities.CAPTURE_PARITY.value()) {
             parityCapture.reset(addedVertices);
             capture.copySubmissionStateTo(parityCapture);
             long parityStart = profileDynamicEntity ? RtFrameStats.FRAME.startStage() : 0L;
@@ -254,6 +336,79 @@ public final class RtEntityCollector implements SubmitNodeCollector {
                 RtFrameStats.FRAME.endStage("entity.capture.submit.parity", parityStart);
             }
         }
+        lastBaseModel = model;
+        lastBasePose.set(poseStack.last().pose());
+        lastBasePrimStart = primStart;
+        lastBasePrimEnd = capture.prim.size();
+    }
+
+    private <S> void renderFilteredHumanoid(Model<? super S> model, HumanoidModel<?> humanoid,
+                                             PoseStack poseStack, RtEntityCapture target,
+                                             int lightCoords, int overlayCoords, int color) {
+        boolean head = humanoid.head.visible;
+        boolean hat = humanoid.hat.visible;
+        boolean body = humanoid.body.visible;
+        boolean rightArm = humanoid.rightArm.visible;
+        boolean leftArm = humanoid.leftArm.visible;
+        boolean rightLeg = humanoid.rightLeg.visible;
+        boolean leftLeg = humanoid.leftLeg.visible;
+        PlayerModel player = humanoid instanceof PlayerModel playerModel ? playerModel : null;
+        boolean jacket = player != null && player.jacket.visible;
+        boolean rightSleeve = player != null && player.rightSleeve.visible;
+        boolean leftSleeve = player != null && player.leftSleeve.visible;
+        boolean rightPants = player != null && player.rightPants.visible;
+        boolean leftPants = player != null && player.leftPants.visible;
+        try {
+            if (captureMode == CaptureMode.FIRST_PERSON_BODY) {
+                humanoid.head.visible = false;
+                humanoid.hat.visible = false;
+            } else {
+                humanoid.body.visible = false;
+                humanoid.rightArm.visible = false;
+                humanoid.leftArm.visible = false;
+                humanoid.rightLeg.visible = false;
+                humanoid.leftLeg.visible = false;
+                if (player != null) {
+                    player.jacket.visible = false;
+                    player.rightSleeve.visible = false;
+                    player.leftSleeve.visible = false;
+                    player.rightPants.visible = false;
+                    player.leftPants.visible = false;
+                }
+            }
+            model.renderToBuffer(poseStack, target, lightCoords, overlayCoords, color);
+        } finally {
+            humanoid.head.visible = head;
+            humanoid.hat.visible = hat;
+            humanoid.body.visible = body;
+            humanoid.rightArm.visible = rightArm;
+            humanoid.leftArm.visible = leftArm;
+            humanoid.rightLeg.visible = rightLeg;
+            humanoid.leftLeg.visible = leftLeg;
+            if (player != null) {
+                player.jacket.visible = jacket;
+                player.rightSleeve.visible = rightSleeve;
+                player.leftSleeve.visible = leftSleeve;
+                player.rightPants.visible = rightPants;
+                player.leftPants.visible = leftPants;
+            }
+        }
+    }
+
+    private boolean capturesModel(Model<?> model) {
+        if (captureMode == CaptureMode.FULL) {
+            return true;
+        }
+        if (model instanceof PlayerEarsModel || model instanceof SkullModelBase) {
+            return captureMode == CaptureMode.FIRST_PERSON_HEAD;
+        }
+        if (model instanceof PlayerCapeModel) {
+            return captureMode == CaptureMode.FIRST_PERSON_BODY;
+        }
+        if (model instanceof HumanoidModel<?>) {
+            return true;
+        }
+        return captureMode == CaptureMode.FIRST_PERSON_BODY;
     }
 
     private static int countVisibleCuboids(ModelPart part) {
@@ -282,8 +437,21 @@ public final class RtEntityCollector implements SubmitNodeCollector {
         int idxStart = capture.idx.size();
         long started = profileDynamicEntity ? RtFrameStats.FRAME.startStage() : 0L;
         try {
+            TextureAtlasSprite lastSprite = null;
+            ChunkSectionLayer lastLayer = null;
+            boolean materialInitialized = false;
+            capture.currentOrder = 0; // baked-quad paths never stack decal layers
             for (BakedQuad q : quads) {
-                addQuad(pose, q, tintLayers);
+                var materialInfo = q.materialInfo();
+                TextureAtlasSprite sprite = materialInfo.sprite();
+                ChunkSectionLayer layer = materialInfo.layer();
+                if (!materialInitialized || sprite != lastSprite || layer != lastLayer) {
+                    applyBakedMaterial(sprite, layer);
+                    lastSprite = sprite;
+                    lastLayer = layer;
+                    materialInitialized = true;
+                }
+                capture.addBakedQuad(pose, q, tintColor(materialInfo.tintIndex(), tintLayers));
             }
         } finally {
             RtFrameStats.FRAME.endStage("entity.capture.submit.bakedQuads", started);
@@ -300,9 +468,8 @@ public final class RtEntityCollector implements SubmitNodeCollector {
         RtFrameStats.FRAME.count("entityBakedVertices", (long) quads * 4L);
     }
 
-    /** Capture one baked quad, resolving its atlas (block vs item) to a bindless slot stamped per-prim. */
-    private void addQuad(Matrix4f pose, BakedQuad q, int[] tintLayers) {
-        TextureAtlasSprite sprite = q.materialInfo().sprite();
+    /** Resolve one baked material run; every quad in the run is still emitted individually. */
+    private void applyBakedMaterial(TextureAtlasSprite sprite, ChunkSectionLayer layer) {
         capture.currentTexSlot = sprite != null
                 ? RtEntityTextures.INSTANCE.slotForAtlas(sprite.atlasLocation())
                 : 0;
@@ -310,17 +477,18 @@ public final class RtEntityCollector implements SubmitNodeCollector {
         // dropped and held translucent block items (glass, ice, etc.) use the thin-dielectric variant
         // instead of the opaque DEFAULT variant. No BlockState reaches submitItem, so the layer is the
         // authoritative semantic available here; glass-model roughness/IOR are profile-independent.
-        boolean transmissive = q.materialInfo().layer() == ChunkSectionLayer.TRANSLUCENT;
-        capture.currentAlphaBucket = alphaBucket(q.materialInfo().layer(), false);
-        setSpriteMaterial(sprite, transmissive ? RtMaterials.Profile.GLASS : RtMaterials.Profile.DEFAULT,
+        boolean transmissive = layer == ChunkSectionLayer.TRANSLUCENT;
+        capture.currentPrimFlags = (firstPersonHeldItem && transmissive
+                ? RtEntityCapture.PRIM_FIRST_PERSON_THIN_GLASS : 0)
+                | (currentItemEnchanted ? RtEntityCapture.PRIM_ENCHANTED : 0);
+        capture.currentAlphaBucket = alphaBucket(layer, false);
+        setSpriteMaterial(sprite, transmissive ? RtMaterials.Profile.GLASS : RtMaterials.Profile.NEUTRAL,
                 transmissive, false);
-        capture.currentOrder = 0; // baked-quad paths never stack decal layers
-        capture.addBakedQuad(pose, q, tintColor(q.materialInfo().tintIndex(), tintLayers));
     }
 
     /** Resolve block-atlas geometry through the same immutable material snapshot as terrain. */
     private void setSpriteMaterial(TextureAtlasSprite sprite, boolean stochasticAlpha) {
-        setSpriteMaterial(sprite, RtMaterials.Profile.DEFAULT, false, stochasticAlpha);
+        setSpriteMaterial(sprite, RtMaterials.Profile.NEUTRAL, false, stochasticAlpha);
     }
 
     private void setSpriteMaterial(TextureAtlasSprite sprite, RtMaterials.Profile profile,
@@ -397,6 +565,10 @@ public final class RtEntityCollector implements SubmitNodeCollector {
         return "minecraft:pipeline/banner_pattern".equals(pipeline.getLocation().toString());
     }
 
+    private static boolean isGlint(RenderType renderType) {
+        return renderType != null && renderType.pipeline() == RenderPipelines.GLINT;
+    }
+
     /** Resolve a quad's tint colour from its tint index + the submission's tint layers (white if untinted). */
     private static int tintColor(int tintIndex, int[] tintLayers) {
         if (tintIndex < 0 || tintLayers == null || tintIndex >= tintLayers.length) {
@@ -407,7 +579,7 @@ public final class RtEntityCollector implements SubmitNodeCollector {
 
     /** Re-mesh a contained block-model display through FRAPI so model wrappers remain effective. */
     public void captureBlockState(BlockState blockState, Matrix4fc transform, PoseStack poseStack) {
-        if (capture == null || blockState.isAir()) {
+        if (capture == null || captureMode == CaptureMode.FIRST_PERSON_HEAD || blockState.isAir()) {
             return;
         }
         BlockStateModel model = Minecraft.getInstance().getModelManager().getBlockStateModelSet().get(blockState);
@@ -445,7 +617,7 @@ public final class RtEntityCollector implements SubmitNodeCollector {
     @Override
     public void submitText(PoseStack poseStack, float x, float y, FormattedCharSequence string, boolean dropShadow,
                            Font.DisplayMode displayMode, int lightCoords, int color, int backgroundColor, int outlineColor) {
-        if (capture == null) {
+        if (capture == null || captureMode == CaptureMode.FIRST_PERSON_HEAD) {
             return;
         }
         Matrix4f pose = poseStack.last().pose();
@@ -564,7 +736,7 @@ public final class RtEntityCollector implements SubmitNodeCollector {
     // the white bindless slot with the leash colour as per-prim tint. Light coords are path-traced away.
     @Override
     public void submitLeash(PoseStack poseStack, EntityRenderState.LeashState leashState) {
-        if (capture == null) {
+        if (capture == null || captureMode == CaptureMode.FIRST_PERSON_HEAD) {
             return;
         }
         capture.clearUvRemap();
@@ -639,7 +811,7 @@ public final class RtEntityCollector implements SubmitNodeCollector {
     // emissive overlays, and custom model geometry survive outside the ordinary chunk renderer.
     @Override
     public void submitMovingBlock(PoseStack poseStack, MovingBlockRenderState state, int outlineColor) {
-        if (capture == null) {
+        if (capture == null || captureMode == CaptureMode.FIRST_PERSON_HEAD) {
             return;
         }
         Minecraft mc = Minecraft.getInstance();
@@ -705,7 +877,7 @@ public final class RtEntityCollector implements SubmitNodeCollector {
     @Override
     public void submitBlockModel(PoseStack poseStack, RenderType renderType, List<BlockStateModelPart> parts,
                                  int[] tintLayers, int lightCoords, int overlayCoords, int outlineColor) {
-        if (capture == null) {
+        if (capture == null || captureMode == CaptureMode.FIRST_PERSON_HEAD) {
             return;
         }
         Matrix4f pose = poseStack.last().pose();
@@ -745,11 +917,25 @@ public final class RtEntityCollector implements SubmitNodeCollector {
     public void submitItem(PoseStack poseStack, ItemDisplayContext displayContext, int lightCoords,
                            int overlayCoords, int outlineColor, int[] tintLayers, List<BakedQuad> quads,
                            MeshView mesh, ItemStackRenderState.FoilType foilType) {
-        if (capture == null) {
+        boolean headItem = displayContext == ItemDisplayContext.HEAD;
+        if (capture == null
+                || captureMode == CaptureMode.FIRST_PERSON_HEAD && !headItem
+                || captureMode == CaptureMode.FIRST_PERSON_BODY && headItem) {
             return;
         }
-        addQuads(poseStack.last().pose(), quads, tintLayers);
-        addMeshQuads(poseStack, mesh, tintLayers, true);
+        boolean previousHeldItem = firstPersonHeldItem;
+        boolean previousEnchanted = currentItemEnchanted;
+        int previousPrimFlags = capture.currentPrimFlags;
+        firstPersonHeldItem = captureMode == CaptureMode.FIRST_PERSON_BODY;
+        currentItemEnchanted = foilType != ItemStackRenderState.FoilType.NONE;
+        try {
+            addQuads(poseStack.last().pose(), quads, tintLayers);
+            addMeshQuads(poseStack, mesh, tintLayers, true);
+        } finally {
+            firstPersonHeldItem = previousHeldItem;
+            currentItemEnchanted = previousEnchanted;
+            capture.currentPrimFlags = previousPrimFlags;
+        }
     }
 
     /** Capture a Fabric Renderer API mesh; each quad already carries final atlas UVs. */
@@ -779,13 +965,16 @@ public final class RtEntityCollector implements SubmitNodeCollector {
         // Chunk-layer translucency denotes a block-derived dielectric; a blended item render type denotes
         // ordinary stochastic alpha when the quad did not come from such a layer.
         boolean transmissive = quad.chunkLayer() == ChunkSectionLayer.TRANSLUCENT;
+        capture.currentPrimFlags = (firstPersonHeldItem && transmissive
+                ? RtEntityCapture.PRIM_FIRST_PERSON_THIN_GLASS : 0)
+                | (currentItemEnchanted ? RtEntityCapture.PRIM_ENCHANTED : 0);
         boolean stochasticAlpha = itemMesh && !transmissive && quad.itemRenderType() != null
                 && quad.itemRenderType().hasBlending();
         capture.currentAlphaBucket = alphaBucket(quad.chunkLayer(), stochasticAlpha);
         if (state != null) {
             setBlockSpriteMaterial(sprite, state, transmissive, stochasticAlpha);
         } else {
-            setSpriteMaterial(sprite, transmissive ? RtMaterials.Profile.GLASS : RtMaterials.Profile.DEFAULT,
+            setSpriteMaterial(sprite, transmissive ? RtMaterials.Profile.GLASS : RtMaterials.Profile.NEUTRAL,
                     transmissive, stochasticAlpha);
         }
         capture.currentOrder = 0; // baked-quad paths never stack decal layers
@@ -837,10 +1026,24 @@ public final class RtEntityCollector implements SubmitNodeCollector {
     @Override
     public void submitItem(PoseStack poseStack, ItemDisplayContext displayContext, int lightCoords, int overlayCoords,
                            int outlineColor, int[] tintLayers, List<BakedQuad> quads, ItemStackRenderState.FoilType foilType) {
-        if (capture == null) {
+        boolean headItem = displayContext == ItemDisplayContext.HEAD;
+        if (capture == null
+                || captureMode == CaptureMode.FIRST_PERSON_HEAD && !headItem
+                || captureMode == CaptureMode.FIRST_PERSON_BODY && headItem) {
             return;
         }
-        addQuads(poseStack.last().pose(), quads, tintLayers);
+        boolean previousHeldItem = firstPersonHeldItem;
+        boolean previousEnchanted = currentItemEnchanted;
+        int previousPrimFlags = capture.currentPrimFlags;
+        firstPersonHeldItem = captureMode == CaptureMode.FIRST_PERSON_BODY;
+        currentItemEnchanted = foilType != ItemStackRenderState.FoilType.NONE;
+        try {
+            addQuads(poseStack.last().pose(), quads, tintLayers);
+        } finally {
+            firstPersonHeldItem = previousHeldItem;
+            currentItemEnchanted = previousEnchanted;
+            capture.currentPrimFlags = previousPrimFlags;
+        }
     }
 
     @Override

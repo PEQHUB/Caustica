@@ -1,4 +1,13 @@
 {
+	"caustica.options.rt.firstPerson.header": "First-Person View",
+	"caustica.options.rt.firstPerson.enabled": "First-Person Body",
+	"caustica.options.rt.firstPerson.enabled.tooltip": "Capture the local player's body and head for secondary rays.",
+	"caustica.options.rt.firstPerson.forward": "Forward Offset",
+	"caustica.options.rt.firstPerson.forward.tooltip": "Move submitted geometry along the player's facing direction.",
+	"caustica.options.rt.firstPerson.vertical": "Vertical Offset",
+	"caustica.options.rt.firstPerson.vertical.tooltip": "Move submitted geometry vertically.",
+	"caustica.options.rt.firstPerson.lateral": "Lateral Offset",
+	"caustica.options.rt.firstPerson.lateral.tooltip": "Move submitted geometry right or left.",
 	"caustica.options.rt.header": "光线追踪",
 
 	"caustica.options.rt.exposureMode": "曝光",
@@ -46,6 +55,9 @@
 	"caustica.options.rt.dlssQuality.1": "平衡",
 	"caustica.options.rt.dlssQuality.2": "质量",
 	"caustica.options.rt.dlssQuality.5": "DLAA",
+	"caustica.options.rt.dlssQuality.-1": "自定义",
+	"caustica.options.rt.inputScale": "输入分辨率",
+	"caustica.options.rt.inputScale.tooltip": "路径追踪输入分辨率。DLSS预设会设置此值；直接更改后显示为自定义。",
 
 	"caustica.options.rt.debugView": "调试视图",
 	"caustica.options.rt.debugView.tooltip": "显示光线追踪的中间缓冲区，而不是最终图像。",
@@ -56,5 +68,6 @@
 	"caustica.options.rt.debugView.4": "粗糙度",
 	"caustica.options.rt.debugView.5": "运动",
 	"caustica.options.rt.debugView.6": "高光",
-	"caustica.options.rt.debugView.7": "高光运动"
+	"caustica.options.rt.debugView.7": "高光运动",
+	"caustica.options.rt.debugView.8": "色调映射器对比"
 }

@@ -9,13 +9,10 @@ public record RtMaterialDesc(
         float metalness,
         float ior,
         float transmission,
+        RtMaterials.Profile profile,
+        float fallbackSss,
+        float fiberWeight,
         EmissionSource emissionSource,
-        /**
-         * Final HDR emission strength: {@code EMISSIVE_STRENGTH} (the material-compile-time baseline,
-         * see {@link RtMaterialRegistry}) times any resource-pack {@code emission.strength} multiplier.
-         * 0 when {@code emissionSource == NONE}. Applied uniformly regardless of source — LabPBR,
-         * heuristic-mask, or state-uniform all get the same baseline, an override just scales it.
-         */
         float emissionStrength,
         EmissionSummary emissionSummary
 ) {
@@ -28,6 +25,7 @@ public record RtMaterialDesc(
 
     public enum EmissionSource {
         NONE,
+        OVERRIDE,
         LAB_PBR,
         HEURISTIC_MASK,
         STATE_UNIFORM
@@ -44,11 +42,12 @@ public record RtMaterialDesc(
     }
 
     public RtMaterialDesc {
-        if (source == null || emissionSource == null || emissionSummary == null) {
+        if (source == null || profile == null || emissionSource == null || emissionSummary == null) {
             throw new IllegalArgumentException("Material description enums/summary must be present");
         }
         if (!finite01(roughness) || !finite01(metalness) || !Float.isFinite(ior) || ior <= 0.0f
-                || !finite01(transmission) || !Float.isFinite(emissionStrength) || emissionStrength < 0.0f) {
+                || !finite01(transmission) || !finite01(fallbackSss) || !finite01(fiberWeight)
+                || !Float.isFinite(emissionStrength) || emissionStrength < 0.0f) {
             throw new IllegalArgumentException("Invalid physical material parameters");
         }
     }

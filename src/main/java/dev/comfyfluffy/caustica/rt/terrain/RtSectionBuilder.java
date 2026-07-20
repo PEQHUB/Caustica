@@ -27,10 +27,28 @@ final class RtSectionBuilder {
     /** Upload a non-empty packed section and prepare, but do not record, its BLAS build. */
     static PreparedSection prepare(RtContext ctx, PackedSection packed,
                                    RtAccel.OpacityMicromapInput ommInput,
-                                   boolean compactBlas,
                                    long key, int sox, int soy, int soz) {
         RtMaterialAbi.requireTriangleParity(packed.material().length, packed.indices().length);
+        if (packed.positions().length % 3 != 0 || packed.indices().length % 3 != 0) {
+            throw new IllegalArgumentException("terrain positions/indices are not triangle aligned");
+        }
         int vertCount = packed.positions().length / 3;
+        long bucketIndexCount = 0L;
+        for (int triangles : packed.bucketTris()) {
+            if (triangles < 0) throw new IllegalArgumentException("negative terrain bucket triangle count");
+            bucketIndexCount += (long) triangles * 3L;
+        }
+        if (bucketIndexCount != packed.indices().length) {
+            throw new IllegalArgumentException("terrain bucket/index mismatch: buckets=" + bucketIndexCount
+                    + " indices=" + packed.indices().length);
+        }
+        for (int i = 0; i < packed.indices().length; i++) {
+            int index = packed.indices()[i];
+            if (index < 0 || index >= vertCount) {
+                throw new IllegalArgumentException("terrain index " + index + " at " + i
+                        + " outside [0," + vertCount + ")");
+            }
+        }
         int asInput = org.lwjgl.vulkan.KHRAccelerationStructure
                 .VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
         int storage = VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
@@ -70,13 +88,13 @@ final class RtSectionBuilder {
             upload.flush();
 
             blas = RtAccel.prepareTerrainBlas(ctx, positions, vertCount, indices,
-                    packed.bucketTris(), ommInput, compactBlas, label + " BLAS");
+                    packed.bucketTris(), ommInput, label + " BLAS", RtAccel.TerrainBlasPolicy.DIRECT);
             return new PreparedSection(key, positions, indices, uvs, material, upload, blas,
-                    packed.triBase(), sox, soy, soz, packed.lights());
+                    packed.triBase(), sox, soy, soz);
         } catch (Throwable t) {
             if (blas != null) {
                 destroy(new PreparedSection(key, positions, indices, uvs, material, upload, blas,
-                        packed.triBase(), sox, soy, soz, packed.lights()));
+                        packed.triBase(), sox, soy, soz));
             } else {
                 if (upload != null) upload.destroy();
                 if (material != null) material.destroy();
@@ -106,8 +124,7 @@ final class RtSectionBuilder {
                     .srcStageMask(VK_PIPELINE_STAGE_2_TRANSFER_BIT)
                     .srcAccessMask(VK_ACCESS_2_TRANSFER_WRITE_BIT)
                     .dstStageMask(VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR)
-                    // Vertex/index build inputs are shader reads at the AS-build stage. The
-                    // ACCELERATION_STRUCTURE_READ access class is for reading AS objects themselves.
+                    // Geometry build inputs use shader-read access; AS_READ is for AS objects themselves.
                     .dstAccessMask(VK_ACCESS_2_SHADER_READ_BIT);
             VkDependencyInfo dependency = VkDependencyInfo.calloc(stack).sType$Default().pMemoryBarriers(barrier);
             vkCmdPipelineBarrier2KHR(cmd, dependency);
@@ -130,11 +147,10 @@ final class RtSectionBuilder {
         prepared.positions.destroy();
     }
 
-    /** Worker-owned native section state paired with its prepared BLAS. {@code lights} = packed
-     *  section-local RIS light records (CPU-side, flattened into the global buffer at publish). */
+    /** Worker-owned native section state paired with its prepared BLAS. */
     record PreparedSection(long key, RtBuffer positions, RtBuffer indices, RtBuffer uvs,
                            RtBuffer material, RtBuffer upload, RtAccel.PreparedBlas blas, int[] triBase,
-                           int sx, int sy, int sz, float[] lights) {
+                           int sx, int sy, int sz) {
         void releaseUpload() {
             upload.destroy();
         }
@@ -142,11 +158,6 @@ final class RtSectionBuilder {
         void releaseBuildInputs() {
             indices.destroy();
             positions.destroy();
-        }
-
-        PreparedSection withBlas(RtAccel.PreparedBlas replacement) {
-            return new PreparedSection(key, positions, indices, uvs, material, upload, replacement,
-                    triBase, sx, sy, sz, lights);
         }
     }
 }

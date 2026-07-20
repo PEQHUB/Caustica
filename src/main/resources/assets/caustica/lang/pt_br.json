@@ -1,4 +1,13 @@
 {
+	"caustica.options.rt.firstPerson.header": "First-Person View",
+	"caustica.options.rt.firstPerson.enabled": "First-Person Body",
+	"caustica.options.rt.firstPerson.enabled.tooltip": "Capture the local player's body and head for secondary rays.",
+	"caustica.options.rt.firstPerson.forward": "Forward Offset",
+	"caustica.options.rt.firstPerson.forward.tooltip": "Move submitted geometry along the player's facing direction.",
+	"caustica.options.rt.firstPerson.vertical": "Vertical Offset",
+	"caustica.options.rt.firstPerson.vertical.tooltip": "Move submitted geometry vertically.",
+	"caustica.options.rt.firstPerson.lateral": "Lateral Offset",
+	"caustica.options.rt.firstPerson.lateral.tooltip": "Move submitted geometry right or left.",
 	"caustica.options.rt.header": "Traçado de raios",
 
 	"caustica.options.rt.exposureMode": "Exposição",
@@ -46,6 +55,9 @@
 	"caustica.options.rt.dlssQuality.1": "Equilibrado",
 	"caustica.options.rt.dlssQuality.2": "Qualidade",
 	"caustica.options.rt.dlssQuality.5": "DLAA",
+	"caustica.options.rt.dlssQuality.-1": "Personalizado",
+	"caustica.options.rt.inputScale": "Resolução de entrada",
+	"caustica.options.rt.inputScale.tooltip": "Resolução de entrada do path tracing. Uma predefinição DLSS define este valor; alterá-lo diretamente mostra Personalizado.",
 
 	"caustica.options.rt.debugView": "Visualização de depuração",
 	"caustica.options.rt.debugView.tooltip": "Visualiza um buffer intermediário do traçado de raios em vez da imagem final.",
@@ -56,5 +68,6 @@
 	"caustica.options.rt.debugView.4": "Rugosidade",
 	"caustica.options.rt.debugView.5": "Movimento",
 	"caustica.options.rt.debugView.6": "Especular",
-	"caustica.options.rt.debugView.7": "Movimento especular"
+	"caustica.options.rt.debugView.7": "Movimento especular",
+	"caustica.options.rt.debugView.8": "Comparação de tonemappers"
 }

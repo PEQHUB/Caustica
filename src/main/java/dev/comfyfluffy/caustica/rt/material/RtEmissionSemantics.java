@@ -26,36 +26,40 @@ public final class RtEmissionSemantics {
 
     private final Map<TextureAtlasSprite, Integer> maxStateLight;
     private final int emittingStates;
+    private final int modelStates;
     private final int failedStates;
 
     private RtEmissionSemantics(Map<TextureAtlasSprite, Integer> maxStateLight,
-                                int emittingStates, int failedStates) {
+                                int emittingStates, int modelStates, int failedStates) {
         this.maxStateLight = maxStateLight;
         this.emittingStates = emittingStates;
+        this.modelStates = modelStates;
         this.failedStates = failedStates;
     }
 
     public static RtEmissionSemantics analyze() {
         IdentityHashMap<TextureAtlasSprite, Integer> sprites = new IdentityHashMap<>();
-        int states = 0;
+        int emitting = 0;
+        int modeled = 0;
         int failures = 0;
         for (Block block : BuiltInRegistries.BLOCK) {
             for (BlockState state : block.getStateDefinition().getPossibleStates()) {
                 int light = state.getLightEmission();
-                if (light <= 0 || state.getRenderShape() != RenderShape.MODEL) continue;
-                states++;
+                if (state.getRenderShape() != RenderShape.MODEL) continue;
+                modeled++;
+                if (light > 0) emitting++;
                 try {
                     collectState(state, light, sprites);
                 } catch (Throwable throwable) {
                     failures++;
-                    CausticaMod.LOGGER.debug("Could not analyze emissive material sprites for {}", state, throwable);
+                    CausticaMod.LOGGER.debug("Could not analyze RT material sprites for {}", state, throwable);
                 }
             }
         }
         Map<TextureAtlasSprite, Integer> frozen = Collections.unmodifiableMap(new IdentityHashMap<>(sprites));
-        CausticaMod.LOGGER.info("RT emission semantics: emittingStates={}, sprites={}, failedStates={}",
-                states, frozen.size(), failures);
-        return new RtEmissionSemantics(frozen, states, failures);
+        CausticaMod.LOGGER.info("RT material semantics: modelStates={}, emittingStates={}, emissiveSprites={}, failedStates={}",
+                modeled, emitting, frozen.size(), failures);
+        return new RtEmissionSemantics(frozen, emitting, modeled, failures);
     }
 
     public boolean permits(TextureAtlasSprite sprite) {
@@ -74,6 +78,10 @@ public final class RtEmissionSemantics {
         return emittingStates;
     }
 
+    public int modelStates() {
+        return modelStates;
+    }
+
     public int failedStates() {
         return failedStates;
     }
@@ -87,16 +95,19 @@ public final class RtEmissionSemantics {
             model.collectParts(RandomSource.create(mixSeed(state.hashCode(), probe)), parts);
             for (BlockStateModelPart part : parts) {
                 collectQuads(part.getQuads(null), light, sprites);
-                for (Direction direction : DIRECTIONS) collectQuads(part.getQuads(direction), light, sprites);
+                for (Direction direction : DIRECTIONS) {
+                    collectQuads(part.getQuads(direction), light, sprites);
+                }
             }
         }
     }
 
-    private static void collectQuads(List<? extends BakedQuad> quads,
-                                     int light, IdentityHashMap<TextureAtlasSprite, Integer> sprites) {
+    private static void collectQuads(List<? extends BakedQuad> quads, int light,
+                                     IdentityHashMap<TextureAtlasSprite, Integer> sprites) {
         for (var quad : quads) {
             TextureAtlasSprite sprite = quad.materialInfo().sprite();
-            if (sprite != null) sprites.merge(sprite, light, Math::max);
+            if (sprite == null) continue;
+            if (light > 0) sprites.merge(sprite, light, Math::max);
         }
     }
 

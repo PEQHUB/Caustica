@@ -67,36 +67,37 @@ void main(inout float4 shadowVis, in BuiltInTriangleIntersectionAttributes attr)
         int texSlot = int(epr.tint.w + 0.5);
         float4 texel = entityAlbedoTex[NonUniformResourceIndex(texSlot)].SampleLevel(uv, 0.0);
         bool stochasticAlpha = false;
-        MaterialHeader materialHeader;
         if (instanceKind == ENTITY_BIT) {
-            materialHeader = ConstPtr<MaterialHeader>(pc.materialTableAddr)[epr.materialId];
+            MaterialHeader materialHeader = ConstPtr<MaterialHeader>(pc.materialTableAddr)[epr.materialId];
             stochasticAlpha = (materialHeader.features & MATERIAL_FEATURE_STOCHASTIC_ALPHA) != 0u;
-        }
-        if (stochasticAlpha) {
-            uint salt = pid * 1664525u
-                    ^ (InstanceID() & IDX_MASK) * 1013904223u
-                    ^ asuint(RayTCurrent());
-            if (alphaDitherThreshold(salt) >= clamp(texel.a, 0.0, 1.0)) {
+            if (stochasticAlpha) {
+                uint salt = pid * 1664525u
+                        ^ (InstanceID() & IDX_MASK) * 1013904223u
+                        ^ asuint(RayTCurrent());
+                if (alphaDitherThreshold(salt) >= clamp(texel.a, 0.0, 1.0)) {
+                    IgnoreHit();
+                }
+            } else if (texel.a < ENTITY_ALPHA_CUTOFF) {
+                IgnoreHit();
+            }
+
+            // Radiance rays accept the surface and continue to closest-hit. Shadow rays use the same material
+            // model here so entity dielectrics transmit instead of becoming opaque shadow blockers.
+            bool shadowRay = (RayFlags() & RAY_FLAG_SKIP_CLOSEST_HIT_SHADER) != 0u;
+            if (shadowRay && materialHeader.model == MATERIAL_GLASS) {
+                float3 tint = lerp(float3(1.0, 1.0, 1.0),
+                        srgbToLinear(texel.rgb) * epr.tint.rgb, texel.a);
+                shadowVis.rgb *= tint * clamp(materialHeader.params.w, 0.0, 1.0);
+                IgnoreHit();
+            }
+            if (shadowRay && materialHeader.model == MATERIAL_WATER) {
+                float3 tint = srgbToLinear(texel.rgb) * epr.tint.rgb;
+                shadowVis.rgb *= lerp(float3(1.0, 1.0, 1.0), tint, WATER_SHADOW_TINT)
+                        * clamp(materialHeader.params.w, 0.0, 1.0);
+                shadowVis.a = shadowVis.a < 0.0 ? RayTCurrent() : min(shadowVis.a, RayTCurrent());
                 IgnoreHit();
             }
         } else if (texel.a < ENTITY_ALPHA_CUTOFF) {
-            IgnoreHit();
-        }
-
-        // Radiance rays accept the surface and continue to closest-hit. Shadow rays use the same material
-        // model here so entity dielectrics transmit instead of becoming opaque shadow blockers.
-        bool shadowRay = (RayFlags() & RAY_FLAG_SKIP_CLOSEST_HIT_SHADER) != 0u;
-        if (instanceKind == ENTITY_BIT && shadowRay && materialHeader.model == MATERIAL_GLASS) {
-            float3 tint = lerp(float3(1.0, 1.0, 1.0),
-                    srgbToLinear(texel.rgb) * epr.tint.rgb, texel.a);
-            shadowVis.rgb *= tint * clamp(materialHeader.params.w, 0.0, 1.0);
-            IgnoreHit();
-        }
-        if (instanceKind == ENTITY_BIT && shadowRay && materialHeader.model == MATERIAL_WATER) {
-            float3 tint = srgbToLinear(texel.rgb) * epr.tint.rgb;
-            shadowVis.rgb *= lerp(float3(1.0, 1.0, 1.0), tint, WATER_SHADOW_TINT)
-                    * clamp(materialHeader.params.w, 0.0, 1.0);
-            shadowVis.a = shadowVis.a < 0.0 ? RayTCurrent() : min(shadowVis.a, RayTCurrent());
             IgnoreHit();
         }
         return;

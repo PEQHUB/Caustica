@@ -42,7 +42,10 @@ public final class RtDebugLabels {
         if (ctx == null || cmd == null || label == null || label.isBlank()) {
             return Scope.NOOP;
         }
-        VulkanDiagnostics.breadcrumb("record " + label + " cmd=0x" + Long.toUnsignedString(cmd.address(), 16));
+        if (VulkanDiagnostics.detailedBreadcrumbsEnabled()) {
+            VulkanDiagnostics.breadcrumb("record " + label + " cmd=0x"
+                    + Long.toUnsignedString(cmd.address(), 16));
+        }
         ctx.device().instance().debug().beginDebugGroup(cmd, () -> PREFIX + label);
         return () -> ctx.device().instance().debug().endDebugGroup(cmd);
     }

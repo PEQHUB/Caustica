@@ -21,21 +21,24 @@ import org.joml.Vector3fc;
  */
 public final class RtEntityCapture implements VertexConsumer {
     private static final int DEFAULT_VERTEX_CAPACITY = 1024;
+    static final int PRIM_FIRST_PERSON_THIN_GLASS = 1 << 1;
+    static final int PRIM_ENCHANTED = 1 << 2;
     // Same magnitude as RtTerrain.QuadCapture.OFFSET (2e-4 blocks) — proven large enough to break a BVH
     // depth tie without a visible gap at terrain/entity scale.
     private static final float ORDER_OFFSET = 2.0e-4f;
 
-    final FloatArrayList verts = new FloatArrayList(DEFAULT_VERTEX_CAPACITY * 3);   // 3 floats/vertex (capture-space position)
-    final IntArrayList idx = new IntArrayList(indexCapacity(DEFAULT_VERTEX_CAPACITY)); // 3 indices/triangle
-    final FloatArrayList uvList = new FloatArrayList(DEFAULT_VERTEX_CAPACITY * 2);  // 2 floats/vertex (entity-texture UV)
-    final FloatArrayList prim = new FloatArrayList(primCapacity(DEFAULT_VERTEX_CAPACITY)); // 12 floats/triangle
+    final FloatArrayList verts = new UninitializedFloatArrayList(DEFAULT_VERTEX_CAPACITY * 3);   // 3 floats/vertex (capture-space position)
+    final IntArrayList idx = new UninitializedIntArrayList(indexCapacity(DEFAULT_VERTEX_CAPACITY)); // 3 indices/triangle
+    final FloatArrayList uvList = new UninitializedFloatArrayList(DEFAULT_VERTEX_CAPACITY * 2);  // 2 floats/vertex (entity-texture UV)
+    final FloatArrayList prim = new UninitializedFloatArrayList(primCapacity(DEFAULT_VERTEX_CAPACITY)); // 12 floats/triangle
     // One classification per triangle in capture order. The upload path repacks indices + primitive
     // records into fixed {opaque, any-hit} BLAS geometries while positions/UVs stay shared. Keeping
     // capture order here preserves glow meshes, parity checks and motion topology.
-    final IntArrayList alphaBuckets = new IntArrayList(indexCapacity(DEFAULT_VERTEX_CAPACITY) / 3);
+    final IntArrayList alphaBuckets = new UninitializedIntArrayList(indexCapacity(DEFAULT_VERTEX_CAPACITY) / 3);
     private final IntArrayList packedIdx = new IntArrayList(indexCapacity(DEFAULT_VERTEX_CAPACITY));
     private final FloatArrayList packedPrim = new FloatArrayList(primCapacity(DEFAULT_VERTEX_CAPACITY));
     private final int[] packedBucketTris = new int[RtAccel.ENTITY_BUCKETS];
+    private final int[] packedBucketCursor = new int[RtAccel.ENTITY_BUCKETS];
 
     // Bindless texture slot for the geometry currently being submitted (set by the collector per
     // submitModel, so body + feature layers get their own texture). Stored per-prim in tint.w;
@@ -47,6 +50,9 @@ public final class RtEntityCapture implements VertexConsumer {
     // Conservative default: unknown submissions retain alpha testing instead of incorrectly becoming
     // opaque. RtEntityCollector assigns this from the RenderPipeline before every known submission.
     int currentAlphaBucket = RtAccel.ENTITY_BUCKET_ANY_HIT;
+    // Entity Prim.flags written for the current submission. Used only to distinguish directly visible
+    // first-person translucent held items from physical world/dropped-item glass volumes.
+    int currentPrimFlags;
     // Decal-stacking rank for the current submission (0 = no offset). Set by the collector from
     // SubmitNodeCollector#order(int) — see emitQuad's coincident-layer push.
     int currentOrder;
@@ -63,6 +69,9 @@ public final class RtEntityCapture implements VertexConsumer {
     private final float[] qnx = new float[4], qny = new float[4], qnz = new float[4];
     private final int[] qcol = new int[4];
     private final Vector3f scratch = new Vector3f(); // baked-quad position transform scratch
+    private boolean colorCacheValid;
+    private int cachedColor;
+    private float cachedTr, cachedTg, cachedTb;
 
     /** Clear all accumulators for a fresh entity capture. */
     public void reset() {
@@ -83,27 +92,38 @@ public final class RtEntityCapture implements VertexConsumer {
         currentTexSlot = 0;
         currentMaterialId = 0;
         currentAlphaBucket = RtAccel.ENTITY_BUCKET_ANY_HIT;
+        currentPrimFlags = 0;
         currentOrder = 0;
         uvRemap = false;
+        colorCacheValid = false;
     }
 
     private void ensureVertexCapacity(int vertexCount) {
         if (vertexCount <= 0) {
             return;
         }
-        verts.ensureCapacity(vertexCount * 3);
-        idx.ensureCapacity(indexCapacity(vertexCount));
-        uvList.ensureCapacity(vertexCount * 2);
-        prim.ensureCapacity(primCapacity(vertexCount));
-        alphaBuckets.ensureCapacity(indexCapacity(vertexCount) / 3);
-        packedIdx.ensureCapacity(indexCapacity(vertexCount));
-        packedPrim.ensureCapacity(primCapacity(vertexCount));
+        ((UninitializedFloatArrayList) verts).ensureCapacityIfNeeded(vertexCount * 3);
+        ((UninitializedIntArrayList) idx).ensureCapacityIfNeeded(indexCapacity(vertexCount));
+        ((UninitializedFloatArrayList) uvList).ensureCapacityIfNeeded(vertexCount * 2);
+        ((UninitializedFloatArrayList) prim).ensureCapacityIfNeeded(primCapacity(vertexCount));
+        ((UninitializedIntArrayList) alphaBuckets).ensureCapacityIfNeeded(indexCapacity(vertexCount) / 3);
+        int indexCapacity = indexCapacity(vertexCount);
+        if (indexCapacity > packedIdx.elements().length) packedIdx.ensureCapacity(indexCapacity);
+        int primCapacity = primCapacity(vertexCount);
+        if (primCapacity > packedPrim.elements().length) packedPrim.ensureCapacity(primCapacity);
     }
 
     /** Reserve room for an upcoming direct-model submission without changing any logical sizes. */
     void ensureAdditionalVertexCapacity(int additionalVertices) {
         if (additionalVertices > 0) {
             ensureVertexCapacity(verts.size() / 3 + additionalVertices);
+        }
+    }
+
+    void orPrimitiveFlags(int primitiveFloatStart, int primitiveFloatEnd, int flags) {
+        float[] values = prim.elements();
+        for (int lane = primitiveFloatStart; lane + 9 < primitiveFloatEnd; lane += 12) {
+            values[lane + 9] = Float.intBitsToFloat(Float.floatToRawIntBits(values[lane + 9]) | flags);
         }
     }
 
@@ -136,6 +156,7 @@ public final class RtEntityCapture implements VertexConsumer {
         target.currentTexSlot = currentTexSlot;
         target.currentMaterialId = currentMaterialId;
         target.currentAlphaBucket = currentAlphaBucket;
+        target.currentPrimFlags = currentPrimFlags;
         target.currentOrder = currentOrder;
         target.uvRemap = uvRemap;
         target.uvU0 = uvU0;
@@ -236,29 +257,43 @@ public final class RtEntityCapture implements VertexConsumer {
         packedPrim.ensureCapacity(prim.size());
         int[] indices = idx.elements();
         float[] primitives = prim.elements();
-        for (int bucket = 0; bucket < RtAccel.ENTITY_BUCKETS; bucket++) {
-            for (int tri = 0; tri < triangleCount; tri++) {
-                if (alphaBuckets.getInt(tri) != bucket) {
-                    continue;
-                }
-                int indexBase = tri * 3;
-                packedIdx.add(indices[indexBase]);
-                packedIdx.add(indices[indexBase + 1]);
-                packedIdx.add(indices[indexBase + 2]);
-                int primBase = tri * 12;
-                for (int lane = 0; lane < 12; lane++) {
-                    packedPrim.add(primitives[primBase + lane]);
-                }
-                packedBucketTris[bucket]++;
+        int[] buckets = alphaBuckets.elements();
+        boolean alreadyOrdered = true;
+        int previousBucket = -1;
+        for (int tri = 0; tri < triangleCount; tri++) {
+            int bucket = buckets[tri];
+            if (bucket < 0 || bucket >= RtAccel.ENTITY_BUCKETS) {
+                throw new IllegalStateException("Entity capture contains invalid alpha bucket " + bucket);
             }
+            packedBucketTris[bucket]++;
+            alreadyOrdered &= bucket >= previousBucket;
+            previousBucket = bucket;
         }
-        if (packedIdx.size() != idx.size() || packedPrim.size() != prim.size()) {
-            throw new IllegalStateException("Entity capture contains an invalid alpha bucket");
+        if (alreadyOrdered) {
+            // Consumers copy these lists synchronously before the capture is reset. Stable partitioning an
+            // already ordered capture is the identity operation, so avoid a second traversal and 15 array
+            // copies per triangle while preserving the exact source bits and bucket-local primitive indices.
+            return new PackedGeometry(idx, prim, packedBucketTris, true);
         }
-        return new PackedGeometry(packedIdx, packedPrim, packedBucketTris);
+        int triangleBase = 0;
+        for (int bucket = 0; bucket < RtAccel.ENTITY_BUCKETS; bucket++) {
+            packedBucketCursor[bucket] = triangleBase;
+            triangleBase += packedBucketTris[bucket];
+        }
+        packedIdx.size(idx.size());
+        packedPrim.size(prim.size());
+        int[] outputIndices = packedIdx.elements();
+        float[] outputPrimitives = packedPrim.elements();
+        for (int tri = 0; tri < triangleCount; tri++) {
+            int outputTriangle = packedBucketCursor[buckets[tri]]++;
+            System.arraycopy(indices, tri * 3, outputIndices, outputTriangle * 3, 3);
+            System.arraycopy(primitives, tri * 12, outputPrimitives, outputTriangle * 12, 12);
+        }
+        return new PackedGeometry(packedIdx, packedPrim, packedBucketTris, false);
     }
 
-    record PackedGeometry(IntArrayList indices, FloatArrayList primitives, int[] bucketTris) {
+    record PackedGeometry(IntArrayList indices, FloatArrayList primitives, int[] bucketTris,
+                          boolean orderedFastPath) {
         int[] copyBucketTris() {
             return bucketTris.clone();
         }
@@ -273,8 +308,12 @@ public final class RtEntityCapture implements VertexConsumer {
         }
         qx[n] = x; qy[n] = y; qz[n] = z;
         qu[n] = u; qv[n] = v;
-        qnx[n] = nx; qny[n] = ny; qnz[n] = nz;
-        qcol[n] = color;
+        // ModelPart emits a planar face with one flat normal/tint. emitQuad has always used only vertex
+        // zero for these attributes, so avoid twelve dead stores for the remaining three vertices.
+        if (n == 0) {
+            qnx[0] = nx; qny[0] = ny; qnz[0] = nz;
+            qcol[0] = color;
+        }
         if (++n == 4) {
             emitQuad();
             n = 0;
@@ -371,44 +410,119 @@ public final class RtEntityCapture implements VertexConsumer {
         float off = offset ? ORDER_OFFSET * currentOrder : 0f;
 
         int base = verts.size() / 3;
+        int vertFloatStart = verts.size();
+        int uvFloatStart = uvList.size();
+        reserveUninitialized(verts, 12);
+        reserveUninitialized(uvList, 8);
+        float[] vertexFloats = verts.elements();
+        float[] uvFloats = uvList.elements();
         for (int i = 0; i < 4; i++) {
             int p = positionIndex(corners, i);
-            verts.add(offset ? x[p] + nx * off : x[p]);
-            verts.add(offset ? y[p] + ny * off : y[p]);
-            verts.add(offset ? z[p] + nz * off : z[p]);
-            uvList.add(remapUv ? uvU0 + u[i] * uvDU : u[i]);
-            uvList.add(remapUv ? uvV0 + v[i] * uvDV : v[i]);
+            int vertexLane = vertFloatStart + i * 3;
+            vertexFloats[vertexLane] = offset ? x[p] + nx * off : x[p];
+            vertexFloats[vertexLane + 1] = offset ? y[p] + ny * off : y[p];
+            vertexFloats[vertexLane + 2] = offset ? z[p] + nz * off : z[p];
+            int uvLane = uvFloatStart + i * 2;
+            uvFloats[uvLane] = remapUv ? uvU0 + u[i] * uvDU : u[i];
+            uvFloats[uvLane + 1] = remapUv ? uvV0 + v[i] * uvDV : v[i];
         }
-        idx.add(base);
-        idx.add(base + 1);
-        idx.add(base + 2);
-        idx.add(base);
-        idx.add(base + 2);
-        idx.add(base + 3);
+        int indexStart = idx.size();
+        reserveUninitialized(idx, 6);
+        int[] indices = idx.elements();
+        indices[indexStart] = base;
+        indices[indexStart + 1] = base + 1;
+        indices[indexStart + 2] = base + 2;
+        indices[indexStart + 3] = base;
+        indices[indexStart + 4] = base + 2;
+        indices[indexStart + 5] = base + 3;
         // Vertex colour as a flat per-prim tint (ARGB → rgb). White (-1) for most models → grey when lit.
-        int c = color;
-        float tr = ((c >> 16) & 0xFF) * (1f / 255f);
-        float tg = ((c >> 8) & 0xFF) * (1f / 255f);
-        float tb = (c & 0xFF) * (1f / 255f);
-        for (int t = 0; t < 2; t++) { // one {normal+emission, tint, mat} record per triangle
-            prim.add(nx);
-            prim.add(ny);
-            prim.add(nz);
-            prim.add(emission);
-            prim.add(tr);
-            prim.add(tg);
-            prim.add(tb);
-            prim.add((float) currentTexSlot); // tint.w = bindless texture slot
-            prim.add(Float.intBitsToFloat(currentMaterialId));
-            prim.add(0f); // flags
-            prim.add(0f); // aux0
-            prim.add(0f); // aux1
-            alphaBuckets.add(currentAlphaBucket);
+        float tr;
+        float tg;
+        float tb;
+        if (colorCacheValid && cachedColor == color) {
+            tr = cachedTr;
+            tg = cachedTg;
+            tb = cachedTb;
+        } else {
+            tr = ((color >> 16) & 0xFF) * (1f / 255f);
+            tg = ((color >> 8) & 0xFF) * (1f / 255f);
+            tb = (color & 0xFF) * (1f / 255f);
+            colorCacheValid = true;
+            cachedColor = color;
+            cachedTr = tr;
+            cachedTg = tg;
+            cachedTb = tb;
         }
+        int primitiveStart = prim.size();
+        reserveUninitialized(prim, 24);
+        float[] primitives = prim.elements();
+        for (int t = 0; t < 2; t++) { // one {normal+emission, tint, mat} record per triangle
+            int lane = primitiveStart + t * 12;
+            primitives[lane] = nx;
+            primitives[lane + 1] = ny;
+            primitives[lane + 2] = nz;
+            primitives[lane + 3] = emission;
+            primitives[lane + 4] = tr;
+            primitives[lane + 5] = tg;
+            primitives[lane + 6] = tb;
+            primitives[lane + 7] = (float) currentTexSlot; // tint.w = bindless texture slot
+            primitives[lane + 8] = Float.intBitsToFloat(currentMaterialId);
+            primitives[lane + 9] = Float.intBitsToFloat(currentPrimFlags);
+            primitives[lane + 10] = 0f; // aux0
+            primitives[lane + 11] = 0f; // aux1
+        }
+        int bucketStart = alphaBuckets.size();
+        reserveUninitialized(alphaBuckets, 2);
+        int[] buckets = alphaBuckets.elements();
+        buckets[bucketStart] = currentAlphaBucket;
+        buckets[bucketStart + 1] = currentAlphaBucket;
     }
 
     private static int positionIndex(int[] corners, int vertex) {
         return corners == null ? vertex : corners[vertex];
+    }
+
+    /** Grow a fixed-output range without Fastutil zero-filling lanes appendQuad overwrites. */
+    private static int reserveUninitialized(FloatArrayList list, int count) {
+        return ((UninitializedFloatArrayList) list).reserveUninitialized(count);
+    }
+
+    private static int reserveUninitialized(IntArrayList list, int count) {
+        return ((UninitializedIntArrayList) list).reserveUninitialized(count);
+    }
+
+    private static final class UninitializedFloatArrayList extends FloatArrayList {
+        UninitializedFloatArrayList(int capacity) { super(capacity); }
+
+        void ensureCapacityIfNeeded(int capacity) {
+            if (capacity > a.length) ensureCapacity(capacity);
+        }
+
+        int reserveUninitialized(int count) {
+            if (count < 0) throw new IllegalArgumentException("negative reservation: " + count);
+            int start = size;
+            int end = Math.addExact(start, count);
+            ensureCapacityIfNeeded(end);
+            size = end;
+            return start;
+        }
+    }
+
+    private static final class UninitializedIntArrayList extends IntArrayList {
+        UninitializedIntArrayList(int capacity) { super(capacity); }
+
+        void ensureCapacityIfNeeded(int capacity) {
+            if (capacity > a.length) ensureCapacity(capacity);
+        }
+
+        int reserveUninitialized(int count) {
+            if (count < 0) throw new IllegalArgumentException("negative reservation: " + count);
+            int start = size;
+            int end = Math.addExact(start, count);
+            ensureCapacityIfNeeded(end);
+            size = end;
+            return start;
+        }
     }
 
     // Unused VertexConsumer surface — ModelPart.Cube.compile only calls the bulk addVertex above.

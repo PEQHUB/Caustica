@@ -1,23 +1,34 @@
 package dev.comfyfluffy.caustica.mixin;
 
 import com.llamalad7.mixinextras.sugar.Local;
+import com.llamalad7.mixinextras.injector.wrapmethod.WrapMethod;
 import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
 import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
 import com.mojang.blaze3d.shaders.GpuDebugOptions;
 import com.mojang.blaze3d.shaders.ShaderSource;
+import com.mojang.blaze3d.systems.BackendCreationException;
 import com.mojang.blaze3d.systems.GpuDevice;
 import com.mojang.blaze3d.vulkan.VulkanBackend;
 import com.mojang.blaze3d.vulkan.VulkanPhysicalDevice;
 import com.mojang.blaze3d.vulkan.init.VulkanFeature;
+import com.mojang.blaze3d.vulkan.init.VulkanPNextStruct;
 import dev.comfyfluffy.caustica.CausticaMod;
+import dev.comfyfluffy.caustica.nrd.NrdRuntime;
 import dev.comfyfluffy.caustica.rt.RtDeviceBringup;
 import dev.comfyfluffy.caustica.rt.VulkanDiagnostics;
+import dev.comfyfluffy.caustica.streamline.StreamlineRuntime;
+import org.lwjgl.PointerBuffer;
 import org.lwjgl.system.MemoryStack;
+import org.lwjgl.vulkan.EXTExtendedDynamicState;
 import org.lwjgl.vulkan.VK12;
 import org.lwjgl.vulkan.VkDevice;
+import org.lwjgl.vulkan.VkAllocationCallbacks;
 import org.lwjgl.vulkan.VkDeviceCreateInfo;
+import org.lwjgl.vulkan.VkInstance;
+import org.lwjgl.vulkan.VkPhysicalDevice;
 import org.lwjgl.vulkan.VkPhysicalDeviceFeatures;
 import org.lwjgl.vulkan.VkPhysicalDeviceFeatures2;
+import org.lwjgl.vulkan.VkPhysicalDeviceExtendedDynamicStateFeaturesEXT;
 import org.lwjgl.vulkan.VkPhysicalDeviceVulkan12Features;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
@@ -29,6 +40,7 @@ import org.spongepowered.asm.mixin.injection.invoke.arg.Args;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashSet;
+import java.nio.IntBuffer;
 import java.util.List;
 import java.util.Set;
 
@@ -46,6 +58,7 @@ import java.util.Set;
  */
 @Mixin(VulkanBackend.class)
 public abstract class VulkanBackendMixin {
+	private static final String NRD_EXTENDED_DYNAMIC_STATE = "VK_EXT_extended_dynamic_state";
 	private static final VulkanFeature STORAGE_IMAGE_WRITE_WITHOUT_FORMAT =
 			new VulkanFeature(VulkanBackend.VK10_FEATURES_STRUCT, "shaderStorageImageWriteWithoutFormat",
 					VkPhysicalDeviceFeatures.SHADERSTORAGEIMAGEWRITEWITHOUTFORMAT);
@@ -63,9 +76,61 @@ public abstract class VulkanBackendMixin {
 			// DLSS relies on it being core/enabled at instance level.)
 			"VK_NVX_binary_import",
 			"VK_NVX_image_view_handle",
-			"VK_KHR_push_descriptor");
+			"VK_KHR_push_descriptor",
+			// NRD's NRI wrapper requires this explicitly because Minecraft creates a Vulkan 1.2 device.
+			NRD_EXTENDED_DYNAMIC_STATE);
 
 	private static final Set<String> loggedMissingSdkFeatures = new HashSet<>();
+
+	/** Initialize Streamline before Vulkan probing, while keeping Minecraft's throwaway probe native. */
+	@WrapMethod(method = "checkBackendAvailable")
+	private static BackendCreationException caustica$checkBackendAvailableWithoutStreamline(
+			Operation<BackendCreationException> original) {
+		boolean streamlineReady = StreamlineRuntime.initializeForVulkan();
+		StreamlineRuntime.beginVulkanAvailabilityProbe();
+		BackendCreationException failure;
+		try {
+			failure = original.call();
+		} finally {
+			StreamlineRuntime.endVulkanAvailabilityProbe();
+		}
+		if (failure != null && streamlineReady) StreamlineRuntime.shutdown();
+		return failure;
+	}
+
+	/** Release a partially initialized proxy chain if Vulkan creation falls back or fails. */
+	@WrapMethod(method = "createDevice(JLcom/mojang/blaze3d/shaders/ShaderSource;Lcom/mojang/blaze3d/shaders/GpuDebugOptions;Ljava/lang/Runnable;)Lcom/mojang/blaze3d/systems/GpuDevice;")
+	private GpuDevice caustica$createDeviceWithStreamlineCleanup(long window, ShaderSource defaultShaderSource,
+			GpuDebugOptions debugOptions, Runnable criticalShaderLoader, Operation<GpuDevice> original)
+			throws BackendCreationException {
+		try {
+			return original.call(window, defaultShaderSource, debugOptions, criticalShaderLoader);
+		} catch (Throwable throwable) {
+			StreamlineRuntime.shutdown();
+			if (throwable instanceof BackendCreationException e) throw e;
+			if (throwable instanceof RuntimeException e) throw e;
+			if (throwable instanceof Error e) throw e;
+			throw new IllegalStateException("Unexpected checked failure during Vulkan backend creation", throwable);
+		}
+	}
+
+	@org.spongepowered.asm.mixin.injection.Redirect(
+			method = "findPhysicalDevice",
+			at = @At(value = "INVOKE",
+				target = "Lorg/lwjgl/vulkan/VK12;vkEnumeratePhysicalDevices(Lorg/lwjgl/vulkan/VkInstance;Ljava/nio/IntBuffer;Lorg/lwjgl/PointerBuffer;)I"))
+	private static int caustica$enumeratePhysicalDevicesThroughStreamline(VkInstance instance, IntBuffer count,
+			PointerBuffer physicalDevices) {
+		return StreamlineRuntime.vkEnumeratePhysicalDevices(instance, count, physicalDevices);
+	}
+
+	@org.spongepowered.asm.mixin.injection.Redirect(
+			method = "createDevice(Ljava/util/Collection;Lcom/mojang/blaze3d/vulkan/VulkanPhysicalDevice;Ljava/util/Set;)Lorg/lwjgl/vulkan/VkDevice;",
+			at = @At(value = "INVOKE",
+				target = "Lorg/lwjgl/vulkan/VK12;vkCreateDevice(Lorg/lwjgl/vulkan/VkPhysicalDevice;Lorg/lwjgl/vulkan/VkDeviceCreateInfo;Lorg/lwjgl/vulkan/VkAllocationCallbacks;Lorg/lwjgl/PointerBuffer;)I"))
+	private static int caustica$createDeviceThroughStreamline(VkPhysicalDevice physicalDevice,
+			VkDeviceCreateInfo createInfo, VkAllocationCallbacks allocator, PointerBuffer deviceOut) {
+		return StreamlineRuntime.vkCreateDevice(physicalDevice, createInfo, allocator, deviceOut);
+	}
 
 	/** NVIDIA advertises AMD markers too, but its native diagnostic checkpoints contain better fault context. */
 	@WrapOperation(
@@ -109,6 +174,7 @@ public abstract class VulkanBackendMixin {
 		VulkanDiagnostics.addDeviceFaultFeature(args);
 		RtDeviceBringup.addFeatures(args, physicalDevice);
 		VulkanDiagnostics.logEnabledExtensions(augmented);
+		NrdRuntime.recordEnabledDeviceExtensions(augmented);
 	}
 
 	@SuppressWarnings("unchecked")
@@ -127,6 +193,23 @@ public abstract class VulkanBackendMixin {
 			if (features.add(feature)) {
 				changed = true;
 				CausticaMod.LOGGER.info("Enabling Vulkan feature {} for FSR/DLSS SDK shaders", feature.name());
+			}
+		}
+
+		if (physicalDevice.hasDeviceExtension(NRD_EXTENDED_DYNAMIC_STATE)) {
+			VulkanPNextStruct extendedDynamicStateStruct = new VulkanPNextStruct(
+					EXTExtendedDynamicState.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_FEATURES_EXT,
+					VkPhysicalDeviceExtendedDynamicStateFeaturesEXT.SIZEOF);
+			VulkanFeature extendedDynamicState = new VulkanFeature(extendedDynamicStateStruct, "extendedDynamicState",
+					VkPhysicalDeviceExtendedDynamicStateFeaturesEXT.EXTENDEDDYNAMICSTATE);
+			if (caustica$supportsFeature(physicalDevice, extendedDynamicState)) {
+				if (features.add(extendedDynamicState)) {
+					changed = true;
+					CausticaMod.LOGGER.info("Enabling Vulkan feature extendedDynamicState for NRD/NRI");
+				}
+			} else if (loggedMissingSdkFeatures.add(extendedDynamicState.name())) {
+				CausticaMod.LOGGER.warn("Device [{}] lacks extendedDynamicState; NRD will be unavailable",
+						physicalDevice.deviceName());
 			}
 		}
 		if (changed) {
@@ -163,7 +246,6 @@ public abstract class VulkanBackendMixin {
 	private static void caustica$augmentDeviceCreateInfo(Collection<String> extensions,
 			VulkanPhysicalDevice physicalDevice, Set<VulkanFeature> features,
 			CallbackInfoReturnable<VkDevice> cir, @Local VkDeviceCreateInfo deviceCreateInfo) {
-		RtDeviceBringup.reserveComputeQueue(deviceCreateInfo, physicalDevice, MemoryStack.stackGet());
 		VulkanDiagnostics.attachNvDiagnosticsConfig(deviceCreateInfo, MemoryStack.stackGet());
 	}
 }

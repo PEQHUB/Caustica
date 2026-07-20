@@ -6,6 +6,7 @@ import org.lwjgl.vulkan.VK10;
 import org.lwjgl.vulkan.VkCommandBuffer;
 import org.lwjgl.vulkan.VkComputePipelineCreateInfo;
 import org.lwjgl.vulkan.VkDescriptorImageInfo;
+import org.lwjgl.vulkan.VkDescriptorBufferInfo;
 import org.lwjgl.vulkan.VkDescriptorPoolCreateInfo;
 import org.lwjgl.vulkan.VkDescriptorPoolSize;
 import org.lwjgl.vulkan.VkDescriptorSetAllocateInfo;
@@ -23,16 +24,18 @@ import java.io.InputStream;
 import java.nio.ByteBuffer;
 import java.nio.LongBuffer;
 
+import dev.comfyfluffy.caustica.CausticaConfig;
 import dev.comfyfluffy.caustica.rt.RtContext;
 import dev.comfyfluffy.caustica.rt.RtDebugLabels;
+import dev.comfyfluffy.caustica.rt.accel.RtBuffer;
 
 import static dev.comfyfluffy.caustica.rt.RtContext.check;
 
 /** Compute pass that maps the display-res HDR RT image into an LDR image compatible with the main target. */
 public final class RtDisplayPipeline {
     private static final String SHADER_DIR = "/caustica/rt/";
-    /** Push constants: int hdrEnabled, float paperWhiteNits, float headroom. */
-    private static final int PUSH_BYTES = 3 * Integer.BYTES;
+    /** Keep this below Vulkan's 128-byte minimum push-constant guarantee. */
+    private static final int PUSH_BYTES = 124;
 
     private final RtContext ctx;
     private final long descriptorSetLayout;
@@ -40,10 +43,7 @@ public final class RtDisplayPipeline {
     private final long descriptorSet;
     private final long pipelineLayout;
     private final long pipeline;
-    private long boundOutputView;
-    private long boundRtView;
-    private long boundExposureView;
-    private long boundHdrView;
+    private int ditherFrameIndex;
     private boolean destroyed;
 
     private RtDisplayPipeline(RtContext ctx, long dsl, long pool, long set, long layout, long pipeline) {
@@ -58,7 +58,7 @@ public final class RtDisplayPipeline {
     public static RtDisplayPipeline create(RtContext ctx) {
         VkDevice vk = ctx.vk();
         try (MemoryStack stack = MemoryStack.stackPush()) {
-            VkDescriptorSetLayoutBinding.Buffer binds = VkDescriptorSetLayoutBinding.calloc(4, stack);
+            VkDescriptorSetLayoutBinding.Buffer binds = VkDescriptorSetLayoutBinding.calloc(6, stack);
             binds.get(0).binding(0).descriptorType(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
                     .descriptorCount(1).stageFlags(VK10.VK_SHADER_STAGE_COMPUTE_BIT);
             binds.get(1).binding(1).descriptorType(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
@@ -67,6 +67,10 @@ public final class RtDisplayPipeline {
                     .descriptorCount(1).stageFlags(VK10.VK_SHADER_STAGE_COMPUTE_BIT);
             binds.get(3).binding(3).descriptorType(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
                     .descriptorCount(1).stageFlags(VK10.VK_SHADER_STAGE_COMPUTE_BIT);
+            binds.get(4).binding(4).descriptorType(VK10.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER)
+                    .descriptorCount(1).stageFlags(VK10.VK_SHADER_STAGE_COMPUTE_BIT);
+            binds.get(5).binding(5).descriptorType(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
+                    .descriptorCount(1).stageFlags(VK10.VK_SHADER_STAGE_COMPUTE_BIT);
 
             VkDescriptorSetLayoutCreateInfo dslci = VkDescriptorSetLayoutCreateInfo.calloc(stack).sType$Default().pBindings(binds);
             LongBuffer p = stack.mallocLong(1);
@@ -74,8 +78,9 @@ public final class RtDisplayPipeline {
             long dsl = p.get(0);
             RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT, dsl, "display descriptor set layout");
 
-            VkDescriptorPoolSize.Buffer poolSizes = VkDescriptorPoolSize.calloc(1, stack);
-            poolSizes.get(0).type(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).descriptorCount(4);
+            VkDescriptorPoolSize.Buffer poolSizes = VkDescriptorPoolSize.calloc(2, stack);
+            poolSizes.get(0).type(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).descriptorCount(5);
+            poolSizes.get(1).type(VK10.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER).descriptorCount(1);
             VkDescriptorPoolCreateInfo dpci = VkDescriptorPoolCreateInfo.calloc(stack).sType$Default().maxSets(1).pPoolSizes(poolSizes);
             check(VK10.vkCreateDescriptorPool(vk, dpci, null, p), "vkCreateDescriptorPool(rt display)");
             long pool = p.get(0);
@@ -106,17 +111,13 @@ public final class RtDisplayPipeline {
             check(VK10.vkCreateComputePipelines(vk, VK10.VK_NULL_HANDLE, cpci, null, pPipeline),
                     "vkCreateComputePipelines(rt display)");
             RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_PIPELINE, pPipeline.get(0), "display compute pipeline");
-            VK10.vkDestroyShaderModule(vk, module, null);
-
+        VK10.vkDestroyShaderModule(vk, module, null);
             return new RtDisplayPipeline(ctx, dsl, pool, set, layout, pPipeline.get(0));
         }
     }
 
-    public void setImages(long outputImageView, long rtImageView, long exposureImageView, long hdrImageView) {
-        if (boundOutputView == outputImageView && boundRtView == rtImageView
-                && boundExposureView == exposureImageView && boundHdrView == hdrImageView) {
-            return;
-        }
+    public void setImages(long outputImageView, long rtImageView, long exposureImageView, long hdrImageView,
+                          RtBuffer ditherBuffer, long bloomImageView) {
         try (MemoryStack stack = MemoryStack.stackPush()) {
             VkDescriptorImageInfo.Buffer outputInfo = VkDescriptorImageInfo.calloc(1, stack);
             outputInfo.get(0).imageView(outputImageView).imageLayout(VK10.VK_IMAGE_LAYOUT_GENERAL);
@@ -126,8 +127,12 @@ public final class RtDisplayPipeline {
             exposureInfo.get(0).imageView(exposureImageView).imageLayout(VK10.VK_IMAGE_LAYOUT_GENERAL);
             VkDescriptorImageInfo.Buffer hdrInfo = VkDescriptorImageInfo.calloc(1, stack);
             hdrInfo.get(0).imageView(hdrImageView).imageLayout(VK10.VK_IMAGE_LAYOUT_GENERAL);
+            VkDescriptorBufferInfo.Buffer ditherInfo = VkDescriptorBufferInfo.calloc(1, stack);
+            ditherInfo.get(0).buffer(ditherBuffer.handle).offset(0).range(ditherBuffer.size);
+            VkDescriptorImageInfo.Buffer bloomInfo = VkDescriptorImageInfo.calloc(1, stack);
+            bloomInfo.get(0).imageView(bloomImageView).imageLayout(VK10.VK_IMAGE_LAYOUT_GENERAL);
 
-            VkWriteDescriptorSet.Buffer writes = VkWriteDescriptorSet.calloc(4, stack);
+            VkWriteDescriptorSet.Buffer writes = VkWriteDescriptorSet.calloc(6, stack);
             writes.get(0).sType$Default().dstSet(descriptorSet).dstBinding(0)
                     .descriptorCount(1).descriptorType(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).pImageInfo(outputInfo);
             writes.get(1).sType$Default().dstSet(descriptorSet).dstBinding(1)
@@ -136,26 +141,49 @@ public final class RtDisplayPipeline {
                     .descriptorCount(1).descriptorType(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).pImageInfo(exposureInfo);
             writes.get(3).sType$Default().dstSet(descriptorSet).dstBinding(3)
                     .descriptorCount(1).descriptorType(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).pImageInfo(hdrInfo);
+            writes.get(4).sType$Default().dstSet(descriptorSet).dstBinding(4)
+                    .descriptorCount(1).descriptorType(VK10.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER).pBufferInfo(ditherInfo);
+            writes.get(5).sType$Default().dstSet(descriptorSet).dstBinding(5)
+                    .descriptorCount(1).descriptorType(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).pImageInfo(bloomInfo);
             VK10.vkUpdateDescriptorSets(ctx.vk(), writes, null);
         }
-        boundOutputView = outputImageView;
-        boundRtView = rtImageView;
-        boundExposureView = exposureImageView;
-        boundHdrView = hdrImageView;
     }
 
     /**
-     * Run the display mapping. The SDR AgX output is always written (binding 0). When {@code hdrEnabled}, the
-     * PQ-encoded HDR image (binding 3) is also written using the paper-white/headroom mapping.
+     * Run the display mapping. The selected SDR output is always written (binding 0). When {@code hdrEnabled}, the
+     * PQ-encoded HDR image (binding 3) is also written using the selected HDR display mapper.
      */
-    public void dispatch(VkCommandBuffer cmd, int width, int height, boolean hdrEnabled, float paperWhiteNits, float headroom) {
+    public void dispatch(VkCommandBuffer cmd, int width, int height, boolean hdrEnabled) {
         try (MemoryStack stack = MemoryStack.stackPush(); RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "display compute")) {
             VK10.vkCmdBindPipeline(cmd, VK10.VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
             VK10.vkCmdBindDescriptorSets(cmd, VK10.VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayout, 0, stack.longs(descriptorSet), null);
             ByteBuffer push = stack.malloc(PUSH_BYTES);
             push.putInt(0, hdrEnabled ? 1 : 0);
-            push.putFloat(4, paperWhiteNits);
-            push.putFloat(8, headroom);
+            push.putInt(4, CausticaConfig.Rt.Hdr.tonemapModeId());
+            push.putInt(8, CausticaConfig.Rt.Sdr.tonemapModeId());
+            push.putFloat(12, CausticaConfig.Rt.Hdr.paperWhiteNits());
+            push.putFloat(16, CausticaConfig.Rt.Hdr.headroom());
+            push.putFloat(20, CausticaConfig.Rt.Hdr.PSYCHO_HIGHLIGHTS.value());
+            push.putFloat(24, CausticaConfig.Rt.Hdr.PSYCHO_SHADOWS.value());
+            push.putFloat(28, CausticaConfig.Rt.Hdr.PSYCHO_CONTRAST.value());
+            push.putFloat(32, CausticaConfig.Rt.Hdr.PSYCHO_PURITY.value());
+            push.putFloat(36, CausticaConfig.Rt.Hdr.PSYCHO_BLEACHING.value());
+            push.putFloat(40, CausticaConfig.Rt.Hdr.PSYCHO_HUE_RESTORE.value());
+            push.putFloat(44, CausticaConfig.Rt.Hdr.PSYCHO_ADAPT_CONTRAST.value());
+            push.putFloat(48, CausticaConfig.Rt.Hdr.PSYCHO_CLIP_POINT.value());
+            push.putFloat(52, CausticaConfig.Rt.Hdr.psychoWhiteCurveId());
+            push.putFloat(56, CausticaConfig.Rt.Hdr.PSYCHO_CONE_EXPONENT.value());
+            push.putFloat(60, CausticaConfig.Rt.Sdr.PSYCHO_PEAK.value());
+            for (int i = 0; i < 8; i++) {
+                push.putFloat(64 + i * Float.BYTES, CausticaConfig.Rt.Sdr.tonemapParam(i));
+            }
+            push.putInt(96, CausticaConfig.Rt.Composite.DEBUG_VIEW.value());
+            push.putFloat(100, CausticaConfig.Rt.PsychoV23.COMPRESSION.value());
+            push.putFloat(104, CausticaConfig.Rt.PsychoV23.GAMUT_COMPRESSION.value());
+            push.putFloat(108, CausticaConfig.Rt.PsychoV23.COMPRESSION.value());
+            push.putFloat(112, CausticaConfig.Rt.PsychoV23.GAMUT_COMPRESSION.value());
+            push.putFloat(116, CausticaConfig.Rt.Sdr.PSYCHOV23_PEAK.value());
+            push.putInt(120, ditherFrameIndex++);
             VK10.vkCmdPushConstants(cmd, pipelineLayout, VK10.VK_SHADER_STAGE_COMPUTE_BIT, 0, push);
             VK10.vkCmdDispatch(cmd, (width + 15) / 16, (height + 15) / 16, 1);
         }

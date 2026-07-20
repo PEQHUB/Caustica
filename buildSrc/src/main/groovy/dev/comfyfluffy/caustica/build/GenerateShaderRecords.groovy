@@ -230,6 +230,22 @@ abstract class GenerateShaderRecords extends DefaultTask {
         Map materialHeaderType = materialProbeArray.type.elementType as Map
         int materialHeaderByteSize = materialProbeArray.type.uniformStride as int
 
+        def sharcFrameParameter = reflection.parameters.find { it.name == "sharcFrameLayoutProbe" }
+        def sharcFrameArray = sharcFrameParameter?.type?.resultType?.fields?.find { it.name == "values" }
+        if (sharcFrameArray?.type?.kind != "array" || sharcFrameArray.type.elementType?.name != "SharcFrame") {
+            throw new GradleException("unexpected SharcFrame reflection probe shape")
+        }
+        Map sharcFrameType = sharcFrameArray.type.elementType as Map
+        int sharcFrameByteSize = sharcFrameArray.type.uniformStride as int
+
+        def sharcPushParameter = reflection.parameters.find { it.name == "sharcPushAddrLayoutProbe" }
+        def sharcPushArray = sharcPushParameter?.type?.resultType?.fields?.find { it.name == "values" }
+        if (sharcPushArray?.type?.kind != "array" || sharcPushArray.type.elementType?.name != "SharcPushAddr") {
+            throw new GradleException("unexpected SharcPushAddr reflection probe shape")
+        }
+        Map sharcPushType = sharcPushArray.type.elementType as Map
+        int sharcPushByteSize = sharcPushArray.type.uniformStride as int
+
         def pushParameter = reflection.parameters.find { it.name == "pushConstantsLayoutProbe" }
         if (pushParameter?.type?.elementType?.name != "WorldPushConstants") {
             throw new GradleException("Slang reflection omitted pushConstantsLayoutProbe")
@@ -247,6 +263,10 @@ abstract class GenerateShaderRecords extends DefaultTask {
                 generateJava(worldType, worldByteSize, "WorldPushData"), "UTF-8")
         new File(packageDir, "WorldPushConstantsData.java").setText(
                 generateJava(pushConstantsType, pushConstantsByteSize, "WorldPushConstantsData"), "UTF-8")
+        new File(packageDir, "SharcFrameData.java").setText(
+                generateJava(sharcFrameType, sharcFrameByteSize, "SharcFrameData"), "UTF-8")
+        new File(packageDir, "SharcPushAddrData.java").setText(
+                generateJava(sharcPushType, sharcPushByteSize, "SharcPushAddrData"), "UTF-8")
         new File(packageDir, "MaterialHeaderData.java").setText(
                 generateJava(materialHeaderType, materialHeaderByteSize, "MaterialHeaderData"), "UTF-8")
     }

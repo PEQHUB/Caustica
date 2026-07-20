@@ -1,4 +1,13 @@
 {
+	"caustica.options.rt.firstPerson.header": "First-Person View",
+	"caustica.options.rt.firstPerson.enabled": "First-Person Body",
+	"caustica.options.rt.firstPerson.enabled.tooltip": "Capture the local player's body and head for secondary rays.",
+	"caustica.options.rt.firstPerson.forward": "Forward Offset",
+	"caustica.options.rt.firstPerson.forward.tooltip": "Move submitted geometry along the player's facing direction.",
+	"caustica.options.rt.firstPerson.vertical": "Vertical Offset",
+	"caustica.options.rt.firstPerson.vertical.tooltip": "Move submitted geometry vertically.",
+	"caustica.options.rt.firstPerson.lateral": "Lateral Offset",
+	"caustica.options.rt.firstPerson.lateral.tooltip": "Move submitted geometry right or left.",
 	"caustica.options.rt.header": "レイトレーシング",
 
 	"caustica.options.rt.exposureMode": "露出",
@@ -46,6 +55,9 @@
 	"caustica.options.rt.dlssQuality.1": "バランス",
 	"caustica.options.rt.dlssQuality.2": "クオリティ",
 	"caustica.options.rt.dlssQuality.5": "DLAA",
+	"caustica.options.rt.dlssQuality.-1": "カスタム",
+	"caustica.options.rt.inputScale": "入力解像度",
+	"caustica.options.rt.inputScale.tooltip": "パストレーシングの入力解像度です。DLSSプリセットで設定され、直接変更するとカスタム表示になります。",
 
 	"caustica.options.rt.debugView": "デバッグ表示",
 	"caustica.options.rt.debugView.tooltip": "最終画像の代わりに、レイトレーシングの中間バッファを可視化します。",
@@ -56,5 +68,6 @@
 	"caustica.options.rt.debugView.4": "粗さ",
 	"caustica.options.rt.debugView.5": "モーション",
 	"caustica.options.rt.debugView.6": "スペキュラー",
-	"caustica.options.rt.debugView.7": "スペキュラーモーション"
+	"caustica.options.rt.debugView.7": "スペキュラーモーション",
+	"caustica.options.rt.debugView.8": "トーンマッパー比較"
 }

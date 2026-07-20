@@ -26,8 +26,11 @@ import org.lwjgl.vulkan.VkQueryPoolCreateInfo;
 
 import dev.comfyfluffy.caustica.rt.RtContext;
 import dev.comfyfluffy.caustica.rt.RtDebugLabels;
+import dev.comfyfluffy.caustica.rt.RtFrameStats;
 
 import java.util.List;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.lwjgl.vulkan.EXTOpacityMicromap.VK_ACCESS_2_MICROMAP_READ_BIT_EXT;
 import static org.lwjgl.vulkan.EXTOpacityMicromap.VK_ACCESS_2_MICROMAP_WRITE_BIT_EXT;
@@ -55,7 +58,6 @@ import static org.lwjgl.vulkan.KHRAccelerationStructure.VK_COPY_ACCELERATION_STR
 import static org.lwjgl.vulkan.KHRAccelerationStructure.VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR;
 import static org.lwjgl.vulkan.KHRAccelerationStructure.VK_GEOMETRY_NO_DUPLICATE_ANY_HIT_INVOCATION_BIT_KHR;
 import static org.lwjgl.vulkan.KHRAccelerationStructure.VK_GEOMETRY_OPAQUE_BIT_KHR;
-import static org.lwjgl.vulkan.KHRAccelerationStructure.VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
 import static org.lwjgl.vulkan.KHRAccelerationStructure.VK_GEOMETRY_TYPE_INSTANCES_KHR;
 import static org.lwjgl.vulkan.KHRAccelerationStructure.VK_GEOMETRY_TYPE_TRIANGLES_KHR;
 import static org.lwjgl.vulkan.KHRAccelerationStructure.VK_INDEX_TYPE_NONE_KHR;
@@ -78,6 +80,27 @@ import static org.lwjgl.vulkan.KHRSynchronization2.vkCmdPipelineBarrier2KHR;
  */
 public final class RtAccel {
     private static final long TLAS_INSTANCE_ADDRESS_ALIGNMENT = 16L;
+    private static final ConcurrentHashMap<Long, RtAccel> LIVE_BY_ADDRESS = new ConcurrentHashMap<>();
+    private static final AtomicInteger ACTIVE_TERRAIN_COMPACTION_QUERIES = new AtomicInteger();
+
+    public enum TerrainBlasPolicy {
+        DIRECT(false),
+        COMPACT(true);
+
+        private final boolean compaction;
+
+        TerrainBlasPolicy(boolean compaction) {
+            this.compaction = compaction;
+        }
+
+        public boolean usesCompactionQueries() {
+            return compaction;
+        }
+    }
+
+    public static int activeTerrainCompactionQueries() {
+        return ACTIVE_TERRAIN_COMPACTION_QUERIES.get();
+    }
     // vkCmdBuildMicromapsEXT requires both data.deviceAddress and triangleArray.deviceAddress to be
     // multiples of 256 (VUID-vkCmdBuildMicromapsEXT-pInfos-07515).
     private static final long MICROMAP_INPUT_ADDRESS_ALIGNMENT = 256L;
@@ -123,6 +146,11 @@ public final class RtAccel {
         this.backing = backing;
         this.ownsBacking = ownsBacking;
         this.opacityMicromap = opacityMicromap;
+        RtAccel collision = LIVE_BY_ADDRESS.putIfAbsent(deviceAddress, this);
+        if (collision != null) {
+            throw new IllegalStateException("Duplicate live acceleration structure address 0x"
+                    + Long.toHexString(deviceAddress));
+        }
     }
 
     public void destroy() {
@@ -130,6 +158,7 @@ public final class RtAccel {
             return;
         }
         if (handle != 0L) {
+            LIVE_BY_ADDRESS.remove(deviceAddress, this);
             vkDestroyAccelerationStructureKHR(vk, handle, null);
         }
         if (opacityMicromap != null) {
@@ -139,6 +168,7 @@ public final class RtAccel {
         if (compactionQueryPool != 0L) {
             VK10.vkDestroyQueryPool(vk, compactionQueryPool, null);
             compactionQueryPool = 0L;
+            ACTIVE_TERRAIN_COMPACTION_QUERIES.decrementAndGet();
         }
         // An entity BLAS's backing is caller-owned (released via releaseEntityBlas, not destroyed here).
         if (ownsBacking) {
@@ -189,7 +219,7 @@ public final class RtAccel {
         RtBuffer data;
         RtBuffer triangles;
         RtBuffer scratch;
-        final long scratchAddress;
+        final long scratchAddress; // aligned into the over-allocated scratch using the queried device limit
         final long dataAddress;
         final long triangleArrayAddress;
         final int triangleCount;
@@ -278,17 +308,18 @@ public final class RtAccel {
         private final boolean entitySplit;
         private final int[] entityTris; // opaque/any-hit counts (null if !entitySplit)
         private final OpacityMicromap opacityMicromap; // optional, terrain cutout bucket only
+        private final TerrainBlasPolicy terrainPolicy;
 
         private PreparedBlas(RtAccel accel, RtBuffer scratch, RtBuffer externalBacking, long vertexAddr, long indexAddr,
                              int maxVertex, int triangleCount, boolean opaque, String label, boolean updatable, boolean update) {
             this(accel, scratch, externalBacking, vertexAddr, indexAddr, maxVertex, triangleCount, opaque, label,
-                    updatable, update, false, null, false, null, null);
+                    updatable, update, false, null, false, null, null, TerrainBlasPolicy.DIRECT);
         }
 
         private PreparedBlas(RtAccel accel, RtBuffer scratch, RtBuffer externalBacking, long vertexAddr, long indexAddr,
                              int maxVertex, int triangleCount, boolean opaque, String label, boolean updatable, boolean update,
                              boolean terrainSplit, int[] terrainTris, boolean entitySplit, int[] entityTris,
-                             OpacityMicromap opacityMicromap) {
+                             OpacityMicromap opacityMicromap, TerrainBlasPolicy terrainPolicy) {
             this.accel = accel;
             this.scratch = scratch;
             this.externalBacking = externalBacking;
@@ -305,17 +336,20 @@ public final class RtAccel {
             this.entitySplit = entitySplit;
             this.entityTris = entityTris;
             this.opacityMicromap = opacityMicromap;
+            this.terrainPolicy = terrainPolicy;
         }
 
         /** A terrain section BLAS split into fixed per-bucket geometries in {@link RtAccel#TERRAIN_BUCKETS} order. */
         static PreparedBlas terrain(RtAccel accel, RtBuffer scratch, RtBuffer externalBacking, long vertexAddr, long indexAddr, int maxVertex,
-                                    int[] terrainTris, OpacityMicromap opacityMicromap, String label) {
+                                    int[] terrainTris, OpacityMicromap opacityMicromap, String label,
+                                    TerrainBlasPolicy terrainPolicy) {
             int total = 0;
             for (int t : terrainTris) {
                 total += t;
             }
             return new PreparedBlas(accel, scratch, externalBacking, vertexAddr, indexAddr, maxVertex,
-                    total, false, label, false, false, true, terrainTris, false, null, opacityMicromap);
+                    total, false, label, false, false, true, terrainTris, false, null, opacityMicromap,
+                    terrainPolicy);
         }
 
         static PreparedBlas entity(RtAccel accel, RtBuffer scratch, RtBuffer externalBacking, long vertexAddr,
@@ -324,11 +358,8 @@ public final class RtAccel {
             int total = 0;
             for (int t : entityTris) total += t;
             return new PreparedBlas(accel, scratch, externalBacking, vertexAddr, indexAddr, maxVertex,
-                    total, false, label, updatable, update, false, null, true, entityTris, null);
-        }
-
-        public boolean requestsCompaction() {
-            return accel.compactionQueryPool != 0L;
+                    total, false, label, updatable, update, false, null, true, entityTris, null,
+                    TerrainBlasPolicy.DIRECT);
         }
 
         private void freeTransientBuildResources() {
@@ -402,7 +433,7 @@ public final class RtAccel {
      */
     public static PreparedBlas prepareTerrainBlas(RtContext ctx, RtBuffer positions, int vertexCount,
                                                   RtBuffer indices, int[] bucketTris, OpacityMicromapInput opacityMicromapInput,
-                                                  boolean compact, String label) {
+                                                  String label, TerrainBlasPolicy policy) {
         VkDevice vk = ctx.vk();
         String debugLabel = labelOr(label, "terrain BLAS");
         OpacityMicromap opacityMicromap = null;
@@ -412,23 +443,24 @@ public final class RtAccel {
         try (MemoryStack stack = MemoryStack.stackPush()) {
             opacityMicromap = prepareOpacityMicromap(ctx, opacityMicromapInput, debugLabel);
             VkAccelerationStructureBuildSizesInfoKHR sizes = queryTerrainBlasSizes(vk, stack, positions, indices,
-                    vertexCount, bucketTris, opacityMicromap, compact);
+                    vertexCount, bucketTris, opacityMicromap, policy);
             backing = ctx.createAsyncBuffer(sizes.accelerationStructureSize(), VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR, false,
                     debugLabel + " backing");
             scratch = createScratchBuffer(ctx, sizes.buildScratchSize(), debugLabel + " build scratch");
             accel = createBlasOn(ctx, stack, backing, sizes.accelerationStructureSize(), true, debugLabel, opacityMicromap);
-            if (compact) {
+            if (policy.usesCompactionQueries()) {
                 VkQueryPoolCreateInfo queryCi = VkQueryPoolCreateInfo.calloc(stack).sType$Default()
                         .queryType(VK_QUERY_TYPE_ACCELERATION_STRUCTURE_COMPACTED_SIZE_KHR).queryCount(1);
                 java.nio.LongBuffer pQueryPool = stack.mallocLong(1);
                 RtContext.check(VK10.vkCreateQueryPool(vk, queryCi, null, pQueryPool),
                         "vkCreateQueryPool(terrain BLAS compacted size)");
                 accel.compactionQueryPool = pQueryPool.get(0);
+                ACTIVE_TERRAIN_COMPACTION_QUERIES.incrementAndGet();
                 RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_QUERY_POOL, accel.compactionQueryPool,
                         debugLabel + " compacted-size query");
             }
             return PreparedBlas.terrain(accel, scratch, null, positions.deviceAddress, indices.deviceAddress, vertexCount - 1,
-                    bucketTris, opacityMicromap, debugLabel);
+                    bucketTris, opacityMicromap, debugLabel, policy);
         } catch (Throwable t) {
             if (accel != null) {
                 accel.destroy();
@@ -447,7 +479,8 @@ public final class RtAccel {
      * Called only after the compute timeline confirms the build/query submission completed.
      */
     public static PreparedTerrainCompaction prepareTerrainCompaction(RtContext ctx, PreparedBlas source) {
-        if (!source.terrainSplit || source.accel.compactionQueryPool == 0L) {
+        if (!source.terrainSplit || !source.terrainPolicy.usesCompactionQueries()
+                || source.accel.compactionQueryPool == 0L) {
             throw new IllegalArgumentException("terrain BLAS has no pending compaction query");
         }
         long compactedSize;
@@ -460,6 +493,7 @@ public final class RtAccel {
         }
         VK10.vkDestroyQueryPool(ctx.vk(), source.accel.compactionQueryPool, null);
         source.accel.compactionQueryPool = 0L;
+        ACTIVE_TERRAIN_COMPACTION_QUERIES.decrementAndGet();
         if (compactedSize <= 0L) {
             throw new IllegalStateException("terrain BLAS compacted size is " + compactedSize);
         }
@@ -476,7 +510,7 @@ public final class RtAccel {
             compactedAccel.opacityMicromap = opacityMicromap;
             PreparedBlas compacted = PreparedBlas.terrain(compactedAccel, source.scratch, null,
                     source.vertexAddr, source.indexAddr, source.maxVertex, source.terrainTris,
-                    opacityMicromap, source.label);
+                    opacityMicromap, source.label, TerrainBlasPolicy.COMPACT);
             return new PreparedTerrainCompaction(source, compacted);
         } catch (Throwable t) {
             if (compactedAccel != null) {
@@ -746,6 +780,9 @@ public final class RtAccel {
             VkAccelerationStructureDeviceAddressInfoKHR addrInfo = VkAccelerationStructureDeviceAddressInfoKHR.calloc(stack)
                     .sType$Default().accelerationStructure(handle);
             long deviceAddress = vkGetAccelerationStructureDeviceAddressKHR(vk, addrInfo);
+            if (deviceAddress == 0L) {
+                throw new IllegalStateException(label + " returned a null BLAS device address");
+            }
             return new RtAccel(vk, handle, deviceAddress, backing, ownsBacking, opacityMicromap);
         } catch (Throwable t) {
             vkDestroyAccelerationStructureKHR(vk, handle, null);
@@ -884,12 +921,14 @@ public final class RtAccel {
 
     private static VkAccelerationStructureBuildSizesInfoKHR queryTerrainBlasSizes(VkDevice vk, MemoryStack stack, RtBuffer positions,
                                                                                   RtBuffer indices, int vertexCount, int[] bucketTris,
-                                                                                  OpacityMicromap opacityMicromap, boolean compact) {
+                                                                                  OpacityMicromap opacityMicromap,
+                                                                                  TerrainBlasPolicy policy) {
         VkAccelerationStructureGeometryKHR.Buffer geom = terrainGeometries(stack, positions.deviceAddress, indices.deviceAddress,
                 vertexCount, bucketTris, opacityMicromap);
         VkAccelerationStructureBuildGeometryInfoKHR.Buffer build = VkAccelerationStructureBuildGeometryInfoKHR.calloc(1, stack);
         build.sType$Default().type(VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR)
-                .flags(buildFlags(false) | (compact ? VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_COMPACTION_BIT_KHR : 0))
+                .flags(buildFlags(false) | (policy.usesCompactionQueries()
+                        ? VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_COMPACTION_BIT_KHR : 0))
                 .mode(VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR).geometryCount(geom.capacity()).pGeometries(geom);
         java.nio.IntBuffer maxPrims = stack.mallocInt(geom.capacity());
         for (int tris : bucketTris) {
@@ -909,13 +948,17 @@ public final class RtAccel {
      * the material bucket. Entities use {@link #SBT_ENTITY_OFFSET}; their fixed geometry index then selects
      * opaque or any-hit; the remaining two records in each four-record entity SBT block stay unused.
      */
-    public record Instance(float[] transform3x4, long blasDeviceAddress, int customIndex, int mask, int sbtRecordOffset) {
-        public Instance(float[] transform3x4, long blasDeviceAddress, int customIndex) {
-            this(transform3x4, blasDeviceAddress, customIndex, 0xFF, 0);
+    public record Instance(float[] transform3x4, RtAccel blas, int customIndex, int mask, int sbtRecordOffset) {
+        public Instance(float[] transform3x4, RtAccel blas, int customIndex) {
+            this(transform3x4, blas, customIndex, 0xFF, 0);
         }
 
-        public Instance(float[] transform3x4, long blasDeviceAddress, int customIndex, int mask) {
-            this(transform3x4, blasDeviceAddress, customIndex, mask, 0);
+        public Instance(float[] transform3x4, RtAccel blas, int customIndex, int mask) {
+            this(transform3x4, blas, customIndex, mask, 0);
+        }
+
+        public long blasDeviceAddress() {
+            return blas == null ? 0L : blas.deviceAddress;
         }
     }
 
@@ -926,13 +969,16 @@ public final class RtAccel {
         private final RtBuffer scratch;
         private final int instanceCount;
         private final String label;
+        private final TlasRing.Slot ringSlot;
 
-        private PreparedTlas(RtAccel accel, RtBuffer instanceBuffer, RtBuffer scratch, int instanceCount, String label) {
+        private PreparedTlas(RtAccel accel, RtBuffer instanceBuffer, RtBuffer scratch, int instanceCount,
+                             String label, TlasRing.Slot ringSlot) {
             this.accel = accel;
             this.instanceBuffer = instanceBuffer;
             this.scratch = scratch;
             this.instanceCount = instanceCount;
             this.label = label;
+            this.ringSlot = ringSlot;
         }
     }
 
@@ -940,10 +986,9 @@ public final class RtAccel {
      * Reusable per-frame TLAS resources. Allocating the instance buffer + AS backing + scratch fresh every
      * frame (and defer-destroying them 4 frames later) occasionally hit VMA's slow path — a fresh
      * VkDeviceMemory block allocation + map — observed as rare 20–50ms prepareTlas spikes. The ring keeps
-     * {@value #RING} slots, each sized for a capacity instance count, and rebuilds the same AS in place: a
-     * slot is reused every {@value #RING} frames (the established frames-in-flight horizon), so its
-     * previous build/trace is off all queues before the instance buffer is rewritten. A slot is recreated
-     * only when the instance count outgrows its capacity.
+     * {@value #RING} slots, each sized for a capacity instance count, and rebuilds the same AS in place.
+     * Reuse is guarded by the graphics-use timeline rather than frame age, so startup backlog cannot race
+     * an older build/trace. A slot is recreated only when the instance count outgrows its capacity.
      */
     public static final class TlasRing {
         private static final int RING = 4;           // = the frames-in-flight KEEP_FRAMES horizon
@@ -957,6 +1002,7 @@ public final class RtAccel {
             RtBuffer instanceBuffer;
             RtBuffer scratch;
             int capacity;
+            long lastGraphicsUse;
 
             void destroy() {
                 accel.destroy();
@@ -981,16 +1027,27 @@ public final class RtAccel {
      * rebuilt in place — BUILD mode overwrites). Do NOT call {@link PreparedTlas#destroyAll} on the
      * result: the ring owns the resources.
      */
-    public static PreparedTlas prepareTlas(RtContext ctx, List<Instance> instances, TlasRing ring) {
-        return prepareTlas(ctx, instances, List.of(), ring);
+    public static PreparedTlas prepareTlas(RtContext ctx, List<Instance> instances, TlasRing ring,
+                                           long graphicsUse) {
+        return prepareTlas(ctx, instances, List.of(), ring, graphicsUse);
     }
 
     /** Pack terrain and dynamic instances as two contiguous ranges without a composite-list get per item. */
     public static PreparedTlas prepareTlas(RtContext ctx, List<Instance> baseInstances,
-                                           List<Instance> dynamicInstances, TlasRing ring) {
+                                           List<Instance> dynamicInstances, TlasRing ring, long graphicsUse) {
         int baseCount = baseInstances.size();
         int count = Math.addExact(baseCount, dynamicInstances.size());
         TlasRing.Slot slot = ring.slots[ring.cursor];
+        // Frame age is not GPU completion. Startup can leave more than RING submissions in flight; wait
+        // before rewriting this instance buffer, rebuilding its AS, or destroying it during a resize.
+        if (slot != null) {
+            long waitStart = RtFrameStats.FRAME.startStage();
+            try {
+                ctx.gpuExecutor().waitForGraphicsValue(slot.lastGraphicsUse);
+            } finally {
+                RtFrameStats.FRAME.endStage("frame.prepareTlas.wait", waitStart);
+            }
+        }
         if (slot == null || count > slot.capacity) {
             // Outgrown (or first use). The slot's previous use is RING frames behind — off all queues by
             // the same convention the old per-frame deferred free relied on — so immediate destroy is safe.
@@ -1001,29 +1058,63 @@ public final class RtAccel {
             ring.slots[ring.cursor] = slot;
         }
         ring.cursor = (ring.cursor + 1) % TlasRing.RING;
-
-        writeTlasInstances(baseInstances, slot.instanceBuffer.mapped, 0);
-        writeTlasInstances(dynamicInstances, slot.instanceBuffer.mapped, baseCount);
-        if (count > 0) {
-            slot.instanceBuffer.flush(0L, (long) count * VkAccelerationStructureInstanceKHR.SIZEOF);
+        long basePackStart = RtFrameStats.FRAME.startStage();
+        try {
+            writeTlasInstances(baseInstances, slot.instanceBuffer.mapped, 0);
+        } finally {
+            RtFrameStats.FRAME.endStage("frame.prepareTlas.packBase", basePackStart);
         }
+        long dynamicPackStart = RtFrameStats.FRAME.startStage();
+        try {
+            writeTlasInstances(dynamicInstances, slot.instanceBuffer.mapped, baseCount);
+        } finally {
+            RtFrameStats.FRAME.endStage("frame.prepareTlas.packDynamic", dynamicPackStart);
+        }
+        if (count > 0) {
+            long flushStart = RtFrameStats.FRAME.startStage();
+            try {
+                slot.instanceBuffer.flush(0L, (long) count * VkAccelerationStructureInstanceKHR.SIZEOF);
+            } finally {
+                RtFrameStats.FRAME.endStage("frame.prepareTlas.flush", flushStart);
+            }
+        }
+        slot.lastGraphicsUse = graphicsUse;
         return new PreparedTlas(slot.accel, slot.instanceBuffer, slot.scratch, count,
-                "frame TLAS " + count + " instances");
+                "frame TLAS " + count + " instances", slot);
     }
 
-    // Wrap the mapped Vulkan array in LWJGL structs so its generated accessors own the native ABI/bitfields.
+    /** Extend a retained TLAS slot's lifetime when an offline snapshot is traced without rebuilding it. */
+    public static void markTlasUsed(PreparedTlas tlas, long graphicsUse) {
+        if (tlas.ringSlot != null) {
+            tlas.ringSlot.lastGraphicsUse = Math.max(tlas.ringSlot.lastGraphicsUse, graphicsUse);
+        }
+    }
+
+    // Pack directly into the mapped Vulkan array to keep this per-instance TLAS hot path allocation-free.
     private static void writeTlasInstances(List<Instance> instances, long mapped, int firstInstance) {
-        VkAccelerationStructureInstanceKHR.Buffer records = VkAccelerationStructureInstanceKHR.create(
-                mapped + (long) firstInstance * VkAccelerationStructureInstanceKHR.SIZEOF, instances.size());
+        final int facingCullDisable = 0x00000001;
         for (int i = 0, count = instances.size(); i < count; i++) {
             Instance instance = instances.get(i);
-            VkAccelerationStructureInstanceKHR record = records.get(i);
-            record.transform().matrix().put(instance.transform3x4());
-            record.instanceCustomIndex(instance.customIndex())
-                    .mask(instance.mask())
-                    .instanceShaderBindingTableRecordOffset(instance.sbtRecordOffset())
-                    .flags(VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR)
-                    .accelerationStructureReference(instance.blasDeviceAddress());
+            RtAccel blas = instance.blas();
+            if (blas == null || instance.blasDeviceAddress() == 0L) {
+                throw new IllegalStateException("TLAS instance " + (firstInstance + i)
+                        + " has a null BLAS device address");
+            }
+            if (blas.destroyed) {
+                throw new IllegalStateException("TLAS instance " + (firstInstance + i)
+                        + " references a non-live BLAS address 0x"
+                        + Long.toHexString(instance.blasDeviceAddress()));
+            }
+            long dst = mapped + (long) (firstInstance + i) * VkAccelerationStructureInstanceKHR.SIZEOF;
+            float[] transform = instance.transform3x4();
+            for (int component = 0; component < 12; component++) {
+                MemoryUtil.memPutFloat(dst + (long) component * Float.BYTES, transform[component]);
+            }
+            MemoryUtil.memPutInt(dst + 48L,
+                    (instance.customIndex() & 0x00FF_FFFF) | ((instance.mask() & 0xFF) << 24));
+            MemoryUtil.memPutInt(dst + 52L,
+                    (instance.sbtRecordOffset() & 0x00FF_FFFF) | (facingCullDisable << 24));
+            MemoryUtil.memPutLong(dst + 56L, instance.blasDeviceAddress());
         }
     }
 
@@ -1195,8 +1286,10 @@ public final class RtAccel {
     /** Record a terrain section's two-geometry (opaque + alpha) BUILD. Always a fresh BUILD — terrain
      *  sections are never refit in place (re-extraction allocates a new BLAS), so no UPDATE branch. */
     private static void recordTerrainBlasBuild(RtContext ctx, VkCommandBuffer cmd, MemoryStack stack, PreparedBlas b) {
-        boolean compact = b.requestsCompaction();
-        if (compact) {
+        if (b.terrainPolicy.usesCompactionQueries() && b.accel.compactionQueryPool == 0L) {
+            throw new IllegalStateException("terrain BLAS has no compaction query pool");
+        }
+        if (b.terrainPolicy.usesCompactionQueries()) {
             VK10.vkCmdResetQueryPool(cmd, b.accel.compactionQueryPool, 0, 1);
         }
         if (b.opacityMicromap != null) {
@@ -1207,7 +1300,8 @@ public final class RtAccel {
                 b.maxVertex + 1, b.terrainTris, b.opacityMicromap);
         VkAccelerationStructureBuildGeometryInfoKHR.Buffer build = VkAccelerationStructureBuildGeometryInfoKHR.calloc(1, stack);
         build.sType$Default().type(VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR)
-                .flags(buildFlags(false) | (compact ? VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_COMPACTION_BIT_KHR : 0))
+                .flags(buildFlags(false) | (b.terrainPolicy.usesCompactionQueries()
+                        ? VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_COMPACTION_BIT_KHR : 0))
                 .mode(VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR)
                 .geometryCount(geom.capacity()).pGeometries(geom)
                 .dstAccelerationStructure(b.accel.handle);
@@ -1215,7 +1309,7 @@ public final class RtAccel {
         VkAccelerationStructureBuildRangeInfoKHR.Buffer range = terrainBuildRanges(stack, b.terrainTris);
         PointerBuffer ppRange = stack.mallocPointer(1).put(0, range.address());
         vkCmdBuildAccelerationStructuresKHR(cmd, build, ppRange);
-        if (compact) {
+        if (b.terrainPolicy.usesCompactionQueries()) {
             accelerationStructureBuildBarrier(cmd, stack);
             vkCmdWriteAccelerationStructuresPropertiesKHR(cmd, stack.longs(b.accel.handle),
                     VK_QUERY_TYPE_ACCELERATION_STRUCTURE_COMPACTED_SIZE_KHR,

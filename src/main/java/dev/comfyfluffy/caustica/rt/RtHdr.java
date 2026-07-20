@@ -4,6 +4,7 @@ import java.nio.IntBuffer;
 
 import org.lwjgl.system.MemoryStack;
 import org.lwjgl.vulkan.KHRSurface;
+import org.lwjgl.vulkan.VK10;
 import org.lwjgl.vulkan.VkPhysicalDevice;
 import org.lwjgl.vulkan.VkSurfaceFormatKHR;
 
@@ -40,7 +41,23 @@ public final class RtHdr {
     private static final int CS_PASS_THROUGH = 1000104013;
     private static final int CS_EXTENDED_SRGB_NONLINEAR = 1000104014;
 
+    public static final int SDR_COLOR_SPACE = CS_SRGB_NONLINEAR;
+    public static final int HDR10_ST2084_COLOR_SPACE = CS_HDR10_ST2084;
+
     private static volatile boolean surfaceLogged;
+    private static volatile boolean requested;
+    private static volatile boolean staged;
+    private static volatile boolean stagedRequested;
+    private static volatile boolean stagedEffective;
+    private static volatile int stagedFormat;
+    private static volatile int stagedColorSpace = CS_SRGB_NONLINEAR;
+    private static volatile int stagedSdrFormat;
+    private static volatile int stagedSdrColorSpace = CS_SRGB_NONLINEAR;
+    private static volatile String stagedFallbackReason = "";
+    private static volatile boolean effectiveHdrSwapchain;
+    private static volatile int selectedColorSpace = CS_SRGB_NONLINEAR;
+    private static volatile int selectedFormat;
+    private static volatile String fallbackReason = "";
 
     private RtHdr() {
     }
@@ -48,11 +65,143 @@ public final class RtHdr {
     /** Logs the resolved HDR config once (cheap; safe to call repeatedly — guarded by the surface log). */
     public static void logConfig() {
         CausticaMod.LOGGER.info(
-                "HDR config: enabled={} paperWhite={}nits peak={}nits -> {} (headroom={})",
-                CausticaConfig.Rt.Hdr.enabled(),
+                "HDR config: requested={} effectiveSwapchain={} format={} colorSpace={} "
+                        + "tonemap={} paperWhite={}nits peak={}nits (headroom={})",
+                requested(),
+                effective(), selectedFormat, colorSpaceName(selectedColorSpace),
+                CausticaConfig.Rt.Hdr.TONEMAP_MODE.get(),
                 CausticaConfig.Rt.Hdr.PAPER_WHITE_NITS.value(), CausticaConfig.Rt.Hdr.PEAK_NITS.value(),
-                CausticaConfig.Rt.Hdr.enabled() ? "HDR display path active" : "SDR display path",
                 CausticaConfig.Rt.Hdr.headroom());
+    }
+
+    /** Runtime truth: only an actually selected, supported HDR10/PQ swapchain enables PQ rendering. */
+    public static boolean effective() {
+        return effectiveHdrSwapchain;
+    }
+
+    public static boolean requested() {
+        boolean value = CausticaConfig.Rt.Hdr.enabled();
+        requested = value;
+        return value;
+    }
+
+    /** Stage a selection while configure is in progress; it is not runtime truth until commit. */
+    public static void stageSwapchainSelection(boolean request, int format, int colorSpace,
+            int sdrFormat, int sdrColorSpace, String reason) {
+        requested = request;
+        staged = true;
+        stagedRequested = request;
+        stagedFormat = format;
+        stagedColorSpace = colorSpace;
+        stagedEffective = effectiveHdrForSelection(request, format, colorSpace);
+        stagedSdrFormat = sdrFormat;
+        stagedSdrColorSpace = sdrColorSpace;
+        stagedFallbackReason = reason == null ? "" : reason;
+    }
+
+    public static void stageSdrFallback(String reason) {
+        if (staged) {
+            stagedFormat = stagedSdrFormat;
+            stagedColorSpace = stagedSdrColorSpace;
+            stagedEffective = false;
+            stagedFallbackReason = reason == null ? "" : reason;
+        }
+    }
+
+    /** Commit only after Minecraft has successfully created and enumerated the new swapchain. */
+    public static void commitSwapchainSelection(int actualFormat, int actualColorSpace, long generation) {
+        selectedFormat = actualFormat;
+        selectedColorSpace = actualColorSpace;
+        effectiveHdrSwapchain = effectiveHdrForSelection(stagedRequested, actualFormat, actualColorSpace);
+        fallbackReason = effectiveHdrSwapchain ? "" : stagedFallbackReason;
+        requested = stagedRequested;
+        staged = false;
+        CausticaMod.LOGGER.info(
+                "HDR swapchain generation {} committed: requested={} effective={} format={} colorSpace={} fallback={}",
+                generation, requested, effectiveHdrSwapchain, actualFormat, colorSpaceName(actualColorSpace), fallbackReason);
+    }
+
+    public static void clearSwapchainSelection() {
+        clearStagedSelection();
+        effectiveHdrSwapchain = false;
+        selectedFormat = 0;
+        selectedColorSpace = CS_SRGB_NONLINEAR;
+        fallbackReason = "";
+    }
+
+    public static void failSwapchainConfiguration(String reason) {
+        clearSwapchainSelection();
+        fallbackReason = reason == null ? "swapchain configure failed" : reason;
+    }
+
+    public static void clearStagedSelection() {
+        staged = false;
+        stagedRequested = false;
+        stagedEffective = false;
+        stagedFormat = 0;
+        stagedColorSpace = CS_SRGB_NONLINEAR;
+        stagedSdrFormat = 0;
+        stagedSdrColorSpace = CS_SRGB_NONLINEAR;
+        stagedFallbackReason = "";
+    }
+
+    public static boolean staged() {
+        return staged;
+    }
+
+    public static boolean stagedEffective() {
+        return stagedEffective;
+    }
+
+    public static boolean stagedRequested() {
+        return stagedRequested;
+    }
+
+    public static int stagedSdrFormat() {
+        return stagedSdrFormat;
+    }
+
+    public static int stagedSdrColorSpace() {
+        return stagedSdrColorSpace;
+    }
+
+    public static int format() {
+        return selectedFormat;
+    }
+
+    public static int colorSpace() {
+        return selectedColorSpace;
+    }
+
+    public static String fallbackReason() {
+        return fallbackReason;
+    }
+
+    public static String statusDescription() {
+        String fallback = fallbackReason.isEmpty() ? "none" : fallbackReason;
+        return "HDR requested=" + requested() + ", effective=" + effective()
+                + ", format=" + selectedFormat + ", colorSpace=" + colorSpaceName(selectedColorSpace)
+                + ", SDR fallback=" + fallback;
+    }
+
+    /** Every surface-format scan starts from SDR; a previous PQ selection is never reusable evidence. */
+    public static int resetColorSpaceForSurfaceScan(int ignoredPreviousColorSpace) {
+        return CS_SRGB_NONLINEAR;
+    }
+
+    public static boolean isSupportedPqFormat(int format) {
+        return format == VK10.VK_FORMAT_A2B10G10R10_UNORM_PACK32
+                || format == VK10.VK_FORMAT_A2R10G10B10_UNORM_PACK32;
+    }
+
+    public static boolean effectiveHdrForSelection(boolean request, int format, int colorSpace) {
+        return request && colorSpace == CS_HDR10_ST2084 && isSupportedPqFormat(format);
+    }
+
+    public static boolean shouldRetrySdr(int result, boolean pqWasStaged) {
+        return pqWasStaged && result != VK10.VK_SUCCESS
+                && result != VK10.VK_ERROR_DEVICE_LOST
+                && result != KHRSurface.VK_ERROR_SURFACE_LOST_KHR;
     }
 
     /**

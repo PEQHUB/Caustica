@@ -5,7 +5,6 @@ package dev.comfyfluffy.caustica.rt.terrain;
 import com.mojang.blaze3d.vertex.QuadInstance;
 import com.mojang.blaze3d.vertex.VertexConsumer;
 import dev.comfyfluffy.caustica.CausticaConfig;
-import dev.comfyfluffy.caustica.CausticaMod;
 import dev.comfyfluffy.caustica.rt.RtComposite;
 import dev.comfyfluffy.caustica.rt.RtContext;
 import dev.comfyfluffy.caustica.rt.RtDebugLabels;
@@ -48,15 +47,17 @@ import net.minecraft.world.level.block.RenderShape;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.material.FluidState;
 import org.joml.Vector3fc;
+import org.lwjgl.system.MemoryUtil;
 
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Set;
-import java.util.TreeMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.LongAdder;
+import java.util.concurrent.atomic.AtomicLong;
 
 import static dev.comfyfluffy.caustica.rt.terrain.RtTerrainMesher.WORKER_TESS;
 import static dev.comfyfluffy.caustica.rt.terrain.RtTerrainMesher.buildCpuSection;
@@ -92,6 +93,18 @@ import dev.comfyfluffy.caustica.rt.terrain.RtSectionTable.SectionGeom;
  * are retired against graphics timeline completion (no {@code waitIdle} on the hot path).
  */
 public final class RtTerrain {
+    private static volatile boolean benchmarkTelemetryEnabled;
+    private static volatile long benchmarkStartedNanos;
+    private static final AtomicInteger benchmarkWorkerActive = new AtomicInteger();
+    private static final LongAdder benchmarkDispatched = new LongAdder();
+    private static final LongAdder benchmarkCpuCompleted = new LongAdder();
+    private static final LongAdder benchmarkGpuCompleted = new LongAdder();
+    private static final LongAdder benchmarkPublished = new LongAdder();
+    private static final LongAdder benchmarkEmptyCompleted = new LongAdder();
+    private static final LongAdder benchmarkNeighborBlocked = new LongAdder();
+    private static final LongAdder benchmarkSnapshotNanos = new LongAdder();
+    private static final LongAdder benchmarkCpuNanos = new LongAdder();
+    private static final LongAdder benchmarkGpuNanos = new LongAdder();
     // The render thread snapshots and publishes; workers mesh, allocate/fill, prepare BLAS/OMM objects,
     // and enqueue builds. The streaming pass is bounded so render-thread bookkeeping stays flat.
     private static int asyncDispatchPerPass() {
@@ -108,16 +121,11 @@ public final class RtTerrain {
         return CausticaConfig.Rt.Terrain.MAX_INFLIGHT_SECTIONS.value();
     }
 
-    private static final int SECTION_ENTRY_BYTES = 32; // {u64 primAddr, u64 uvAddr, u32 triBase[4]}
-    private static final long NO_TESS_TOKEN = Long.MIN_VALUE;
     private static final int NO_MISSING_INDEX = -1;
     private static final long NO_DIRTY_GROUP = 0L;
     // If no render frame has driven a streaming pass for this long, the 20 TPS tick takes over (loading
     // screens / hidden window — states where render-driven streaming has stopped).
     private static final long STREAM_FALLBACK_AFTER_NANOS = 200_000_000L;
-    // Light edits and streaming completions can arrive every frame. Collapse them behind the currently
-    // building generation and cap full hierarchy snapshots/uploads without adding noticeable edit latency.
-    private static final long LIGHT_HIERARCHY_UPDATE_INTERVAL_NANOS = 50_000_000L;
 
     private static int sectionTableInitialCapacity() {
         return CausticaConfig.Rt.Terrain.SECTION_TABLE_INITIAL_CAPACITY.value();
@@ -154,9 +162,11 @@ public final class RtTerrain {
     // frames, so evicted geometry waits here until the next publish pass retires it.
     private final List<SectionGeom> removed = new ArrayList<>();
     private final List<PreparedSection> prepared = new ArrayList<>();
-    // Worker/build bookkeeping. `inFlight` maps a dispatched section key to a monotonic token; a completed
-    // task whose token no longer matches is discarded. The active-task barrier spans worker + GPU lifetime.
-    private final Long2LongOpenHashMap inFlight = new Long2LongOpenHashMap();
+    private final IdentityHashMap<PreparedSection, TerrainTaskTracker.Ticket> publicationTickets =
+            new IdentityHashMap<>();
+    // Publish identity and admission ownership are separate: cancellation revokes a ticket immediately,
+    // while TerrainTaskTracker retains its capacity until the terminal result is drained.
+    private final TerrainTaskTracker taskTracker = new TerrainTaskTracker();
     private final Long2LongOpenHashMap inFlightDirtyGroup = new Long2LongOpenHashMap();
     private final Long2ObjectOpenHashMap<DirtyGroup> dirtyGroups = new Long2ObjectOpenHashMap<>();
     private final ConcurrentLinkedQueue<SectionResult> completedBuilds = new ConcurrentLinkedQueue<>();
@@ -166,6 +176,12 @@ public final class RtTerrain {
     private volatile long terrainEpoch = 1L;
     private long buildToken;
     private long dirtyGroupSeq;
+    private final AtomicLong cancelledTasks = new AtomicLong();
+    private final AtomicLong discardedBuilds = new AtomicLong();
+    private final AtomicLong buildsSubmitted = new AtomicLong();
+    private final AtomicLong buildsSubmittedSinceSample = new AtomicLong();
+    private final AtomicLong buildsPublished = new AtomicLong();
+    private volatile long lastBuildLatencyNanos;
     private final RtSectionTable table = new RtSectionTable();
     private boolean ready;
     // Full-residency invalidation requested off the render thread. Wired to Fabric's
@@ -173,17 +189,14 @@ public final class RtTerrain {
     // render-distance change, F3+A). Consumed in tick(), where the RT context is available.
     private volatile boolean fullClearRequested;
     private volatile boolean dirtyPending;
+    // Resource reloads replace the model/material epoch asynchronously. Quiescing drains the old epoch,
+    // while this gate prevents the next client tick or render frame from immediately starting it again.
+    private volatile boolean resourceReloadPaused;
     private boolean noWorldClearApplied;
     // Rebase origin (player block at the last TLAS rebuild) for the instance transforms + ray camOffset.
     public int blockX;
     public int blockY;
     public int blockZ;
-    /** Coalesced asynchronous, atomically published light hierarchy and section-sized proposal grid. */
-    private final RtLightGridManager lightGrid = new RtLightGridManager();
-    /** Sorted light-only snapshot, updated with section publication instead of rescanning all geometry. */
-    private final TreeMap<Integer, RtLightHierarchy.SectionInput> lightSections = new TreeMap<>();
-    private boolean lightHierarchyDirty;
-    private long lastLightHierarchyRequestNanos;
     private boolean windowValid;
     private int windowPcx;
     private int windowPcz;
@@ -197,7 +210,6 @@ public final class RtTerrain {
     private RtTerrain() {
         missingIndex.defaultReturnValue(NO_MISSING_INDEX);
         queuedDirtyGroup.defaultReturnValue(NO_DIRTY_GROUP);
-        inFlight.defaultReturnValue(NO_TESS_TOKEN);
         inFlightDirtyGroup.defaultReturnValue(NO_DIRTY_GROUP);
     }
 
@@ -234,78 +246,31 @@ public final class RtTerrain {
         return table.address();
     }
 
-    /** RIS-sampled global light buffer device address, or 0 while no lights are published. */
-    public long lightBufferAddress() {
-        return lightGrid.published().lightAddress();
+    /** Whether an immutable published terrain table is available for offline capture. */
+    public static boolean hasPublishedSnapshot() {
+        return INSTANCE.ready && INSTANCE.table.instances != null && INSTANCE.table.buffer != null;
     }
 
-    /** Power-weighted light alias table device address, or 0 for the shader's uniform fallback. */
-    public long lightAliasBufferAddress() {
-        return lightGrid.published().globalAliasAddress();
+    /** Stable debug-bridge snapshot; counters are lifetime totals and latency is host-observed. */
+    public static Status status() {
+        RtTerrain terrain = INSTANCE;
+        RtContext ctx = RtContext.currentOrNull();
+        return new Status(terrain.taskTracker.outstanding(), maxInflight(), terrain.missing.size(),
+                terrain.reextract.size(), terrain.resident.size(), terrain.cancelledTasks.get(),
+                terrain.discardedBuilds.get(), ctx == null ? 0 : ctx.gpuExecutor().queuedBuilds(),
+                terrain.buildsSubmitted.get(), terrain.buildsPublished.get(), terrain.lastBuildLatencyNanos,
+                RtAccel.activeTerrainCompactionQueries());
     }
 
-    public long lightLocalAliasBufferAddress() {
-        return lightGrid.published().localAliasAddress();
-    }
-
-    public float lightInvGlobalPowerSum() {
-        return lightGrid.published().invGlobalPowerSum();
-    }
-
-    public long lightGridCellBufferAddress() {
-        return lightGrid.published().cellAddress();
-    }
-
-    public long lightGridSpanBufferAddress() {
-        return lightGrid.published().spanAddress();
-    }
-
-    public int lightGridOriginX() {
-        RtLightGridManager.PublishedState hierarchy = lightGrid.published();
-        return hierarchy.originX() + hierarchy.rebaseX() - blockX;
-    }
-
-    public int lightGridOriginY() {
-        RtLightGridManager.PublishedState hierarchy = lightGrid.published();
-        return hierarchy.originY() + hierarchy.rebaseY() - blockY;
-    }
-
-    public int lightGridOriginZ() {
-        RtLightGridManager.PublishedState hierarchy = lightGrid.published();
-        return hierarchy.originZ() + hierarchy.rebaseZ() - blockZ;
-    }
-
-    public int lightRebaseOffsetX() {
-        return lightGrid.published().rebaseX() - blockX;
-    }
-
-    public int lightRebaseOffsetY() {
-        return lightGrid.published().rebaseY() - blockY;
-    }
-
-    public int lightRebaseOffsetZ() {
-        return lightGrid.published().rebaseZ() - blockZ;
-    }
-
-    public int lightGridDimX() {
-        return lightGrid.published().dimX();
-    }
-
-    public int lightGridDimY() {
-        return lightGrid.published().dimY();
-    }
-
-    public int lightGridDimZ() {
-        return lightGrid.published().dimZ();
-    }
-
-    /** Number of compact 64-byte records in the published light buffer. */
-    public int lightCount() {
-        return lightGrid.published().lightCount();
+    public record Status(int outstandingTasks, int outstandingLimit, int queuedMissing, int queuedReextract,
+                         int residentSections, long cancelledTasks, long discardedBuilds, int gpuQueueDepth,
+                         long buildsSubmitted, long buildsPublished, long lastBuildLatencyNanos,
+                         int activeCompactionQueries) {
     }
 
     /** Per-tick residency update: window sync + dirty drain (plus the streaming fallback, see {@link #frame}). */
     public static void update(RtContext ctx) {
+        if (INSTANCE.resourceReloadPaused) return;
         INSTANCE.tick(ctx);
     }
 
@@ -314,11 +279,37 @@ public final class RtTerrain {
      * and dispatch immutable snapshots to workers, bounded by configured per-pass counts.
      */
     public static void frame(RtContext ctx) {
-        if (RtMaterialRegistry.INSTANCE.isReady()) INSTANCE.frameStream(ctx);
+        if (!INSTANCE.resourceReloadPaused && RtMaterialRegistry.INSTANCE.isReady()) INSTANCE.frameStream(ctx);
     }
 
     public static void shutdown(RtContext ctx) {
         INSTANCE.clear(ctx, true);
+        INSTANCE.resourceReloadPaused = false;
+    }
+
+    /**
+     * Stop and join every terrain worker/build before a resource reload destroys descriptor-owned images,
+     * SHARC buffers, or ray pipelines. A bare {@code vkDeviceWaitIdle} is not a submission barrier: the
+     * executor thread can submit immediately after it returns. The blocking clear advances the terrain
+     * epoch, joins CPU work, drains accepted compute jobs, waits the device, and frees the old residency;
+     * the same sections must be re-extracted for the new material atlas anyway.
+     */
+    public static void pauseForResourceReload() {
+        INSTANCE.resourceReloadPaused = true;
+    }
+
+    public static void quiesceForResourceReload(RtContext ctx) {
+        INSTANCE.resourceReloadPaused = true;
+        INSTANCE.clear(ctx, true);
+    }
+
+    /** Resume streaming only after the replacement material registry and atlas descriptors are bound. */
+    public static void resumeAfterResourceReload() {
+        INSTANCE.resourceReloadPaused = false;
+    }
+
+    static boolean isResourceReloadPaused() {
+        return INSTANCE.resourceReloadPaused;
     }
 
     /**
@@ -365,6 +356,55 @@ public final class RtTerrain {
     public static void requestFullClear() {
         RtTerrainOmm.clearCache();
         INSTANCE.fullClearRequested = true;
+    }
+
+    /** Enable zero-persistence benchmark counters and start a fresh RT-residency run. */
+    public static void setBenchmarkTelemetryEnabled(boolean enabled) {
+        benchmarkTelemetryEnabled = enabled;
+        benchmarkWorkerActive.set(0);
+        benchmarkDispatched.reset();
+        benchmarkCpuCompleted.reset();
+        benchmarkGpuCompleted.reset();
+        benchmarkPublished.reset();
+        benchmarkEmptyCompleted.reset();
+        benchmarkNeighborBlocked.reset();
+        benchmarkSnapshotNanos.reset();
+        benchmarkCpuNanos.reset();
+        benchmarkGpuNanos.reset();
+        benchmarkStartedNanos = enabled ? System.nanoTime() : 0L;
+        if (enabled) requestFullClear();
+    }
+
+    /** Render-thread snapshot consumed by the opt-in file-backed benchmark bridge. */
+    public static StreamingStats streamingStats() {
+        RtTerrain t = INSTANCE;
+        int active;
+        synchronized (t.activeTaskLock) {
+            active = t.activeTasks;
+        }
+        int workers = benchmarkWorkerActive.get();
+        int completed = t.completedBuilds.size();
+        int inFlight = t.taskTracker.outstanding();
+        RtContext ctx = RtContext.currentOrNull();
+        int gpuQueued = ctx == null ? 0 : ctx.gpuExecutor().queuedBuilds();
+        return new StreamingStats(benchmarkTelemetryEnabled, benchmarkStartedNanos,
+                t.desired.size(), t.missing.size(), t.reextract.size(), inFlight, workers,
+                gpuQueued, completed, t.published.size(), t.empty.size(), t.resident.size(), active,
+                benchmarkDispatched.sum(), benchmarkCpuCompleted.sum(), benchmarkGpuCompleted.sum(),
+                benchmarkPublished.sum(), benchmarkEmptyCompleted.sum(), benchmarkNeighborBlocked.sum(),
+                benchmarkSnapshotNanos.sum(), benchmarkCpuNanos.sum(), benchmarkGpuNanos.sum());
+    }
+
+    public record StreamingStats(boolean enabled, long startedNanos, int desired, int missing,
+                                 int reextract, int inFlight, int workerActive, int gpuQueued,
+                                 int completedQueued, int published, int empty, int resident,
+                                 int activeTasks, long dispatchedTotal, long cpuCompletedTotal,
+                                 long gpuCompletedTotal, long publishedTotal, long emptyCompletedTotal,
+                                 long neighborBlockedTotal, long snapshotNanosTotal,
+                                 long cpuNanosTotal, long gpuNanosTotal) {
+        public int actionableBacklog() {
+            return missing + reextract + inFlight + completedQueued;
+        }
     }
 
     private void tick(RtContext ctx) {
@@ -428,7 +468,7 @@ public final class RtTerrain {
         // streamed recently — loading screen, no world rendering — drive it from here with the bigger
         // bounded fallback pass so the world still fills.
         if (System.nanoTime() - lastFrameStreamNanos > STREAM_FALLBACK_AFTER_NANOS) {
-            stream(ctx);
+            stream(ctx, true);
         }
     }
 
@@ -439,7 +479,7 @@ public final class RtTerrain {
             return;
         }
         lastFrameStreamNanos = System.nanoTime();
-        stream(ctx);
+        stream(ctx, false);
     }
 
     /**
@@ -447,7 +487,7 @@ public final class RtTerrain {
      * new section snapshots to the worker pool. Per-pass result and dispatch caps bound render-thread
      * work. Skips silently when there is nothing to do (no stats row).
      */
-    private void stream(RtContext ctx) {
+    private void stream(RtContext ctx, boolean fallback) {
         Minecraft mc = Minecraft.getInstance();
         ClientLevel level = mc.level;
         if (level == null || mc.player == null) {
@@ -455,8 +495,6 @@ public final class RtTerrain {
         }
         if (reextract.isEmpty() && missing.isEmpty()
                 && completedBuilds.isEmpty()
-                && !lightGrid.hasCompletions()
-                && !lightHierarchyDirty
                 && removed.isEmpty() && prepared.isEmpty()) {
             return;
         }
@@ -466,13 +504,22 @@ public final class RtTerrain {
         int pcx = pbx >> 4, pcz = pbz >> 4, psy = pby >> 4;
 
         ClientChunkCache chunkSource = level.getChunkSource();
+        long started = System.nanoTime();
+        int queued = missing.size() + reextract.size() + completedBuilds.size();
+        long budget = fallback
+                ? TerrainStreamBudget.fixedBudgetNanos(CausticaConfig.Rt.Terrain.STREAM_FALLBACK_BUDGET_MS.value())
+                : TerrainStreamBudget.adaptiveBudgetNanos(
+                        CausticaConfig.Rt.Terrain.STREAM_BUDGET_MS.value(),
+                        CausticaConfig.Rt.Terrain.STREAM_BUDGET_MAX_MS.value(), queued,
+                        taskTracker.outstanding(), maxInflight());
+        long deadline = TerrainStreamBudget.deadline(started, budget);
 
         // Drain completed GPU builds first — publication is visible fill progress, so it gets priority.
         try (RtFrameStats.Scope ignored = RtFrameStats.FRAME.stage("terrain.drainCompletion")) {
-            drainCompletedBuilds(ctx, prepared, removed, completionResultsPerPass());
+            drainCompletedBuilds(ctx, prepared, removed, completionResultsPerPass(), deadline);
         }
 
-        if (!removed.isEmpty() || !prepared.isEmpty()) {
+        if ((!removed.isEmpty() || !prepared.isEmpty()) && System.nanoTime() < deadline) {
             try (RtFrameStats.Scope ignored = RtFrameStats.FRAME.stage("terrain.publish")) {
                 applyBuildChanges(ctx, prepared, removed, shouldRebase(pbx, pby, pbz), pbx, pby, pbz);
                 removed.clear();
@@ -480,34 +527,37 @@ public final class RtTerrain {
             }
         }
 
-        // Publish only a fully uploaded hierarchy. Newer section changes supersede stale worker/upload
-        // results, while the previous complete generation remains active until this atomic swap.
-        if (lightGrid.hasCompletions()) {
-            try (RtFrameStats.Scope ignored = RtFrameStats.FRAME.stage("terrain.lightGridPublish")) {
-                lightGrid.publishReady(ctx);
-            }
-        }
-
         // Snapshot and dispatch a bounded number of new worker-owned section builds.
         try (RtFrameStats.Scope ignored = RtFrameStats.FRAME.stage("terrain.snapshotDispatch")) {
             DispatchContext dispatch = null;
-            int dispatchSlots = Math.min(asyncDispatchPerPass(), Math.max(0, maxInflight() - inFlight.size()));
-            if (dispatchSlots > 0 && !reextract.isEmpty()) {
+            int dispatchSlots = Math.min(asyncDispatchPerPass(),
+                    Math.max(0, maxInflight() - taskTracker.outstanding()));
+            if (dispatchSlots > 0 && !reextract.isEmpty() && System.nanoTime() < deadline) {
                 if (dispatch == null) {
                     dispatch = dispatchContext(ctx, level);
                 }
-                dispatchSlots -= dispatchReextract(dispatch, chunkSource, dispatchSlots, pcx, psy, pcz);
+                dispatchSlots -= dispatchReextract(dispatch, chunkSource, dispatchSlots, pcx, psy, pcz, deadline);
             }
-            if (dispatchSlots > 0 && !missing.isEmpty()) {
+            if (dispatchSlots > 0 && !missing.isEmpty() && System.nanoTime() < deadline) {
                 if (dispatch == null) {
                     dispatch = dispatchContext(ctx, level);
                 }
-                dispatchMissingBuilds(dispatch, chunkSource, dispatchSlots, pcx, psy, pcz);
+                dispatchMissingBuilds(dispatch, chunkSource, dispatchSlots, pcx, psy, pcz, deadline);
             }
         }
+        recordTerrainTelemetry(ctx);
+    }
 
-        flushLightHierarchyUpdate(ctx);
-
+    private void recordTerrainTelemetry(RtContext ctx) {
+        RtFrameStats.FRAME.count("terrainOutstandingTasks", taskTracker.outstanding());
+        RtFrameStats.FRAME.count("terrainOutstandingLimit", maxInflight());
+        RtFrameStats.FRAME.count("terrainQueuedMissing", missing.size());
+        RtFrameStats.FRAME.count("terrainQueuedReextract", reextract.size());
+        RtFrameStats.FRAME.count("terrainResidentSections", resident.size());
+        RtFrameStats.FRAME.count("terrainGpuQueueDepth", ctx.gpuExecutor().queuedBuilds());
+        RtFrameStats.FRAME.count("terrainBuildsSubmitted", buildsSubmittedSinceSample.getAndSet(0L));
+        RtFrameStats.FRAME.count("terrainBuildLatencyNanos", lastBuildLatencyNanos);
+        RtFrameStats.FRAME.count("terrainActiveCompactionQueries", RtAccel.activeTerrainCompactionQueries());
     }
 
     private void syncDesiredWindow(ClientChunkCache chunkSource, int pcx, int psy, int pcz,
@@ -714,7 +764,7 @@ public final class RtTerrain {
     }
 
     private boolean enqueueMissingIfNeeded(long key) {
-        if (resident.containsKey(key) || empty.contains(key) || inFlight.containsKey(key)) {
+        if (resident.containsKey(key) || empty.contains(key) || taskTracker.containsCurrent(key)) {
             return false;
         }
         if (missingIndex.get(key) != NO_MISSING_INDEX) {
@@ -727,7 +777,7 @@ public final class RtTerrain {
     }
 
     private boolean enqueueMissing(long key, long dirtyGroup) {
-        if (resident.containsKey(key) || empty.contains(key) || inFlight.containsKey(key)) {
+        if (resident.containsKey(key) || empty.contains(key) || taskTracker.containsCurrent(key)) {
             return false;
         }
         // `missing` is unsorted; dispatch ranks it directly by distance from the player.
@@ -781,22 +831,26 @@ public final class RtTerrain {
     }
 
     private void invalidateInFlight(long key) {
-        long token = inFlight.remove(key);
+        TerrainTaskTracker.Ticket ticket = taskTracker.cancelCurrent(key);
         long groupId = inFlightDirtyGroup.remove(key);
-        if (token != NO_TESS_TOKEN && groupId != NO_DIRTY_GROUP) {
+        if (ticket != null) {
+            cancelledTasks.incrementAndGet();
+            RtFrameStats.FRAME.count("terrainCancelledTasks", 1);
+        }
+        if (ticket != null && groupId != NO_DIRTY_GROUP) {
             cancelDirtyGroup(groupId);
         }
     }
 
     private void removeInFlightNotIn(LongOpenHashSet keep) {
-        for (LongIterator it = inFlight.keySet().iterator(); it.hasNext(); ) {
+        LongArrayList cancelled = taskTracker.cancelNotIn(keep);
+        cancelledTasks.addAndGet(cancelled.size());
+        RtFrameStats.FRAME.count("terrainCancelledTasks", cancelled.size());
+        for (LongIterator it = cancelled.iterator(); it.hasNext(); ) {
             long key = it.nextLong();
-            if (!keep.contains(key)) {
-                it.remove();
-                long groupId = inFlightDirtyGroup.remove(key);
-                if (groupId != NO_DIRTY_GROUP) {
-                    cancelDirtyGroup(groupId);
-                }
+            long groupId = inFlightDirtyGroup.remove(key);
+            if (groupId != NO_DIRTY_GROUP) {
+                cancelDirtyGroup(groupId);
             }
         }
     }
@@ -900,7 +954,7 @@ public final class RtTerrain {
      * are nearly free.
      */
     private void dispatchMissingBuilds(DispatchContext dispatch, ClientChunkCache chunkSource, int remaining,
-                                       int pcx, int psy, int pcz) {
+                                       int pcx, int psy, int pcz, long deadline) {
         if (missing.isEmpty() || remaining <= 0) {
             return;
         }
@@ -911,7 +965,7 @@ public final class RtTerrain {
         long[] heapRank = new long[k];
         long[] heapKey = new long[k];
         int heapSize = 0;
-        for (int read = 0, n = missing.size(); read < n; read++) {
+        for (int read = 0, n = missing.size(); read < n && System.nanoTime() < deadline; read++) {
             long key = missing.getLong(read);
             // rank = columnDist²(16+) | |Δy|(0..15): column-major nearest-first.
             long rank = distanceRank(key, pcx, psy, pcz);
@@ -931,9 +985,10 @@ public final class RtTerrain {
             long q = heapKey[0]; heapKey[0] = heapKey[end]; heapKey[end] = q;
             siftDown(heapRank, heapKey, end, 0);
         }
-        for (int i = 0; i < heapSize && remaining > 0; i++) {
+        for (int i = 0; i < heapSize && remaining > 0 && System.nanoTime() < deadline; i++) {
             long key = heapKey[i];
-            if (!desired.contains(key) || resident.containsKey(key) || empty.contains(key) || inFlight.containsKey(key)) {
+            if (!desired.contains(key) || resident.containsKey(key) || empty.contains(key)
+                    || taskTracker.containsCurrent(key)) {
                 removeMissing(key);
                 clearQueuedGroup(key, true);
                 continue;
@@ -941,6 +996,7 @@ public final class RtTerrain {
             int sx = sectionX(key);
             int sz = sectionZ(key);
             if (!neighborChunksReady(chunkSource, sx, sz)) {
+                if (benchmarkTelemetryEnabled) benchmarkNeighborBlocked.increment();
                 continue; // stays queued; dispatched once the neighbours load
             }
             removeMissing(key);
@@ -989,7 +1045,7 @@ public final class RtTerrain {
      * is what prevents the visible flicker on block updates that plain eviction would cause.
      */
     private int dispatchReextract(DispatchContext dispatch, ClientChunkCache chunkSource, int remaining,
-                                  int pcx, int psy, int pcz) {
+                                  int pcx, int psy, int pcz, long deadline) {
         if (reextract.isEmpty()) {
             return 0;
         }
@@ -997,7 +1053,7 @@ public final class RtTerrain {
         long[] heapRank = new long[k];
         long[] heapKey = new long[k];
         int heapSize = 0;
-        for (int i = 0; i < reextract.size(); ) {
+        for (int i = 0; i < reextract.size() && System.nanoTime() < deadline; ) {
             long key = reextract.getLong(i);
             if (!queuedReextract.contains(key)) {
                 if (!isQueuedAnywhere(key)) {
@@ -1008,7 +1064,7 @@ public final class RtTerrain {
             }
             // Skip ones the window pass freed this tick (out of view) — they're being retired, not rebuilt.
             SectionGeom g = resident.get(key);
-            if (g == null || !desired.contains(key) || inFlight.containsKey(key)) {
+            if (g == null || !desired.contains(key) || taskTracker.containsCurrent(key)) {
                 queuedReextract.remove(key);
                 clearQueuedGroup(key, true);
                 removeUnsorted(reextract, i);
@@ -1038,7 +1094,7 @@ public final class RtTerrain {
             siftDown(heapRank, heapKey, end, 0);
         }
         int dispatched = 0;
-        for (int i = 0; i < heapSize && remaining > 0; i++) {
+        for (int i = 0; i < heapSize && remaining > 0 && System.nanoTime() < deadline; i++) {
             long key = heapKey[i];
             SectionGeom g = resident.get(key);
             queuedReextract.remove(key);
@@ -1069,18 +1125,31 @@ public final class RtTerrain {
     /** Snapshot one section and dispatch its complete worker → GPU build lifecycle. */
     private void dispatchSectionBuild(DispatchContext dispatch, long key, int sx, int sy, int sz) {
         RtFrameStats.FRAME.count("sectionsSnapshotted", 1);
+        long snapshotStart = benchmarkTelemetryEnabled ? System.nanoTime() : 0L;
         RtSectionSnapshots.Region region = snapshots.createRegion(dispatch.level(), sx, sy, sz);
+        if (benchmarkTelemetryEnabled) {
+            benchmarkSnapshotNanos.add(System.nanoTime() - snapshotStart);
+            benchmarkDispatched.increment();
+        }
         long token = ++buildToken;
         long dirtyGroup = queuedDirtyGroup.remove(key);
         if (dirtyGroup != NO_DIRTY_GROUP && !dirtyGroups.containsKey(dirtyGroup)) {
             dirtyGroup = NO_DIRTY_GROUP;
         }
         RtMaterialRegistry.Snapshot materialSnapshot = RtMaterialRegistry.INSTANCE.requireSnapshot();
-        SectionTask task = new SectionTask(key, token, sx << 4, sy << 4, sz << 4, dirtyGroup,
+        TerrainTaskTracker.Ticket ticket = taskTracker.accept(key, token);
+        SectionTask task = new SectionTask(ticket, key, token, sx << 4, sy << 4, sz << 4, dirtyGroup,
                 terrainEpoch, materialSnapshot.epoch());
+        if (dirtyGroup != NO_DIRTY_GROUP) {
+            inFlightDirtyGroup.put(key, dirtyGroup);
+        } else {
+            inFlightDirtyGroup.remove(key);
+        }
         beginActiveTask();
         try {
             RtWorkerPool.INSTANCE.submit(() -> {
+                long cpuStart = benchmarkTelemetryEnabled ? System.nanoTime() : 0L;
+                if (benchmarkTelemetryEnabled) benchmarkWorkerActive.incrementAndGet();
                 try {
                     if (!isTaskCurrent(task)) {
                         completeTask(task, null, null, null);
@@ -1101,8 +1170,7 @@ public final class RtTerrain {
                         completeTask(task, null, null, null);
                     } else {
                         PreparedSection prepared = RtSectionBuilder.prepare(dispatch.ctx(), packed,
-                                cpu.opacityMicromap(), CausticaConfig.Rt.Terrain.BLAS_COMPACTION.value(),
-                                task.key, task.sox, task.soy, task.soz);
+                                cpu.opacityMicromap(), task.key, task.sox, task.soy, task.soz);
                         if (!isTaskCurrent(task)) {
                             destroyPreparedSection(prepared);
                             completeTask(task, null, null, null);
@@ -1118,22 +1186,28 @@ public final class RtTerrain {
                 } catch (Throwable t) {
                     completeTask(task, null, null, t);
                     throw t;
+                } finally {
+                    if (cpuStart != 0L) {
+                        benchmarkCpuNanos.add(System.nanoTime() - cpuStart);
+                        benchmarkCpuCompleted.increment();
+                        benchmarkWorkerActive.decrementAndGet();
+                    }
                 }
             });
         } catch (Throwable t) {
+            taskTracker.cancelCurrent(key);
+            taskTracker.retire(ticket);
+            inFlightDirtyGroup.remove(key);
             finishActiveTask();
             throw t;
         }
-        inFlight.put(key, token);
-        if (dirtyGroup != NO_DIRTY_GROUP) {
-            inFlightDirtyGroup.put(key, dirtyGroup);
-        } else {
-            inFlightDirtyGroup.remove(key);
-        }
     }
 
-    /** Build a terrain BLAS and optionally compact-copy it before publication. */
+    /** Build/query, then compact-copy a terrain BLAS before making it eligible for publication. */
     private void submitTerrainBuild(RtContext ctx, SectionTask task, PreparedSection prepared) {
+        if (benchmarkTelemetryEnabled) task.gpuStartedNanos = System.nanoTime();
+        buildsSubmitted.incrementAndGet();
+        buildsSubmittedSinceSample.incrementAndGet();
         ctx.gpuExecutor().submit(
                 () -> !isTaskCurrent(task),
                 cmd -> {
@@ -1145,6 +1219,9 @@ public final class RtTerrain {
                     prepared.releaseUpload();
                 },
                 (build, failure) -> {
+                    if (build != null && failure == null) {
+                        lastBuildLatencyNanos = build.ageNanos();
+                    }
                     if (failure != null) {
                         completeTask(task, prepared, build, failure);
                         return;
@@ -1153,53 +1230,12 @@ public final class RtTerrain {
                         completeTask(task, prepared, build, null);
                         return;
                     }
-                    if (prepared.blas().requestsCompaction()) {
-                        submitTerrainCompaction(ctx, task, prepared, build);
-                    } else {
-                        prepared.releaseBuildInputs();
-                        completeTask(task, prepared, build, null);
-                    }
+                    // The immutable source BLAS is already complete and traceable. Publish it directly;
+                    // the optional compact-size query/copy phase has produced repeatable device loss on
+                    // the current NVIDIA driver while startup terrain builds overlap graphics work.
+                    prepared.releaseBuildInputs();
+                    completeTask(task, prepared, build, null);
                 });
-    }
-
-    private void submitTerrainCompaction(RtContext ctx, SectionTask task, PreparedSection prepared,
-                                         RtGpuExecutor.Build build) {
-        RtAccel.PreparedTerrainCompaction compaction;
-        try {
-            compaction = RtAccel.prepareTerrainCompaction(ctx, prepared.blas());
-        } catch (Throwable t) {
-            completeTask(task, prepared, build, t);
-            return;
-        }
-        try {
-            ctx.gpuExecutor().submit(
-                    () -> !isTaskCurrent(task),
-                    cmd -> RtAccel.recordTerrainCompaction(ctx, cmd, compaction),
-                    () -> {
-                        RtAccel.finishTerrainCompaction(compaction);
-                        prepared.releaseBuildInputs();
-                    },
-                    (copyBuild, failure) -> {
-                        if (failure != null) {
-                            Throwable terminal = failure;
-                            try {
-                                RtAccel.destroyTerrainCompaction(compaction);
-                            } catch (Throwable destroyFailure) {
-                                terminal.addSuppressed(destroyFailure);
-                            }
-                            completeTask(task, prepared, copyBuild, terminal);
-                            return;
-                        }
-                        completeTask(task, prepared.withBlas(compaction.compacted()), copyBuild, null);
-                    });
-        } catch (Throwable t) {
-            try {
-                RtAccel.destroyTerrainCompaction(compaction);
-            } catch (Throwable destroyFailure) {
-                t.addSuppressed(destroyFailure);
-            }
-            completeTask(task, prepared, build, t);
-        }
     }
 
     private void completeTask(SectionTask task, PreparedSection prepared, RtGpuExecutor.Build build, Throwable failure) {
@@ -1208,18 +1244,20 @@ public final class RtTerrain {
 
     private void completeTask(SectionResult result) {
         try {
-            if (isTaskCurrent(result.task())) {
-                completedBuilds.add(result);
-            } else if (result.prepared() != null) {
-                destroyPreparedSection(result.prepared());
+            long gpuStarted = result.task().gpuStartedNanos;
+            if (gpuStarted != 0L) {
+                result.task().gpuStartedNanos = 0L;
+                benchmarkGpuNanos.add(System.nanoTime() - gpuStarted);
+                benchmarkGpuCompleted.increment();
             }
+            completedBuilds.add(result);
         } finally {
             finishActiveTask();
         }
     }
 
     private boolean isTaskCurrent(SectionTask task) {
-        return task.terrainEpoch == terrainEpoch;
+        return task.terrainEpoch == terrainEpoch && !task.ticket.cancelled();
     }
 
     private void beginActiveTask() {
@@ -1254,90 +1292,100 @@ public final class RtTerrain {
 
     /**
      * Publish terminal worker/executor results (up to the configured result count per pass). A task
-     * whose token no longer matches {@link #inFlight} is stale and its unpublished native result is
+     * whose ticket is no longer current is stale and its unpublished native result is
      * destroyed instead of entering the table.
      */
     private void drainCompletedBuilds(RtContext ctx, List<PreparedSection> prepared, List<SectionGeom> removed,
-                                      int resultCap) {
+                                      int resultCap, long deadline) {
         int remaining = resultCap;
-        while (remaining > 0) {
+        while (remaining > 0 && System.nanoTime() < deadline) {
             SectionResult result = completedBuilds.poll();
             if (result == null) {
                 break;
             }
+            remaining--;
             SectionTask task = result.task();
-            long expected = inFlight.get(task.key);
-            boolean tokenValid = expected == task.token;
-            boolean valid = tokenValid && task.terrainEpoch == terrainEpoch
-                    && task.materialEpoch == RtMaterialRegistry.INSTANCE.epoch();
-            if (!valid) {
-                if (tokenValid) {
-                    inFlight.remove(task.key);
-                    long staleGroup = inFlightDirtyGroup.remove(task.key);
-                    if (staleGroup != NO_DIRTY_GROUP) cancelDirtyGroup(staleGroup);
-                    enqueueMissingIfNeeded(task.key);
-                    RtFrameStats.FRAME.count("terrainMaterialEpochRejects", 1);
+            boolean publicationPending = false;
+            try {
+                boolean tokenValid = taskTracker.isCurrent(task.ticket);
+                boolean materialValid = task.materialEpoch == RtMaterialRegistry.INSTANCE.epoch();
+                boolean valid = tokenValid && task.terrainEpoch == terrainEpoch && materialValid;
+                if (!valid) {
+                    discardedBuilds.incrementAndGet();
+                    RtFrameStats.FRAME.count("terrainDiscardedBuilds", 1);
+                    if (tokenValid) {
+                        taskTracker.cancelCurrent(task.key);
+                        long staleGroup = inFlightDirtyGroup.remove(task.key);
+                        if (staleGroup != NO_DIRTY_GROUP) cancelDirtyGroup(staleGroup);
+                        enqueueMissingIfNeeded(task.key);
+                        if (!materialValid) {
+                            RtFrameStats.FRAME.count("terrainMaterialEpochRejects", 1);
+                        }
+                    }
+                    destroyCompletedResult(ctx, result);
+                    continue;
                 }
-                destroyCompletedResult(ctx, result);
-                continue;
-            }
-            inFlight.remove(task.key);
-            long dirtyGroup = inFlightDirtyGroup.remove(task.key);
-            if (result.failure() != null) {
-                if (result.prepared() != null) {
-                    destroyPreparedSection(result.prepared());
-                }
-                if (dirtyGroup != NO_DIRTY_GROUP) {
-                    cancelDirtyGroup(dirtyGroup);
-                }
-                throw new RuntimeException("RT terrain section build failed for section "
-                        + (task.sox >> 4) + "," + (task.soy >> 4) + "," + (task.soz >> 4),
-                        result.failure());
-            }
-            PreparedSection built = result.prepared();
-            if (built != null) {
-                try {
-                    ctx.gpuExecutor().markPublished(result.build());
-                    RtFrameStats.FRAME.count("terrainBuildsCompleted", 1);
-                } catch (Throwable t) {
-                    RtSectionBuilder.destroy(built);
+                long dirtyGroup = inFlightDirtyGroup.remove(task.key);
+                if (result.failure() != null) {
+                    if (result.prepared() != null) {
+                        destroyPreparedSection(result.prepared());
+                    }
                     if (dirtyGroup != NO_DIRTY_GROUP) {
                         cancelDirtyGroup(dirtyGroup);
                     }
-                    throw new RuntimeException("RT terrain GPU build failed for section "
-                            + (task.sox >> 4) + "," + (task.soy >> 4) + "," + (task.soz >> 4), t);
+                    throw new RuntimeException("RT terrain section build failed for section "
+                            + (task.sox >> 4) + "," + (task.soy >> 4) + "," + (task.soz >> 4),
+                            result.failure());
                 }
-            }
-            if (dirtyGroup != NO_DIRTY_GROUP && dirtyGroups.containsKey(dirtyGroup)) {
-                DirtyGroup group = dirtyGroups.get(dirtyGroup);
-                if (built == null) {
-                    SectionGeom prev = resident.get(task.key);
-                    if (prev != null) {
-                        group.removed.add(prev);
+                PreparedSection built = result.prepared();
+                if (built == null && benchmarkTelemetryEnabled) benchmarkEmptyCompleted.increment();
+                if (built != null) {
+                    try {
+                        ctx.gpuExecutor().markPublished(result.build());
+                        RtFrameStats.FRAME.count("terrainBuildsCompleted", 1);
+                    } catch (Throwable t) {
+                        RtSectionBuilder.destroy(built);
+                        if (dirtyGroup != NO_DIRTY_GROUP) {
+                            cancelDirtyGroup(dirtyGroup);
+                        }
+                        throw new RuntimeException("RT terrain GPU build failed for section "
+                                + (task.sox >> 4) + "," + (task.soy >> 4) + "," + (task.soz >> 4), t);
+                    }
+                    publicationTickets.put(built, task.ticket);
+                    publicationPending = true;
+                }
+                if (dirtyGroup != NO_DIRTY_GROUP && dirtyGroups.containsKey(dirtyGroup)) {
+                    DirtyGroup group = dirtyGroups.get(dirtyGroup);
+                    if (built == null) {
+                        SectionGeom prev = resident.get(task.key);
+                        if (prev != null) {
+                            group.removed.add(prev);
+                        } else {
+                            group.restoreEmptyKeys.add(task.key);
+                        }
+                        group.emptyKeys.add(task.key);
                     } else {
-                        group.restoreEmptyKeys.add(task.key);
+                        empty.remove(task.key);
+                        group.prepared.add(built);
                     }
-                    group.emptyKeys.add(task.key);
+                    completeDirtyGroupMember(group, prepared, removed);
                 } else {
-                    empty.remove(task.key);
-                    group.prepared.add(built);
+                    if (built == null) {
+                        // Legitimately empty (air or fully-enclosed). If this was an in-place re-extract whose new
+                        // state is empty, evict the old geom and retire it in this publish pass.
+                        SectionGeom prev = resident.remove(task.key);
+                        if (prev != null) {
+                            removed.add(prev);
+                        }
+                        empty.add(task.key);
+                    } else {
+                        empty.remove(task.key);
+                        prepared.add(built);
+                    }
                 }
-                completeDirtyGroupMember(group, prepared, removed);
-                remaining--;
-            } else {
-                if (built == null) {
-                    // Legitimately empty (air or fully-enclosed). If this was an in-place re-extract whose new
-                    // state is empty, evict the old geom and retire it in this publish pass.
-                    SectionGeom prev = resident.remove(task.key);
-                    if (prev != null) {
-                        removed.add(prev);
-                    }
-                    empty.add(task.key);
-                    remaining--;
-                } else {
-                    empty.remove(task.key);
-                    prepared.add(built);
-                    remaining--;
+            } finally {
+                if (!publicationPending) {
+                    taskTracker.retire(task.ticket);
                 }
             }
         }
@@ -1368,13 +1416,8 @@ public final class RtTerrain {
             return;
         }
         for (PreparedSection ps : group.prepared) {
+            retirePublicationTicket(ps);
             destroyPreparedSection(ps);
-        }
-        for (LongIterator it = group.restoreEmptyKeys.iterator(); it.hasNext(); ) {
-            long key = it.nextLong();
-            if (desired.contains(key) && !resident.containsKey(key) && !inFlight.containsKey(key) && !isQueuedAnywhere(key)) {
-                empty.add(key);
-            }
         }
         for (LongIterator it = group.keys.iterator(); it.hasNext(); ) {
             long key = it.nextLong();
@@ -1383,6 +1426,27 @@ public final class RtTerrain {
             }
             if (inFlightDirtyGroup.get(key) == groupId) {
                 inFlightDirtyGroup.remove(key);
+                TerrainTaskTracker.Ticket ticket = taskTracker.cancelCurrent(key);
+                if (ticket != null) {
+                    cancelledTasks.incrementAndGet();
+                    RtFrameStats.FRAME.count("terrainCancelledTasks", 1);
+                }
+            }
+        }
+        // Atomic publication was abandoned, but every desired member must still converge. Requeue the
+        // members independently instead of leaving old geometry or an old empty classification indefinitely.
+        for (LongIterator it = group.keys.iterator(); it.hasNext(); ) {
+            long key = it.nextLong();
+            if (!desired.contains(key) || taskTracker.containsCurrent(key)) {
+                continue;
+            }
+            if (resident.containsKey(key)) {
+                if (queuedReextract.add(key)) {
+                    reextract.add(key);
+                }
+            } else {
+                empty.remove(key);
+                enqueueMissingIfNeeded(key);
             }
         }
     }
@@ -1393,6 +1457,7 @@ public final class RtTerrain {
         }
         for (DirtyGroup group : dirtyGroups.values()) {
             for (PreparedSection ps : group.prepared) {
+                retirePublicationTicket(ps);
                 destroyPreparedSection(ps);
             }
         }
@@ -1407,6 +1472,13 @@ public final class RtTerrain {
             RtSectionBuilder.destroy(ps);
         } else {
             ctx.gpuExecutor().enqueueDestroyUnpublished(() -> RtSectionBuilder.destroy(ps));
+        }
+    }
+
+    private void retirePublicationTicket(PreparedSection ps) {
+        TerrainTaskTracker.Ticket ticket = publicationTickets.remove(ps);
+        if (ticket != null) {
+            taskTracker.retire(ticket);
         }
     }
 
@@ -1437,6 +1509,7 @@ public final class RtTerrain {
 
     /** An outstanding worker/GPU section build; terminal results enter one completion queue. */
     private static final class SectionTask {
+        final TerrainTaskTracker.Ticket ticket;
         final long key;
         final long token;
         final int sox;
@@ -1445,8 +1518,10 @@ public final class RtTerrain {
         final long dirtyGroup;
         final long terrainEpoch;
         final long materialEpoch;
-        SectionTask(long key, long token, int sox, int soy, int soz, long dirtyGroup,
+        volatile long gpuStartedNanos;
+        SectionTask(TerrainTaskTracker.Ticket ticket, long key, long token, int sox, int soy, int soz, long dirtyGroup,
                     long terrainEpoch, long materialEpoch) {
+            this.ticket = ticket;
             this.key = key;
             this.token = token;
             this.sox = sox;
@@ -1476,18 +1551,8 @@ public final class RtTerrain {
         int baseY = rebase ? rby : blockY;
         int baseZ = rebase ? rbz : blockZ;
 
-        // Geometry extraction is driven by vanilla's block-dirty stream and can run continuously while
-        // the world ticks. Rebuilding the global light tables for every geometry publication clears the
-        // asynchronously published light grid state even when no emitter changed, making the shader alternate
-        // between global-only and cell proposals. Track the actual light-record diff instead.
-        boolean lightsChanged = false;
         for (SectionGeom g : removed) {
-            SectionGeom current = resident.get(g.key);
-            boolean removesPublishedLights = current == g && hasLights(g.lights);
-            int removedLightSlot = removesPublishedLights ? g.slot : -1;
             table.removePublished(resident, published, g);
-            lightsChanged |= removesPublishedLights;
-            if (removedLightSlot >= 0) lightSections.remove(removedLightSlot);
         }
         retire(ctx, lastGraphicsUse, removed);
 
@@ -1501,17 +1566,19 @@ public final class RtTerrain {
         }
 
         for (PreparedSection ps : prepared) {
+            TerrainTaskTracker.Ticket publicationTicket = publicationTickets.remove(ps);
+            try {
             SectionGeom g = new SectionGeom(ps.key(), ps.uvs(), ps.material(),
-                    ps.blas().accel, ps.triBase(), ps.sx(), ps.sy(), ps.sz(), ps.lights());
+                    ps.blas().accel, ps.triBase(), ps.sx(), ps.sy(), ps.sz());
             if (!desired.contains(ps.key())) {
                 // Left the window while its batched BLAS build was in flight (window sync keeps running
                 // during builds). Never published — retire the fresh, unreferenced geometry.
                 ctx.gpuExecutor().enqueueDestroyUnpublished(g::destroy);
+                discardedBuilds.incrementAndGet();
+                RtFrameStats.FRAME.count("terrainDiscardedBuilds", 1);
                 continue;
             }
             SectionGeom prev = resident.get(ps.key());
-            boolean sectionLightsChanged = !sameLightRecords(prev != null ? prev.lights : null, g.lights);
-            lightsChanged |= sectionLightsChanged;
             if (prev != null && prev.slot >= 0) {
                 g.slot = prev.slot;
                 g.instanceIndex = prev.instanceIndex;
@@ -1528,8 +1595,16 @@ public final class RtTerrain {
                 table.write(g);
                 table.instanceList.add(table.instanceFor(g, baseX, baseY, baseZ));
             }
-            if (sectionLightsChanged || prev == null) updateLightSection(g);
             published.add(ps.key());
+            if (benchmarkTelemetryEnabled) benchmarkPublished.increment();
+            buildsPublished.incrementAndGet();
+            RtFrameStats.FRAME.count("terrainBuildsPublished", 1);
+            RtFrameStats.FRAME.count("sectionsUploaded", 1);
+            } finally {
+                if (publicationTicket != null) {
+                    taskTracker.retire(publicationTicket);
+                }
+            }
         }
         table.flushWrites();
 
@@ -1543,7 +1618,6 @@ public final class RtTerrain {
             table.slots.clear();
             table.instanceList.clear();
             table.instances = null;
-            lightSections.clear();
             published.clear();
             // The instance list + slot registry were just reset, but evicted geometry can still be waiting
             // in the `removed` accumulator (window sync runs while a build is in flight — e.g. a respawn
@@ -1563,8 +1637,6 @@ public final class RtTerrain {
             // Zero resident sections (e.g. every section just evicted on a respawn) is a transient
             // streaming state, not "no world" — keep tracing (sky/entities only) instead of handing the
             // frame back to vanilla; see ensureEmptyTableReady.
-            markLightHierarchyDirty();
-            flushLightHierarchyUpdate(ctx);
             ensureEmptyTableReady(ctx);
             return;
         }
@@ -1580,48 +1652,7 @@ public final class RtTerrain {
             blockZ = rbz;
         }
         table.instances = table.instanceList;
-        if (lightsChanged || rebase) {
-            markLightHierarchyDirty();
-        }
         ready = true;
-    }
-
-    private static boolean hasLights(float[] lights) {
-        return lights != null && lights.length > 0;
-    }
-
-    /** Null and an empty collector result both mean that the section contributes no lights. */
-    static boolean sameLightRecords(float[] previous, float[] current) {
-        if (!hasLights(previous) && !hasLights(current)) return true;
-        return Arrays.equals(previous, current);
-    }
-
-    private void updateLightSection(SectionGeom g) {
-        if (!hasLights(g.lights)) {
-            lightSections.remove(g.slot);
-            return;
-        }
-        lightSections.put(g.slot, new RtLightHierarchy.SectionInput(g.slot,
-                g.sx >> 4, g.sy >> 4, g.sz >> 4, g.lights));
-    }
-
-    private void markLightHierarchyDirty() {
-        lightHierarchyDirty = true;
-    }
-
-    /** Snapshot only lit sections once the previous complete generation has published. */
-    private void flushLightHierarchyUpdate(RtContext ctx) {
-        if (!lightHierarchyDirty || !lightGrid.isIdle()) return;
-        long now = System.nanoTime();
-        if (lastLightHierarchyRequestNanos != 0L
-                && now - lastLightHierarchyRequestNanos < LIGHT_HIERARCHY_UPDATE_INTERVAL_NANOS) {
-            return;
-        }
-        // The manager creates one immutable worker snapshot directly from the sorted values view,
-        // avoiding the previous ArrayList + defensive-copy pair on the render thread.
-        lightGrid.request(ctx, lightSections.values(), blockX, blockY, blockZ);
-        lightHierarchyDirty = false;
-        lastLightHierarchyRequestNanos = now;
     }
 
     /** Keep a valid zero-instance table through transient empty-residency windows. */
@@ -1648,18 +1679,21 @@ public final class RtTerrain {
         // its failure path has already terminally failed every accepted queued build.
         ctx.gpuExecutor().throwIfFailed();
         awaitActiveTasks();
-        lightGrid.awaitIdle();
         Throwable failure = null;
         SectionResult result;
         while ((result = completedBuilds.poll()) != null) {
-            if (result.prepared() != null) {
-                destroyPreparedSection(result.prepared());
-            }
-            if (result.failure() != null && failure == null) {
-                failure = result.failure();
+            try {
+                if (result.prepared() != null) {
+                    destroyPreparedSection(result.prepared());
+                }
+                if (result.failure() != null && failure == null) {
+                    failure = result.failure();
+                }
+            } finally {
+                taskTracker.retire(result.task().ticket);
             }
         }
-        inFlight.clear();
+        taskTracker.cancelAllCurrent();
         inFlightDirtyGroup.clear();
         if (failure != null) {
             throw new RuntimeException("RT terrain worker/build failed during teardown", failure);
@@ -1676,7 +1710,6 @@ public final class RtTerrain {
         // Device teardown is the one path that must prove every worker and GPU callback has relinquished
         // its resources before the executor, allocator, and VkDevice disappear.
         terrainEpoch++;
-        lightGrid.cancelPending();
         drainTasksForClear(ctx);
         cancelAllDirtyGroups();
         ctx.waitIdle();
@@ -1699,10 +1732,6 @@ public final class RtTerrain {
         reextract.clear();
         queuedReextract.clear();
         windowValid = false;
-        lightGrid.destroyAfterDeviceIdle();
-        lightSections.clear();
-        lightHierarchyDirty = false;
-        lastLightHierarchyRequestNanos = 0L;
         if (resident.isEmpty() && table.buffer == null && removed.isEmpty() && prepared.isEmpty()) {
             empty.clear();
             table.instances = null;
@@ -1726,7 +1755,6 @@ public final class RtTerrain {
         table.freeSlots.clear();
         table.slots.clear();
         table.instanceList.clear();
-        lightSections.clear();
         for (SectionGeom g : resident.values()) {
             g.destroy();
         }
@@ -1741,6 +1769,7 @@ public final class RtTerrain {
         }
         removed.clear();
         for (PreparedSection ps : prepared) {
+            retirePublicationTicket(ps);
             RtSectionBuilder.destroy(ps);
         }
         prepared.clear();
@@ -1759,7 +1788,7 @@ public final class RtTerrain {
 
         // Token maps are render-thread ownership, so clearing them makes every old completion unpublishable
         // even in the narrow race where it observed the previous epoch immediately before this increment.
-        inFlight.clear();
+        taskTracker.cancelAllCurrent();
         inFlightDirtyGroup.clear();
         cancelAllDirtyGroups();
 
@@ -1773,11 +1802,18 @@ public final class RtTerrain {
         removed.clear();
 
         ArrayList<PreparedSection> oldPrepared = new ArrayList<>(prepared);
+        for (PreparedSection ps : oldPrepared) {
+            retirePublicationTicket(ps);
+        }
         prepared.clear();
         SectionResult completed;
         while ((completed = completedBuilds.poll()) != null) {
-            if (completed.prepared() != null) {
-                oldPrepared.add(completed.prepared());
+            try {
+                if (completed.prepared() != null) {
+                    oldPrepared.add(completed.prepared());
+                }
+            } finally {
+                taskTracker.retire(completed.task().ticket);
             }
         }
 
@@ -1807,14 +1843,10 @@ public final class RtTerrain {
         table.slots.clear();
         table.instanceList.clear();
         table.instances = null;
-        lightSections.clear();
-        lightHierarchyDirty = false;
-        lastLightHierarchyRequestNanos = 0L;
 
         if (oldGeneration != null) {
             retireGeneration(ctx, lastGraphicsUse, oldGeneration);
         }
-        lightGrid.invalidate(ctx, lastGraphicsUse);
         if (!oldGeometry.isEmpty()) {
             ArrayList<SectionGeom> retirement = new ArrayList<>(oldGeometry);
             ctx.gpuExecutor().enqueueDestroyAfterGraphics(lastGraphicsUse,
