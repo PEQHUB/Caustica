@@ -15,7 +15,7 @@ final class NrdIntegrationContractTest {
         String config = source("src/main/java/dev/comfyfluffy/caustica/CausticaConfig.java");
         String menu = source("src/main/java/dev/comfyfluffy/caustica/client/CausticaSettingsScreen.java");
         String policy = source("src/main/java/dev/comfyfluffy/caustica/rt/pipeline/RtReconstruction.java");
-        assertTrue(config.contains("reconstruction.backend\", \"dlss-rr\""));
+        assertTrue(config.contains("reconstruction.backend\", \"auto\""));
         assertTrue(config.contains("ADVANCED_OPTICAL_TRANSPORT"));
         assertTrue(config.contains("nrd.spherical-harmonics"));
         assertTrue(config.contains("nrd.relax-atrous-iterations"));

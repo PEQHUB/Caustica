@@ -191,4 +191,88 @@ final class CausticaConfigSceneMigrationTest {
         assertTrue(CausticaConfig.migrateLegacySceneConfig(config));
         assertEquals("fixed", config.get("frame-generation.mode"));
     }
+
+    @Test
+    void schemaElevenMigratesSkyAndDisplayDefaultsFromOldDefaults() {
+        CommentedConfig oldDefaults = CommentedConfig.inMemory();
+        oldDefaults.set("config-version", 10);
+        oldDefaults.set("composite.ambient-light-ev", -8.0);
+        oldDefaults.set("composite.night-airglow-ev", 2.99);
+        oldDefaults.set("composite.sky.day-rayleigh", 4.0);
+        oldDefaults.set("composite.sky.aerosol-scatter", 0.55);
+        oldDefaults.set("composite.sky.aerosol-absorption", 4.0);
+        oldDefaults.set("composite.sky.ozone", 1.0);
+        oldDefaults.set("composite.sky.aerosol-height-km", 4.0);
+        oldDefaults.set("composite.sky.aerosol-anisotropy", 0.0);
+        oldDefaults.set("composite.sky.star-brightness-ev", 8.0);
+        oldDefaults.set("composite.sky.star-size", 1.0);
+        oldDefaults.set("dlss-rr.quality", 0);
+        oldDefaults.set("nrd.upscale-sharpness", 0.0);
+        oldDefaults.set("nrd.min-blur-radius", 8.02);
+        oldDefaults.set("frame-generation.multi-frame-count", 1);
+        oldDefaults.set("exposure.high-percentile", 0.80);
+        oldDefaults.set("sharc.cache-exponent", 24);
+        oldDefaults.set("hdr.tonemap-mode", "psychov23");
+        oldDefaults.set("hdr.paper-white-nits", 200.0);
+        oldDefaults.set("hdr.ui-brightness-nits", 200.0);
+        oldDefaults.set("hdr.peak-nits", 1000.0);
+        assertTrue(CausticaConfig.migrateLegacySceneConfig(oldDefaults));
+        assertEquals(CausticaConfig.CONFIG_SCHEMA_VERSION,
+                ((Number) oldDefaults.get("config-version")).intValue());
+        assertEquals(0.025641026,
+                ((Number) oldDefaults.get("composite.ambient-light-ev")).doubleValue(), 1.0e-6);
+        assertEquals(-8.0,
+                ((Number) oldDefaults.get("composite.night-airglow-ev")).doubleValue(), 1.0e-6);
+        assertEquals(1.0022436,
+                ((Number) oldDefaults.get("composite.sky.day-rayleigh")).doubleValue(), 1.0e-6);
+        assertEquals(4.0,
+                ((Number) oldDefaults.get("composite.sky.aerosol-scatter")).doubleValue(), 1.0e-6);
+        assertEquals(0.0,
+                ((Number) oldDefaults.get("composite.sky.aerosol-absorption")).doubleValue(), 1.0e-6);
+        assertEquals(2.0,
+                ((Number) oldDefaults.get("composite.sky.ozone")).doubleValue(), 1.0e-6);
+        assertEquals(0.1,
+                ((Number) oldDefaults.get("composite.sky.aerosol-height-km")).doubleValue(), 1.0e-6);
+        assertEquals(0.8053686,
+                ((Number) oldDefaults.get("composite.sky.aerosol-anisotropy")).doubleValue(), 1.0e-6);
+        assertEquals(2.025641,
+                ((Number) oldDefaults.get("composite.sky.star-brightness-ev")).doubleValue(), 1.0e-6);
+        assertEquals(0.50240386,
+                ((Number) oldDefaults.get("composite.sky.star-size")).doubleValue(), 1.0e-6);
+        assertEquals(2, ((Number) oldDefaults.get("dlss-rr.quality")).intValue());
+        assertEquals(0.23453094,
+                ((Number) oldDefaults.get("nrd.upscale-sharpness")).doubleValue(), 1.0e-6);
+        assertEquals(8.01626,
+                ((Number) oldDefaults.get("nrd.min-blur-radius")).doubleValue(), 1.0e-3);
+        assertEquals(2, ((Number) oldDefaults.get("frame-generation.multi-frame-count")).intValue());
+        assertEquals(0.99425286,
+                ((Number) oldDefaults.get("exposure.high-percentile")).doubleValue(), 1.0e-6);
+        assertEquals(23, ((Number) oldDefaults.get("sharc.cache-exponent")).intValue());
+        assertEquals("eetf", oldDefaults.get("hdr.tonemap-mode"));
+        assertEquals(203.0,
+                ((Number) oldDefaults.get("hdr.paper-white-nits")).doubleValue(), 1.0e-6);
+        assertEquals(100.0,
+                ((Number) oldDefaults.get("hdr.ui-brightness-nits")).doubleValue(), 1.0e-6);
+        assertEquals(800.0,
+                ((Number) oldDefaults.get("hdr.peak-nits")).doubleValue(), 1.0e-6);
+    }
+
+    @Test
+    void schemaElevenPreservesUserCustomizations() {
+        CommentedConfig custom = CommentedConfig.inMemory();
+        custom.set("config-version", 10);
+        custom.set("composite.ambient-light-ev", -2.0);
+        custom.set("composite.sky.aerosol-scatter", 1.5);
+        custom.set("hdr.tonemap-mode", "caustica");
+        custom.set("dlss-rr.quality", 3);
+        custom.set("sharc.cache-exponent", 26);
+        assertTrue(CausticaConfig.migrateLegacySceneConfig(custom));
+        assertEquals(-2.0,
+                ((Number) custom.get("composite.ambient-light-ev")).doubleValue(), 1.0e-6);
+        assertEquals(1.5,
+                ((Number) custom.get("composite.sky.aerosol-scatter")).doubleValue(), 1.0e-6);
+        assertEquals("caustica", custom.get("hdr.tonemap-mode"));
+        assertEquals(3, ((Number) custom.get("dlss-rr.quality")).intValue());
+        assertEquals(26, ((Number) custom.get("sharc.cache-exponent")).intValue());
+    }
 }

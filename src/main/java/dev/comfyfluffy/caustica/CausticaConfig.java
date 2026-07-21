@@ -31,7 +31,7 @@ import org.slf4j.LoggerFactory;
 public final class CausticaConfig {
     private static final Logger LOGGER = LoggerFactory.getLogger("Caustica");
     private static final List<RuntimeSetting<?>> SETTINGS = new CopyOnWriteArrayList<>();
-    static final int CONFIG_SCHEMA_VERSION = 10;
+    static final int CONFIG_SCHEMA_VERSION = 11;
 
     private static final Path CONFIG_PATH = resolveConfigPath();
     private static final CommentedFileConfig FILE = loadAndMigrateFile(CONFIG_PATH);
@@ -324,6 +324,28 @@ public final class CausticaConfig {
                         Boolean.TRUE.equals(rawEnabled) ? "fixed" : "off");
             }
         }
+        if (version < 11) {
+            migrateExactNumber(config, "composite.ambient-light-ev", -8.0, 0.025641026);
+            migrateExactNumber(config, "composite.night-airglow-ev", 2.99, -8.0);
+            migrateExactNumber(config, "composite.sky.day-rayleigh", 4.0, 1.0022436);
+            migrateExactNumber(config, "composite.sky.aerosol-scatter", 0.55, 4.0);
+            migrateExactNumber(config, "composite.sky.aerosol-absorption", 4.0, 0.0);
+            migrateExactNumber(config, "composite.sky.ozone", 1.0, 2.0);
+            migrateExactNumber(config, "composite.sky.aerosol-height-km", 4.0, 0.1);
+            migrateExactNumber(config, "composite.sky.aerosol-anisotropy", 0.0, 0.8053686);
+            migrateExactNumber(config, "composite.sky.star-brightness-ev", 8.0, 2.025641);
+            migrateExactNumber(config, "composite.sky.star-size", 1.0, 0.50240386);
+            migrateExactNumber(config, "dlss-rr.quality", 0.0, 2.0);
+            migrateExactNumber(config, "nrd.upscale-sharpness", 0.0, 0.23453094);
+            migrateExactNumber(config, "nrd.min-blur-radius", 8.02, 8.01626);
+            migrateExactNumber(config, "frame-generation.multi-frame-count", 1.0, 2.0);
+            migrateExactNumber(config, "exposure.high-percentile", 0.80, 0.99425286);
+            migrateExactNumber(config, "sharc.cache-exponent", 24.0, 23.0);
+            migrateExactString(config, "hdr.tonemap-mode", "psychov23", "eetf");
+            migrateExactNumber(config, "hdr.paper-white-nits", 200.0, 203.0);
+            migrateExactNumber(config, "hdr.ui-brightness-nits", 200.0, 100.0);
+            migrateExactNumber(config, "hdr.peak-nits", 1000.0, 800.0);
+        }
         config.set("config-version", CONFIG_SCHEMA_VERSION);
         return true;
     }
@@ -331,6 +353,13 @@ public final class CausticaConfig {
     private static void migrateExactNumber(CommentedConfig config, String path, double obsolete, double replacement) {
         Object value = config.get(path);
         if (value instanceof Number number && Math.abs(number.doubleValue() - obsolete) <= 1.0e-6) {
+            config.set(path, replacement);
+        }
+    }
+
+    private static void migrateExactString(CommentedConfig config, String path, String obsolete, String replacement) {
+        Object value = config.get(path);
+        if (obsolete.equals(value)) {
             config.set(path, replacement);
         }
     }
@@ -1084,7 +1113,7 @@ public final class CausticaConfig {
         /** Global reconstruction policy. Auto is vendor/OS aware but never prevents an explicit choice. */
         public static final class Reconstruction {
             public static final StringSetting BACKEND = string(
-                    "caustica.rt.reconstruction.backend", "reconstruction.backend", "dlss-rr",
+                    "caustica.rt.reconstruction.backend", "reconstruction.backend", "auto",
                     value -> switch (value == null ? "" : value.trim().toLowerCase(java.util.Locale.ROOT)) {
                         case "nrd", "dlss-rr", "off" -> value.trim().toLowerCase(java.util.Locale.ROOT);
                         default -> "auto";
