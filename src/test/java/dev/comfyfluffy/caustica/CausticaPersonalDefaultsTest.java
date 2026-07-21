@@ -10,17 +10,17 @@ final class CausticaPersonalDefaultsTest {
     @Test
     void personalRendererAndDisplayValuesAreTheDefaults() {
         assertEquals(8, CausticaConfig.Rt.Composite.MAX_BOUNCES.defaultValue());
-        assertEquals(1.5, Math.toDegrees(CausticaConfig.Rt.Composite.SUN_ANGULAR_RADIUS.defaultValue()), 1.0e-5);
+        assertEquals(1.4741987, Math.toDegrees(CausticaConfig.Rt.Composite.SUN_ANGULAR_RADIUS.defaultValue()), 1.0e-5);
         assertEquals(5.0, Math.toDegrees(CausticaConfig.Rt.Composite.MOON_ANGULAR_RADIUS.defaultValue()), 1.0e-5);
-        assertEquals(-8.0f, CausticaConfig.Rt.Composite.AMBIENT_LIGHT_EV.defaultValue());
+        assertEquals(0.025641026f, CausticaConfig.Rt.Composite.AMBIENT_LIGHT_EV.defaultValue());
         assertEquals(6.02f, CausticaConfig.Rt.Composite.MOONLIGHT_INTENSITY_EV.defaultValue());
-        assertEquals(2.99f, CausticaConfig.Rt.Composite.NIGHT_AIRGLOW_EV.defaultValue());
-        assertEquals(4.0f, CausticaConfig.Rt.Composite.SKY_AEROSOL_ABSORPTION.defaultValue());
-        assertEquals(4.0f, CausticaConfig.Rt.Composite.SKY_AEROSOL_HEIGHT_KM.defaultValue());
-        assertEquals(0.0f, CausticaConfig.Rt.Composite.SKY_AEROSOL_ANISOTROPY.defaultValue());
+        assertEquals(-8.0f, CausticaConfig.Rt.Composite.NIGHT_AIRGLOW_EV.defaultValue());
+        assertEquals(0.0f, CausticaConfig.Rt.Composite.SKY_AEROSOL_ABSORPTION.defaultValue());
+        assertEquals(0.1f, CausticaConfig.Rt.Composite.SKY_AEROSOL_HEIGHT_KM.defaultValue());
+        assertEquals(0.8053686f, CausticaConfig.Rt.Composite.SKY_AEROSOL_ANISOTROPY.defaultValue());
         assertEquals(1.0f, CausticaConfig.Rt.Composite.SKY_SATURATION.defaultValue());
         assertEquals(0.53f, CausticaConfig.Rt.Composite.SUN_LIMB_DARKENING.defaultValue());
-        assertEquals(8.0f, CausticaConfig.Rt.Composite.STAR_BRIGHTNESS_EV.defaultValue());
+        assertEquals(2.025641f, CausticaConfig.Rt.Composite.STAR_BRIGHTNESS_EV.defaultValue());
         assertEquals(2.0f, CausticaConfig.Rt.Composite.STAR_DENSITY.defaultValue());
         assertEquals(1.18f, CausticaConfig.Rt.Composite.AIRGLOW_HORIZON_G.defaultValue());
         assertEquals(0.0f, CausticaConfig.Rt.Composite.AIRGLOW_ZENITH_R.defaultValue());
@@ -40,20 +40,20 @@ final class CausticaPersonalDefaultsTest {
         assertEquals(1.0f, CausticaConfig.Rt.Sdr.PSYCHO_PEAK.defaultValue());
         assertEquals(4.0f, CausticaConfig.Rt.Sdr.PSYCHOV23_PEAK.defaultValue());
         assertEquals(0.57f, CausticaConfig.Rt.PsychoV23.COMPRESSION.defaultValue());
-        assertEquals("psychov23", CausticaConfig.Rt.Hdr.TONEMAP_MODE.defaultValue());
+        assertEquals("eetf", CausticaConfig.Rt.Hdr.TONEMAP_MODE.defaultValue());
         assertFalse(CausticaConfig.Rt.Hdr.ENABLED.defaultValue());
     }
 
     @Test
     void selectedVendorAndReconstructionDefaultsStayLocked() {
-        assertEquals(0, CausticaConfig.Rt.DlssRr.QUALITY.defaultValue());
+        assertEquals(2, CausticaConfig.Rt.DlssRr.QUALITY.defaultValue());
         assertEquals(4, CausticaConfig.Rt.DlssRr.PRESET.defaultValue());
         assertEquals(50, CausticaConfig.Rt.DlssRr.INPUT_SCALE_PERCENT.defaultValue());
         assertTrue(CausticaConfig.Rt.DlssRr.HIGH_QUALITY_TRANSPARENCY.defaultValue());
         assertTrue(CausticaConfig.Rt.DlssRr.PARTICLE_TEMPORAL_HISTORY.defaultValue());
         assertFalse(CausticaConfig.Rt.Fg.ENABLED.defaultValue());
         assertEquals("off", CausticaConfig.Rt.Fg.MODE.defaultValue());
-        assertEquals(1, CausticaConfig.Rt.Fg.MULTI_FRAME_COUNT.defaultValue());
+        assertEquals(2, CausticaConfig.Rt.Fg.MULTI_FRAME_COUNT.defaultValue());
         assertFalse(CausticaConfig.Rt.Reflex.LOW_LATENCY_BOOST.defaultValue());
         assertTrue(CausticaConfig.Rt.Sharc.ENABLED.defaultValue());
         assertEquals(2, CausticaConfig.Rt.Sharc.UPDATE_TILE_SIZE.defaultValue());

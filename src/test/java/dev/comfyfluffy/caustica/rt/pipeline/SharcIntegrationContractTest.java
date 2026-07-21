@@ -137,7 +137,7 @@ final class SharcIntegrationContractTest {
         assertTrue(widgets.contains("public static final int PANEL = 0x00000000"));
         assertTrue(widgets.contains("public static final int PANEL_2 = 0x24000000"));
         assertTrue(config.contains("\"sharc.enabled\", true"));
-        assertTrue(config.contains("\"sharc.cache-exponent\", 24, 16, 28"));
+        assertTrue(config.contains("\"sharc.cache-exponent\", 23, 16, 28"));
         assertTrue(screen.contains("27, 28)"));
         assertTrue(lang.contains("RTX 5090 Maximum (10 GiB)"));
         assertTrue(config.contains("\"sharc.scene-scale\", 32.0f, 1.0f, 100.0f"));

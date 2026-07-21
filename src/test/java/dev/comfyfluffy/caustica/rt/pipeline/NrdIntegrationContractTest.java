@@ -15,7 +15,7 @@ final class NrdIntegrationContractTest {
         String config = source("src/main/java/dev/comfyfluffy/caustica/CausticaConfig.java");
         String menu = source("src/main/java/dev/comfyfluffy/caustica/client/CausticaSettingsScreen.java");
         String policy = source("src/main/java/dev/comfyfluffy/caustica/rt/pipeline/RtReconstruction.java");
-        assertTrue(config.contains("reconstruction.backend\", \"auto\""));
+        assertTrue(config.contains("reconstruction.backend\", \"dlss-rr\""));
         assertTrue(config.contains("ADVANCED_OPTICAL_TRANSPORT"));
         assertTrue(config.contains("nrd.spherical-harmonics"));
         assertTrue(config.contains("nrd.relax-atrous-iterations"));
@@ -84,7 +84,7 @@ final class NrdIntegrationContractTest {
         String composite = source("src/main/java/dev/comfyfluffy/caustica/rt/RtComposite.java");
         String upscale = source("shaders/display/nrd_spatial_upscale.comp");
         assertTrue(config.contains("nrd.upscale-filter\", \"edge-adaptive\""));
-        assertTrue(config.contains("nrd.upscale-sharpness\", 0.0f, 0.0f, 1.0f"));
+        assertTrue(config.contains("nrd.upscale-sharpness\", 0.23453094f, 0.0f, 1.0f"));
         assertTrue(menu.contains("List.of(\"edge-adaptive\", \"linear\", \"nearest\")"));
         assertTrue(menu.contains("caustica.options.rt.nrd.upscaleSharpness"));
         assertTrue(composite.contains("nrdResolvedOutput != rrOutput"));

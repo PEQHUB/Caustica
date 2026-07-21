@@ -41,8 +41,8 @@ final class SkyControlsContractTest {
     @Test
     void artistDefaultsUseTheDeepBlueCalibrationAndNeutralRgb() {
         assertEquals(0.02f, CausticaConfig.Rt.Composite.SKY_RAYLEIGH.defaultValue());
-        assertEquals(4.0f, CausticaConfig.Rt.Composite.SKY_DAY_RAYLEIGH.defaultValue());
-        assertEquals(0.55f, CausticaConfig.Rt.Composite.SKY_AEROSOL_SCATTER.defaultValue());
+        assertEquals(1.0022436f, CausticaConfig.Rt.Composite.SKY_DAY_RAYLEIGH.defaultValue());
+        assertEquals(4.0f, CausticaConfig.Rt.Composite.SKY_AEROSOL_SCATTER.defaultValue());
         assertEquals(1.0f, CausticaConfig.Rt.Composite.SKY_SATURATION.defaultValue());
         assertEquals(-1.0f, CausticaConfig.Rt.Composite.SUN_DISC_BRIGHTNESS_EV.defaultValue());
         assertEquals(1.0f, CausticaConfig.Rt.Composite.SKY_TINT_R.defaultValue());

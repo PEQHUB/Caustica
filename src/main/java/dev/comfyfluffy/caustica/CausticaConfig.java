@@ -810,19 +810,19 @@ public final class CausticaConfig {
             public static final FloatSetting TORCH_EMISSION_MULTIPLIER = clampedFloat(
                     "caustica.rt.torchEmissionMultiplier", "composite.torch-emission-multiplier", 1.0f, 0.0f, 1.0f);
             public static final FloatSetting AMBIENT_LIGHT_EV = clampedFloat(
-                    "caustica.rt.ambientLightEv", "composite.ambient-light-ev", -8.0f, -8.0f, 8.0f);
+                    "caustica.rt.ambientLightEv", "composite.ambient-light-ev", 0.025641026f, -8.0f, 8.0f);
             public static final FloatSetting SUNLIGHT_INTENSITY_EV = clampedFloat(
                     "caustica.rt.sunlightIntensityEv", "composite.sunlight-intensity-ev", 0.0f, -4.0f, 4.0f);
             public static final FloatSetting MOONLIGHT_INTENSITY_EV = clampedFloat(
                     "caustica.rt.moonlightIntensityEv", "composite.moonlight-intensity-ev", 6.02f, -4.0f, 8.0f);
             public static final FloatSetting NIGHT_AIRGLOW_EV = clampedFloat(
-                    "caustica.rt.nightAirglowEv", "composite.night-airglow-ev", 2.99f, -8.0f, 8.0f);
+                    "caustica.rt.nightAirglowEv", "composite.night-airglow-ev", -8.0f, -8.0f, 8.0f);
             public static final IntSetting PSR_MAX_MIRRORS = clampedInt(
                     "caustica.rt.psrMaxMirrors", "composite.psr-max-mirrors", 32, 1, 32);
             public static final IntSetting POINT_SAMPLE_MAX_SIZE = clampedInt(
                     "caustica.rt.pointSampleMaxSize", "composite.point-sample-max-size", 512, 0, 8192);
             public static final FloatSetting SUN_ANGULAR_RADIUS =
-                    radians("caustica.rt.sunAngularRadius", "composite.sun-angular-radius-deg", 1.5f);
+                    radians("caustica.rt.sunAngularRadius", "composite.sun-angular-radius-deg", 1.4741987f);
             public static final FloatSetting MOON_ANGULAR_RADIUS =
                     radians("caustica.rt.moonAngularRadius", "composite.moon-angular-radius-deg", 5.0f);
             // Artist-facing spectral-sky controls. Rayleigh has independent nighttime and daytime endpoints;
@@ -830,17 +830,17 @@ public final class CausticaConfig {
             public static final FloatSetting SKY_RAYLEIGH = clampedFloat(
                     "caustica.rt.sky.rayleigh", "composite.sky.rayleigh", 0.02f, 0.02f, 4.0f);
             public static final FloatSetting SKY_DAY_RAYLEIGH = clampedFloat(
-                    "caustica.rt.sky.dayRayleigh", "composite.sky.day-rayleigh", 4.0f, 0.02f, 4.0f);
+                    "caustica.rt.sky.dayRayleigh", "composite.sky.day-rayleigh", 1.0022436f, 0.02f, 4.0f);
             public static final FloatSetting SKY_AEROSOL_SCATTER = clampedFloat(
-                    "caustica.rt.sky.aerosolScatter", "composite.sky.aerosol-scatter", 0.55f, 0.0f, 4.0f);
+                    "caustica.rt.sky.aerosolScatter", "composite.sky.aerosol-scatter", 4.0f, 0.0f, 4.0f);
             public static final FloatSetting SKY_AEROSOL_ABSORPTION = clampedFloat(
-                    "caustica.rt.sky.aerosolAbsorption", "composite.sky.aerosol-absorption", 4.0f, 0.0f, 4.0f);
+                    "caustica.rt.sky.aerosolAbsorption", "composite.sky.aerosol-absorption", 0.0f, 0.0f, 4.0f);
             public static final FloatSetting SKY_OZONE = clampedFloat(
-                    "caustica.rt.sky.ozone", "composite.sky.ozone", 1.0f, 0.0f, 4.0f);
+                    "caustica.rt.sky.ozone", "composite.sky.ozone", 2.0f, 0.0f, 4.0f);
             public static final FloatSetting SKY_AEROSOL_HEIGHT_KM = clampedFloat(
-                    "caustica.rt.sky.aerosolHeightKm", "composite.sky.aerosol-height-km", 4.0f, 0.1f, 4.0f);
+                    "caustica.rt.sky.aerosolHeightKm", "composite.sky.aerosol-height-km", 0.1f, 0.1f, 4.0f);
             public static final FloatSetting SKY_AEROSOL_ANISOTROPY = clampedFloat(
-                    "caustica.rt.sky.aerosolAnisotropy", "composite.sky.aerosol-anisotropy", 0.0f, 0.0f, 0.95f);
+                    "caustica.rt.sky.aerosolAnisotropy", "composite.sky.aerosol-anisotropy", 0.8053686f, 0.0f, 0.95f);
             public static final FloatSetting SKY_BRIGHTNESS_EV = clampedFloat(
                     "caustica.rt.sky.brightnessEv", "composite.sky.brightness-ev", 0.0f, -4.0f, 4.0f);
             public static final FloatSetting SKY_SATURATION = clampedFloat(
@@ -858,11 +858,11 @@ public final class CausticaConfig {
             public static final FloatSetting MOON_TINT_R = skyRgb("moon-tint-r", 1.0f);
             public static final FloatSetting MOON_TINT_G = skyRgb("moon-tint-g", 1.0f);
             public static final FloatSetting MOON_TINT_B = skyRgb("moon-tint-b", 1.0f);
-            public static final FloatSetting STAR_BRIGHTNESS_EV = skyEv("star-brightness-ev", 8.0f, -8.0f, 8.0f);
+            public static final FloatSetting STAR_BRIGHTNESS_EV = skyEv("star-brightness-ev", 2.025641f, -8.0f, 8.0f);
             public static final FloatSetting STAR_DENSITY = clampedFloat(
                     "caustica.rt.sky.starDensity", "composite.sky.star-density", 2.0f, 0.0f, 2.0f);
             public static final FloatSetting STAR_SIZE = clampedFloat(
-                    "caustica.rt.sky.starSize", "composite.sky.star-size", 1.0f, 0.25f, 4.0f);
+                    "caustica.rt.sky.starSize", "composite.sky.star-size", 0.50240386f, 0.25f, 4.0f);
             public static final FloatSetting STAR_TINT_R = skyRgb("star-tint-r", 1.0f);
             public static final FloatSetting STAR_TINT_G = skyRgb("star-tint-g", 1.0f);
             public static final FloatSetting STAR_TINT_B = skyRgb("star-tint-b", 1.0f);
@@ -956,7 +956,7 @@ public final class CausticaConfig {
         public static final class Sharc {
             public static final BooleanSetting ENABLED = bool("caustica.rt.sharc", "sharc.enabled", true);
             public static final IntSetting CACHE_EXPONENT =
-                      clampedInt("caustica.rt.sharcCacheExponent", "sharc.cache-exponent", 24, 16, 28);
+                      clampedInt("caustica.rt.sharcCacheExponent", "sharc.cache-exponent", 23, 16, 28);
             public static final FloatSetting SCENE_SCALE =
                     clampedFloat("caustica.rt.sharcSceneScale", "sharc.scene-scale", 32.0f, 1.0f, 100.0f);
             public static final FloatSetting RADIANCE_SCALE =
@@ -1073,7 +1073,7 @@ public final class CausticaConfig {
                     "caustica.rt.dlssRr.particleTemporalHistory",
                     "dlss-rr.particle-temporal-history", true);
             public static final IntSetting PRESET = intValue("caustica.rt.dlssRr.preset", "dlss-rr.preset", 4);
-            public static final IntSetting QUALITY = intValue("caustica.rt.dlssRr.quality", "dlss-rr.quality", 0);
+            public static final IntSetting QUALITY = intValue("caustica.rt.dlssRr.quality", "dlss-rr.quality", 2);
             public static final IntSetting INPUT_SCALE_PERCENT = clampedInt(
                     "caustica.rt.dlssRr.inputScale", "dlss-rr.input-scale-percent", 50, 10, 200);
 
@@ -1084,7 +1084,7 @@ public final class CausticaConfig {
         /** Global reconstruction policy. Auto is vendor/OS aware but never prevents an explicit choice. */
         public static final class Reconstruction {
             public static final StringSetting BACKEND = string(
-                    "caustica.rt.reconstruction.backend", "reconstruction.backend", "auto",
+                    "caustica.rt.reconstruction.backend", "reconstruction.backend", "dlss-rr",
                     value -> switch (value == null ? "" : value.trim().toLowerCase(java.util.Locale.ROOT)) {
                         case "nrd", "dlss-rr", "off" -> value.trim().toLowerCase(java.util.Locale.ROOT);
                         default -> "auto";
@@ -1121,7 +1121,7 @@ public final class CausticaConfig {
                         default -> "edge-adaptive";
                     });
             public static final FloatSetting UPSCALE_SHARPNESS = clampedFloat(
-                    "caustica.rt.nrd.upscaleSharpness", "nrd.upscale-sharpness", 0.0f, 0.0f, 1.0f);
+                    "caustica.rt.nrd.upscaleSharpness", "nrd.upscale-sharpness", 0.23453094f, 0.0f, 1.0f);
             public static final IntSetting MAX_ACCUMULATED_FRAMES = clampedInt(
                     "caustica.rt.nrd.maxAccumulatedFrames", "nrd.max-accumulated-frames", 30, 0, 255);
             public static final IntSetting MAX_FAST_ACCUMULATED_FRAMES = clampedInt(
@@ -1143,7 +1143,7 @@ public final class CausticaConfig {
             public static final FloatSetting FIREFLY_SUPPRESSOR_SCALE = clampedFloat(
                     "caustica.rt.nrd.fireflySuppressorScale", "nrd.firefly-suppressor-scale", 3.0f, 1.0f, 3.0f);
             public static final FloatSetting MIN_BLUR_RADIUS = clampedFloat(
-                    "caustica.rt.nrd.minBlurRadius", "nrd.min-blur-radius", 8.02f, 0.0f, 10.0f);
+                    "caustica.rt.nrd.minBlurRadius", "nrd.min-blur-radius", 8.01626f, 0.0f, 10.0f);
             public static final FloatSetting MAX_BLUR_RADIUS = clampedFloat(
                     "caustica.rt.nrd.maxBlurRadius", "nrd.max-blur-radius", 30.0f, 0.0f, 100.0f);
             public static final FloatSetting LOBE_ANGLE_FRACTION = clampedFloat(
@@ -1222,7 +1222,7 @@ public final class CausticaConfig {
             public static final StringSetting MODE = string(
                     "caustica.rt.fg.mode", "frame-generation.mode", "off", Fg::sanitizeMode);
             public static final IntSetting MULTI_FRAME_COUNT =
-                    clampedInt("caustica.rt.fg.multiFrameCount", "frame-generation.multi-frame-count", 1, 1, 5);
+                    clampedInt("caustica.rt.fg.multiFrameCount", "frame-generation.multi-frame-count", 2, 1, 5);
             public static final FloatSetting DYNAMIC_TARGET_FPS = clampedFloat(
                     "caustica.rt.fg.dynamicTargetFps", "frame-generation.dynamic-target-fps", 0.0f, 0.0f, 1000.0f);
             /** Desired physical display cadence for Vulkan fixed MFG's Parallel queue policy. */
@@ -1312,7 +1312,7 @@ public final class CausticaConfig {
             public static final FloatSetting LOW_PERCENTILE = clampedFloat(
                     "caustica.rt.exposure.lowPercentile", "exposure.low-percentile", 0.10f, 0.0f, 0.95f);
             public static final FloatSetting HIGH_PERCENTILE = clampedFloat(
-                    "caustica.rt.exposure.highPercentile", "exposure.high-percentile", 0.80f, 0.05f, 1.0f);
+                    "caustica.rt.exposure.highPercentile", "exposure.high-percentile", 0.99425286f, 0.05f, 1.0f);
             public static final FloatSetting HIGHLIGHT_PERCENTILE = clampedFloat(
                     "caustica.rt.exposure.highlightPercentile", "exposure.highlight-percentile", 0.99f, 0.5f, 1.0f);
             public static final FloatSetting HIGHLIGHT_HEADROOM = clampedFloat(
@@ -1610,13 +1610,13 @@ public final class CausticaConfig {
 
             public static final BooleanSetting ENABLED = bool("caustica.rt.hdr", "hdr.enabled", false);
             public static final StringSetting TONEMAP_MODE =
-                    string("caustica.rt.hdr.tonemapMode", "hdr.tonemap-mode", TONEMAP_PSYCHOV23, Hdr::sanitizeTonemapMode);
+                    string("caustica.rt.hdr.tonemapMode", "hdr.tonemap-mode", "eetf", Hdr::sanitizeTonemapMode);
             public static final FloatSetting PAPER_WHITE_NITS =
-                    clampedFloat("caustica.rt.hdr.paperWhiteNits", "hdr.paper-white-nits", 200.0f, 80.0f, 1000.0f);
+                    clampedFloat("caustica.rt.hdr.paperWhiteNits", "hdr.paper-white-nits", 203.0f, 80.0f, 1000.0f);
             public static final FloatSetting UI_BRIGHTNESS_NITS =
-                    clampedFloat("caustica.rt.hdr.uiBrightnessNits", "hdr.ui-brightness-nits", 200.0f, 40.0f, 1000.0f);
+                    clampedFloat("caustica.rt.hdr.uiBrightnessNits", "hdr.ui-brightness-nits", 100.0f, 40.0f, 1000.0f);
             public static final FloatSetting PEAK_NITS =
-                    clampedFloat("caustica.rt.hdr.peakNits", "hdr.peak-nits", 1000.0f, 80.0f, 10000.0f);
+                    clampedFloat("caustica.rt.hdr.peakNits", "hdr.peak-nits", 800.0f, 80.0f, 10000.0f);
             // Shared by the SDR and HDR PsychoV output paths. Keep the existing hdr.psychov TOML paths
             // for configuration compatibility even though these controls are no longer presented as HDR-only.
             public static final FloatSetting PSYCHO_HIGHLIGHTS =
