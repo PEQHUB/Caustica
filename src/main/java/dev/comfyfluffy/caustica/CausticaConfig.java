@@ -178,6 +178,14 @@ public final class CausticaConfig {
                 " Streamline Reflex Low Latency. DLSS-G forces effective On while generation is active.\n"
                         + " minimum-interval-us applies only while DLSS-G is off; DLSS-G always submits 0 (unlimited).\n"
                         + " PCL markers and sleep still run when Reflex is Off.");
+        FILE.setComment("lights",
+                " RIS direct lighting from block emitters (torches, glowstone, lava, ...): per diffuse\n"
+                        + " vertex, resample ris-candidates power-weighted proposals and spend one shadow ray on\n"
+                        + " the survivor. ris-candidates = 0 disables it entirely (emitters just gather on direct\n"
+                        + " hit, same as with no NEE). Power-weighted sampling and the local per-section light\n"
+                        + " grid are always active whenever RIS is on. min-fill-ratio drops emissive footprints\n"
+                        + " below that fraction of their bounding rectangle (speckle/sparse crossed planes), so\n"
+                        + " only reasonably compact glows become lights. stats/dump/dump-radius are debug logging.");
         FILE.setComment("offline-renderer",
                 " Uncapped progressive native-resolution rendering started with F7.\n"
                         + " The scene, camera, water time, and exposure are frozen for the session.\n"
@@ -969,6 +977,21 @@ public final class CausticaConfig {
                     intAtLeast("caustica.rt.rebaseDistanceBlocks", "terrain.rebase-distance-blocks", 128, 0);
 
             private Terrain() {
+            }
+        }
+
+        /** RIS block-emitter lights. {@code ris-candidates = 0} disables everything. */
+        public static final class Lights {
+            public static final IntSetting RIS_CANDIDATES =
+                    intAtLeast("caustica.rt.risCandidates", "lights.ris-candidates", 8, 0);
+            public static final FloatSetting MIN_FILL_RATIO =
+                    finiteFloat("caustica.rt.lightMinFillRatio", "lights.min-fill-ratio", 0.25f);
+            public static final BooleanSetting STATS = bool("caustica.rt.lightStats", "lights.stats", false);
+            public static final BooleanSetting DUMP = bool("caustica.rt.lightDump", "lights.dump", false);
+            public static final IntSetting DUMP_RADIUS =
+                    intAtLeast("caustica.rt.lightDumpRadius", "lights.dump-radius", 12, 1);
+
+            private Lights() {
             }
         }
 

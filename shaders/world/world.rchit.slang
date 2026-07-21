@@ -602,4 +602,8 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
     if (material == MATERIAL_WATER && entering) {
         payload.flags |= PAYLOAD_WATER_ENTERING;
     }
+    // RIS emitter-NEE membership: raygen gates this emitter's direct-hit emission term (RIS covers it).
+    if ((pr.flags & TERRAIN_PRIM_IN_LIGHT_BUFFER) != 0u) {
+        payload.flags |= PAYLOAD_EMITTER_IN_LIST;
+    }
 }

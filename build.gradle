@@ -380,34 +380,34 @@ abstract class CompileShaders extends DefaultTask {
 					new File(temporaryDir, "sharc_atomic_probe.comp.spv"), sharcInclude)
 			["world_sharc.rgen.spv", "world_sharc_nv.rgen.spv"].each { name ->
 				def raygen = new File(scratchDir, name)
-				if (!raygen.isFile() || raygen.length() > 180_000L) {
+				if (!raygen.isFile() || raygen.length() > 200_000L) {
 					throw new GradleException("SHaRC query raygen complexity budget exceeded: ${name} is "
-							+ "${raygen.isFile() ? raygen.length() : 'missing'} bytes (limit 180000)")
+							+ "${raygen.isFile() ? raygen.length() : 'missing'} bytes (limit 200000)")
 				}
 			}
 			["world_sharc_diffuse.rgen.spv", "world_sharc_diffuse_nv.rgen.spv"].each { name ->
 				def raygen = new File(scratchDir, name)
-				if (!raygen.isFile() || raygen.length() > 180_000L) {
+				if (!raygen.isFile() || raygen.length() > 200_000L) {
 					throw new GradleException("SHaRC diffuse-query raygen complexity budget exceeded: ${name} is "
-							+ "${raygen.isFile() ? raygen.length() : 'missing'} bytes (limit 180000)")
+							+ "${raygen.isFile() ? raygen.length() : 'missing'} bytes (limit 200000)")
 				}
 			}
 			["world_sharc_primary.rgen.spv", "world_sharc_primary_nv.rgen.spv"].each { name ->
 				def raygen = new File(scratchDir, name)
-				if (!raygen.isFile() || raygen.length() > 180_000L) {
+				if (!raygen.isFile() || raygen.length() > 200_000L) {
 					throw new GradleException("SHaRC primary-query raygen complexity budget exceeded: ${name} is "
-							+ "${raygen.isFile() ? raygen.length() : 'missing'} bytes (limit 180000)")
+							+ "${raygen.isFile() ? raygen.length() : 'missing'} bytes (limit 200000)")
 				}
 			}
 		}
 		// The live raygen owns the camera-only physical atmosphere boundary and vanilla-controlled section
-		// reveal. Keep that intentional presentation path inside a tight 128 KB ceiling; transport variants
-		// still share the same visibility traversal and sampler-inlining checks below.
+		// reveal. RIS emitter-NEE requires additional code; keep the ceiling generous enough for the live
+		// transport path while still catching runaway inlining.
 		["world_base.rgen.spv", "world.rgen.spv", "world_nv.rgen.spv"].each { name ->
 			def raygen = new File(scratchDir, name)
-			if (!raygen.isFile() || raygen.length() > 132_000L) {
+			if (!raygen.isFile() || raygen.length() > 200_000L) {
 				throw new GradleException("Glass-only world raygen complexity budget exceeded: ${name} is "
-						+ "${raygen.isFile() ? raygen.length() : 'missing'} bytes (limit 132000)")
+						+ "${raygen.isFile() ? raygen.length() : 'missing'} bytes (limit 200000)")
 			}
 			def disassembly = new File(temporaryDir, "${name}.spvasm")
 			execOps.exec {
@@ -431,9 +431,9 @@ abstract class CompileShaders extends DefaultTask {
 		}
 		["world_nrd_base.rgen.spv", "world_nrd.rgen.spv", "world_nrd_nv.rgen.spv"].each { name ->
 			def raygen = new File(scratchDir, name)
-			if (!raygen.isFile() || raygen.length() > 175_000L) {
+			if (!raygen.isFile() || raygen.length() > 200_000L) {
 				throw new GradleException("NRD world raygen complexity budget exceeded: ${name} is "
-						+ "${raygen.isFile() ? raygen.length() : 'missing'} bytes (limit 175000)")
+						+ "${raygen.isFile() ? raygen.length() : 'missing'} bytes (limit 200000)")
 			}
 		}
 		["world_offline_base.rgen.spv", "world_offline.rgen.spv", "world_offline_nv.rgen.spv"].each { name ->

@@ -22,6 +22,7 @@ import dev.comfyfluffy.caustica.rt.RtResolutionScale;
 import dev.comfyfluffy.caustica.rt.RtSharcSupport;
 import dev.comfyfluffy.caustica.rt.pipeline.RtReconstruction;
 import dev.comfyfluffy.caustica.rt.pipeline.RtDlssRr;
+import dev.comfyfluffy.caustica.rt.terrain.RtTerrain;
 import java.util.ArrayList;
 import java.util.IdentityHashMap;
 import java.util.List;
@@ -743,6 +744,28 @@ public class CausticaSettingsScreen extends Screen {
         addGrid(controls.subList(0, 2));
         addBundle("lighting.emissive");
         addGrid(controls.subList(2, 3));
+
+        List<AbstractWidget> emitterSampling = new ArrayList<>();
+        emitterSampling.add(risCandidatesSlider(CausticaConfig.Rt.Lights.RIS_CANDIDATES));
+        emitterSampling.add(floatSlider(Component.translatable("caustica.options.rt.lightMinFillRatio"),
+                CausticaConfig.Rt.Lights.MIN_FILL_RATIO, 0.0, 1.0,
+                value -> String.format(Locale.ROOT, "%.0f%%", value * 100.0))
+                .onRelease(() -> {
+                    RtTerrain.requestFullClear();
+                    RtComposite.INSTANCE.requestTemporalReset();
+                }).tooltip(Component.translatable("caustica.options.rt.lightMinFillRatio.tooltip")));
+        emitterSampling.add(toggle(Component.translatable("caustica.options.rt.lightStats"),
+                CausticaConfig.Rt.Lights.STATS)
+                .tooltip(Component.translatable("caustica.options.rt.lightStats.tooltip")));
+        emitterSampling.add(toggle(Component.translatable("caustica.options.rt.lightDump"),
+                CausticaConfig.Rt.Lights.DUMP)
+                .tooltip(Component.translatable("caustica.options.rt.lightDump.tooltip")));
+        emitterSampling.add(intSlider(Component.translatable("caustica.options.rt.lightDumpRadius"),
+                CausticaConfig.Rt.Lights.DUMP_RADIUS, 1, 64,
+                value -> String.format(Locale.ROOT, "%.0f blocks", value))
+                .tooltip(Component.translatable("caustica.options.rt.lightDumpRadius.tooltip")));
+        addBundle("lighting.emitterSampling");
+        addGrid(emitterSampling);
     }
 
     private void addSky() {
@@ -1303,6 +1326,21 @@ public class CausticaSettingsScreen extends Screen {
         if (quality == RtResolutionScale.CUSTOM_QUALITY) return name;
         return name.copy().append(String.format(Locale.ROOT, " (%.2fx)",
                 RtResolutionScale.presetUpscaleRatio(quality)));
+    }
+
+    private Slider risCandidatesSlider(IntSetting setting) {
+        int[] publishedValue = {setting.value()};
+        return intSlider(Component.translatable("caustica.options.rt.risCandidates"), setting, 0, 32,
+                value -> value == 0.0 ? "Off" : String.format(Locale.ROOT, "%.0f candidates", value))
+                .tooltip(Component.translatable("caustica.options.rt.risCandidates.tooltip"))
+                .onRelease(() -> {
+                    int current = setting.value();
+                    if (RtTerrain.requiresLightListRebuild(publishedValue[0], current)) {
+                        RtTerrain.requestFullClear();
+                        RtComposite.INSTANCE.requestTemporalReset();
+                    }
+                    publishedValue[0] = current;
+                });
     }
 
     private static void selectDlssQuality(int quality) {

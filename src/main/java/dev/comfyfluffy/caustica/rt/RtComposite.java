@@ -2280,7 +2280,22 @@ public final class RtComposite {
                             "relax".equals(CausticaConfig.Rt.Nrd.DENOISER.get()) ? 1.0f : 0.0f),
                     sky.skyOptical(), sky.skyShape(), sky.skyTint(), sky.skyCelestialAppearance(),
                     sky.skyStarAppearance(), sky.skySunTint(), sky.skyMoonTint(), sky.skyStarTint(),
-                    sky.skyAirglowHorizon(), sky.skyAirglowZenith()
+                    sky.skyAirglowHorizon(), sky.skyAirglowZenith(),
+                    // RIS emitter NEE: published light buffer + RIS candidate count (0 = emitter NEE off;
+                    // the shader also requires lightCount > 0, so an empty buffer degrades to legacy gather).
+                    terrain.lightBufferAddress(),
+                    terrain.lightAliasBufferAddress(),
+                    terrain.lightLocalAliasBufferAddress(),
+                    new Float4(terrain.lightRebaseOffsetX(), terrain.lightRebaseOffsetY(),
+                            terrain.lightRebaseOffsetZ(), terrain.lightInvGlobalPowerSum()),
+                    terrain.lightGridCellBufferAddress(),
+                    terrain.lightGridSpanBufferAddress(),
+                    new Float4(terrain.lightGridOriginX(), terrain.lightGridOriginY(),
+                            terrain.lightGridOriginZ(), 16f),
+                    new Int4(terrain.lightGridDimX(), terrain.lightGridDimY(),
+                            terrain.lightGridDimZ(), 0),
+                    terrain.lightCount(),
+                    CausticaConfig.Rt.Lights.RIS_CANDIDATES.value()
             ).write(push);
             pushBuf.flush(0L, WORLD_PUSH_SIZE);
             if (skyViewPipeline != null && skyViewLut != null) {
