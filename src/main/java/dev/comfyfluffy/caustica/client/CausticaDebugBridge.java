@@ -64,13 +64,12 @@ final class CausticaDebugBridge {
             setBoolean(command, "frameStats", CausticaConfig.Rt.FrameStats.ENABLED);
             boolean terrainSettingsChanged = command.containsKey("terrainDispatch")
                     || command.containsKey("terrainResults") || command.containsKey("terrainInflight")
-                    || command.containsKey("terrainBuildBatch") || command.containsKey("omm")
+                    || command.containsKey("terrainBuildBatch")
                     || command.containsKey("ommSubdivision");
             setInt(command, "terrainDispatch", CausticaConfig.Rt.Terrain.ASYNC_DISPATCH_PER_PASS);
             setInt(command, "terrainResults", CausticaConfig.Rt.Terrain.COMPLETION_RESULTS_PER_PASS);
             setInt(command, "terrainInflight", CausticaConfig.Rt.Terrain.MAX_INFLIGHT_SECTIONS);
             setInt(command, "terrainBuildBatch", CausticaConfig.Rt.Terrain.GPU_BUILD_BATCH_SIZE);
-            setBoolean(command, "omm", CausticaConfig.Rt.Omm.ENABLED);
             setInt(command, "ommSubdivision", CausticaConfig.Rt.Omm.SUBDIVISION);
             if (terrainSettingsChanged) RtTerrain.requestFullClear();
             String terrainBenchmark = command.getProperty("terrainBenchmark");

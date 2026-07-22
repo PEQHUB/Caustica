@@ -114,6 +114,7 @@ public final class RtDeviceBringup {
     private static volatile SerBackend serBackend = SerBackend.NONE;
     private static volatile boolean ommEnabled; // VK_EXT_opacity_micromap actually enabled on the device
     private static volatile boolean opacityMicromapSupported;
+    private static volatile boolean ommEntryPointsAvailable;
     private static volatile boolean nvidiaDevice;
     private static volatile int rawDriverVersion;
     private static volatile boolean traceRaysIndirectSupported;
@@ -368,6 +369,9 @@ public final class RtDeviceBringup {
         if ("off".equals(ommPolicy())) {
             return "disabled-by-compatibility-policy";
         }
+        if (!ommEntryPointsAvailable) {
+            return "omm-entry-points-unavailable";
+        }
         if (nvidiaDevice && serBackend == SerBackend.NONE && "auto".equals(ommPolicy())) {
             return "disabled-on-nvidia-portable-profile";
         }
@@ -527,6 +531,7 @@ public final class RtDeviceBringup {
         serBackend = SerBackend.NONE;
         ommEnabled = false;
         opacityMicromapSupported = false;
+        ommEntryPointsAvailable = false;
         nvidiaDevice = isNvidia(physicalDevice);
         rawDriverVersion = physicalDevice.vkPhysicalDeviceProperties().driverVersion();
         wideLinesEnabled = false;
@@ -593,6 +598,7 @@ public final class RtDeviceBringup {
         opacityMicromapSupported = support.ommSupported;
         ommEnabled = opacityMicromapSupported
                 && effectiveOmmRequested(nvidiaDevice, selectedSerBackend);
+        ommEntryPointsAvailable = true;
         if (ommEnabled) {
             features.add(OMM_FEATURE);
         }
@@ -641,11 +647,21 @@ public final class RtDeviceBringup {
             boolean asBuild = caps.vkCmdBuildAccelerationStructuresKHR != 0L;
             boolean traceRays = caps.vkCmdTraceRaysKHR != 0L;
             traceRaysIndirectSupported = caps.vkCmdTraceRaysIndirectKHR != 0L;
+            ommEntryPointsAvailable = !ommEnabled || (
+                    caps.vkGetMicromapBuildSizesEXT != 0L
+                            && caps.vkCreateMicromapEXT != 0L
+                            && caps.vkCmdBuildMicromapsEXT != 0L);
             if (!(rtPipeline && asBuild && traceRays)) {
                 CausticaMod.LOGGER.error(
                         "RT extensions enabled but entry points missing (rtPipeline={}, asBuild={}, traceRays={}) — RT bring-up FAILED",
                         rtPipeline, asBuild, traceRays);
                 return;
+            }
+            if (!ommEntryPointsAvailable) {
+                ommEnabled = false;
+                maxOpacity4StateSubdivisionLevel = 0;
+                CausticaMod.LOGGER.warn(
+                        "OMM was enabled during device creation but required entry points are missing; disabling OMM");
             }
             try (MemoryStack stack = MemoryStack.stackPush()) {
                 VkPhysicalDeviceAccelerationStructurePropertiesKHR asProps =
