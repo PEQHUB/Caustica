@@ -10,8 +10,8 @@ import java.util.Properties;
 public final class RtSharcSupport {
     private static final Properties METADATA = loadMetadata();
     private static volatile String runtimeFailure;
-    private static volatile boolean shaderFloat16Supported;
-    private static volatile boolean storageBuffer16BitAccessSupported;
+    private static volatile boolean shaderFloat16Enabled;
+    private static volatile boolean storageBuffer16BitAccessEnabled;
 
     private RtSharcSupport() {}
 
@@ -29,7 +29,7 @@ public final class RtSharcSupport {
 
     public static boolean available() {
         return packaged() && RtRuntimeStatus.vulkan() && RtDeviceBringup.sharcInt64AtomicsEnabled()
-                && shaderFloat16Supported && storageBuffer16BitAccessSupported
+                && shaderFloat16Enabled && storageBuffer16BitAccessEnabled
                 && runtimeFailure == null;
     }
 
@@ -39,23 +39,23 @@ public final class RtSharcSupport {
                 : "SHaRC shader objects are missing from this non-production build";
         if (!RtRuntimeStatus.vulkan()) return RtRuntimeStatus.unavailableReason();
         if (!RtDeviceBringup.sharcInt64AtomicsEnabled()) return "GPU lacks shaderBufferInt64Atomics";
-        if (!shaderFloat16Supported) return "GPU lacks shaderFloat16 (native FP16)";
-        if (!storageBuffer16BitAccessSupported) return "GPU lacks storageBuffer16BitAccess (16-bit storage)";
+        if (!shaderFloat16Enabled) return "GPU lacks shaderFloat16 (native FP16)";
+        if (!storageBuffer16BitAccessEnabled) return "GPU lacks storageBuffer16BitAccess (16-bit storage)";
         if (runtimeFailure != null) return runtimeFailure;
         return "available (NVIDIA SHaRC " + version() + ")";
     }
 
-    public static void setDeviceCapabilities(boolean float16, boolean storage16bit) {
-        shaderFloat16Supported = float16;
-        storageBuffer16BitAccessSupported = storage16bit;
+    public static void setDeviceFeaturesEnabled(boolean float16Enabled, boolean storage16Enabled) {
+        shaderFloat16Enabled = float16Enabled;
+        storageBuffer16BitAccessEnabled = storage16Enabled;
     }
 
-    public static boolean shaderFloat16Supported() {
-        return shaderFloat16Supported;
+    public static boolean shaderFloat16Enabled() {
+        return shaderFloat16Enabled;
     }
 
-    public static boolean storageBuffer16BitAccessSupported() {
-        return storageBuffer16BitAccessSupported;
+    public static boolean storageBuffer16BitAccessEnabled() {
+        return storageBuffer16BitAccessEnabled;
     }
 
     public static void fail(String reason) {

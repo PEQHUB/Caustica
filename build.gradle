@@ -1096,6 +1096,7 @@ def verifyProductionArtifact = tasks.register("verifyProductionArtifact") {
 		}
 		if (!configuredSharcSdk.isBlank()) {
 				required.addAll([
+				// RGB raygen families (7 families × 3 backends = 21)
 				"caustica/rt/world_sharc_base.rgen.spv",
 				"caustica/rt/world_sharc.rgen.spv",
 				"caustica/rt/world_sharc_nv.rgen.spv",
@@ -1117,12 +1118,13 @@ def verifyProductionArtifact = tasks.register("verifyProductionArtifact") {
 				"caustica/rt/world_sharc_update_diagnostic.rgen.spv",
 				"caustica/rt/world_sharc_update_diagnostic_nv.rgen.spv",
 				"caustica/rt/world_sharc_update_diagnostic_base.rgen.spv",
+				// RGB helper family
 				"caustica/rt/world_sharc.rchit.spv",
 				"caustica/rt/world_sharc.rahit.spv",
 				"caustica/rt/world_sharc.rmiss.spv",
 				"caustica/rt/world_sharc_guide.rmiss.spv",
 				"caustica/rt/sharc_resolve.comp.spv",
-				"caustica/rt/sharc_atomic_probe.comp.spv",
+				// Directional-SH raygen families (7 families × 3 backends = 21)
 				"caustica/rt/world_sharc_sh.rgen.spv",
 				"caustica/rt/world_sharc_sh_base.rgen.spv",
 				"caustica/rt/world_sharc_sh_nv.rgen.spv",
@@ -1144,8 +1146,20 @@ def verifyProductionArtifact = tasks.register("verifyProductionArtifact") {
 				"caustica/rt/world_sharc_update_diagnostic_sh.rgen.spv",
 				"caustica/rt/world_sharc_update_diagnostic_sh_base.rgen.spv",
 				"caustica/rt/world_sharc_update_diagnostic_sh_nv.rgen.spv",
+				// Directional-SH helper family
+				"caustica/rt/world_sharc_sh.rchit.spv",
+				"caustica/rt/world_sharc_sh.rahit.spv",
+				"caustica/rt/world_sharc_sh.rmiss.spv",
+				"caustica/rt/world_sharc_sh_guide.rmiss.spv",
+				"caustica/rt/sharc_resolve_sh.comp.spv",
+				// License
 				"META-INF/licenses/nvidia/NVIDIA-SHARC-SDK.txt"
 			])
+			// 42 raygens + 8 hit/miss helpers + 2 resolves = 52 runtime SHARC SPIR-V modules
+			def sharcCount = required.count { it.startsWith("caustica/rt/") && it.endsWith(".spv") }
+			if (sharcCount != 52) {
+				throw new GradleException("Unexpected SHARC runtime resource count: ${sharcCount} (expected 52)")
+			}
 		}
 		def runtimeZip = new java.util.zip.ZipFile(runtimeJar)
 		try {

@@ -142,6 +142,9 @@ public final class RtDeviceBringup {
     private static final VulkanPNextStruct OMM_FEATURES_STRUCT = new VulkanPNextStruct(
             VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_OPACITY_MICROMAP_FEATURES_EXT,
             VkPhysicalDeviceOpacityMicromapFeaturesEXT.SIZEOF);
+    private static final VulkanPNextStruct VULKAN_11_FEATURES_STRUCT = new VulkanPNextStruct(
+            VK12.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
+            VkPhysicalDeviceVulkan11Features.SIZEOF);
     private static final VulkanFeature BUFFER_DEVICE_ADDRESS_FEATURE = new VulkanFeature(
             VulkanBackend.VK12_FEATURES_STRUCT, "bufferDeviceAddress", VkPhysicalDeviceVulkan12Features.BUFFERDEVICEADDRESS);
     private static final VulkanFeature RUNTIME_DESCRIPTOR_ARRAY_FEATURE = new VulkanFeature(
@@ -176,6 +179,15 @@ public final class RtDeviceBringup {
             OMM_FEATURES_STRUCT, "micromap", VkPhysicalDeviceOpacityMicromapFeaturesEXT.MICROMAP);
     private static final VulkanFeature WIDE_LINES_FEATURE = new VulkanFeature(
             VulkanBackend.VK10_FEATURES_STRUCT, "wideLines", VkPhysicalDeviceFeatures.WIDELINES);
+    private static final VulkanFeature SHARC_BUFFER_INT64_ATOMICS_FEATURE = new VulkanFeature(
+            VulkanBackend.VK12_FEATURES_STRUCT, "shaderBufferInt64Atomics",
+            VkPhysicalDeviceVulkan12Features.SHADERBUFFERINT64ATOMICS);
+    private static final VulkanFeature SHARC_SHADER_FLOAT16_FEATURE = new VulkanFeature(
+            VulkanBackend.VK12_FEATURES_STRUCT, "shaderFloat16",
+            VkPhysicalDeviceVulkan12Features.SHADERFLOAT16);
+    private static final VulkanFeature SHARC_STORAGE_BUFFER_16_FEATURE = new VulkanFeature(
+            VULKAN_11_FEATURES_STRUCT, "storageBuffer16BitAccess",
+            VkPhysicalDeviceVulkan11Features.STORAGEBUFFER16BITACCESS);
     private static final List<VulkanFeature> REQUIRED_RT_FEATURES = List.of(
             BUFFER_DEVICE_ADDRESS_FEATURE, RUNTIME_DESCRIPTOR_ARRAY_FEATURE, SAMPLED_IMAGE_NON_UNIFORM_FEATURE,
             DESCRIPTOR_PARTIALLY_BOUND_FEATURE, SAMPLED_IMAGE_UPDATE_AFTER_BIND_FEATURE, SHADER_INT64_FEATURE,
@@ -537,6 +549,7 @@ public final class RtDeviceBringup {
         wideLinesEnabled = false;
         sharcInt64AtomicsEnabled = false;
         maxLineWidth = 1.0f;
+        RtSharcSupport.setDeviceFeaturesEnabled(false, false);
         String missing = firstUnsupported(physicalDevice);
         if (missing != null) {
             if (!loggedUnavailable) {
@@ -561,15 +574,19 @@ public final class RtDeviceBringup {
         SerBackend selectedSerBackend = support.serBackend;
         // Optional SHaRC native atomic path. The separately packaged shaders require this exact feature;
         // if absent, they remain unavailable and the baseline pipeline is used.
-        sharcInt64AtomicsEnabled = RtSharcSupport.packaged() && supportsShaderBufferInt64Atomics(physicalDevice);
-        if (sharcInt64AtomicsEnabled) {
-            features.add(new VulkanFeature(VulkanBackend.VK12_FEATURES_STRUCT, "shaderBufferInt64Atomics",
-                    VkPhysicalDeviceVulkan12Features.SHADERBUFFERINT64ATOMICS));
+        boolean sharcPackaged = RtSharcSupport.packaged();
+        boolean sharcInt64Requested = sharcPackaged && supportsShaderBufferInt64Atomics(physicalDevice);
+        boolean sharcFloat16Requested = sharcPackaged && supportsShaderFloat16(physicalDevice);
+        boolean sharcStorage16Requested = sharcPackaged && supportsStorageBuffer16BitAccess(physicalDevice);
+        if (sharcInt64Requested) {
+            features.add(SHARC_BUFFER_INT64_ATOMICS_FEATURE);
         }
-        // SHARC 1.8 directional encoding requires native FP16 and 16-bit storage-buffer access.
-        boolean float16 = supportsShaderFloat16(physicalDevice);
-        boolean storage16bit = supportsStorageBuffer16BitAccess(physicalDevice);
-        RtSharcSupport.setDeviceCapabilities(float16, storage16bit);
+        if (sharcFloat16Requested) {
+            features.add(SHARC_SHADER_FLOAT16_FEATURE);
+        }
+        if (sharcStorage16Requested) {
+            features.add(SHARC_STORAGE_BUFFER_16_FEATURE);
+        }
         if (selectedSerBackend != SerBackend.NONE) {
             features.add(selectedSerBackend == SerBackend.NV ? SER_NV_FEATURE : SER_EXT_FEATURE);
         }
@@ -608,12 +625,14 @@ public final class RtDeviceBringup {
 
         rtRequested = true;
         serBackend = selectedSerBackend;
+        sharcInt64AtomicsEnabled = sharcInt64Requested;
+        RtSharcSupport.setDeviceFeaturesEnabled(sharcFloat16Requested, sharcStorage16Requested);
         CausticaMod.LOGGER.info(
                 "Ray tracing: enabling {}{}{} + features [bufferDeviceAddress, accelerationStructure, rayTracingPipeline, rayQuery, optionalInvocationReorder({}), liveReorder=off, offlineReorder={}"
                         + (wideLinesEnabled ? ", wideLines(max=" + maxLineWidth + ")" : "")
                         + (sharcInt64AtomicsEnabled ? ", shaderBufferInt64Atomics(SHaRC)" : "")
-                        + (RtSharcSupport.shaderFloat16Supported() ? ", shaderFloat16(SHaRC)" : "")
-                        + (RtSharcSupport.storageBuffer16BitAccessSupported() ? ", storageBuffer16BitAccess(SHaRC)" : "")
+                        + (RtSharcSupport.shaderFloat16Enabled() ? ", shaderFloat16(SHaRC)" : "")
+                        + (RtSharcSupport.storageBuffer16BitAccessEnabled() ? ", storageBuffer16BitAccess(SHaRC)" : "")
                         + (ommEnabled ? ", opacityMicromap" : "") + "] + overlayMsaa=" + overlayMsaaSamples + "x on [{}]",
                 RT_EXTENSIONS, serBackend.extensionName == null ? "" : " + " + serBackend.extensionName,
                 ommEnabled ? " + " + OPTIONAL_RT_EXTENSIONS : "", serBackend.label,
