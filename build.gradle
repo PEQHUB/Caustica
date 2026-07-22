@@ -142,8 +142,8 @@ if (!actualSlangVersion.readLines().any { it.trim() == requiredSlangVersion }) {
 
 // NVIDIA SHaRC is an external, separately licensed shader SDK. Its source is never copied into the
 // LGPL source tree; only validated SPIR-V object code and the NVIDIA license enter a runtime JAR.
-def sharcVersion = "1.6.5.0"
-def sharcCommit = "0b9f58bbc8c41736042d4da964830a247e424a00"
+def sharcVersion = "1.8.0.0"
+def sharcCommit = "e19ccacd511f42a3df6f850052d508c13c9e9737"
 def configuredSharcSdk = (findProperty("sharcSdk") ?: System.getenv("SHARC_SDK") ?: "").toString()
 def sharcOptOut = providers.gradleProperty("withoutSharc")
 		.map { it.toBoolean() }.getOrElse(false)
@@ -151,15 +151,32 @@ if (sharcOptOut && !configuredSharcSdk.isBlank()) {
 	throw new GradleException("Choose either a SHARC_SDK/sharcSdk input or -PwithoutSharc=true, not both")
 }
 def sharcHeaderHashes = [
-	"include/HashGridCommon.h": "980D4CE2FE53273D55FE1DD771B155F89BB28C86D19947427F318D8661F082A4",
-	"include/SharcCommon.h": "0F61B11E89E0EA80292194DDE6B33478D6E45DD2D9971A77F5658045A9F6BDC3",
-	"include/SharcGlsl.h": "C1802A975BC47196709892C89E35C7212BDBB41568A3AC60F37460AAE52F9469",
-	"include/SharcTypes.h": "0B9D8AC0A4A8C8B303F6BDD338652CA251E5E5152B47CB55972DDD5904B4CC08",
-	"License.md": "8FF8A1723EE41B2647B5B5CD5EF961C7F58FA617803D6DE3EA68F954F85FF419"
+	"include/HashGridCommon.h": "5A6D67186A88E61F0D47518F5986021F309F2897CCB482AB9E011A7A08749E7F",
+	"include/HashGridTypes.h": "34012BCFFFF0F2545C108A7C9DCB223298A70EBC2C377A86FBDDFD1ECD76D614",
+	"include/SharcCommon.h": "D4B6E2765828A4B1C71BBF40609B2DBE72B4AEC8FF4D80CCDA21A83AB634ECC4",
+	"include/SharcGlslHelpers.h": "FDDD45196880F5A58F9614B27D79BEA5C86A9FA89CA1808A5B1E041E9BBF6620",
+	"include/SharcTypes.h": "CDE3F200E4E84F029968DFFD9EEDE5228F2AE0B0BBC166D2BABB1AA88DC044B3",
+	"License.md": "5575AD921BFE6027DC830887FF51CEB4097E31C2D538B6932CD4BBDF5C1899A9"
 ]
 def validateSharcSdk = {
 	if (configuredSharcSdk.isBlank()) return
 	def root = file(configuredSharcSdk)
+	def commonHeader = new File(root, "include/SharcCommon.h")
+	if (!commonHeader.isFile()) {
+		throw new GradleException("SHARC_SDK is missing include/SharcCommon.h")
+	}
+	def commonText = commonHeader.getText("UTF-8")
+	def expectedMacros = [
+		"#define SHARC_VERSION_MAJOR                     1",
+		"#define SHARC_VERSION_MINOR                     8",
+		"#define SHARC_VERSION_BUILD                     0",
+		"#define SHARC_VERSION_REVISION                  0"
+	]
+	def missingMacros = expectedMacros.findAll { !commonText.contains(it) }
+	if (!missingMacros.empty) {
+		throw new GradleException("SHARC_SDK is not the required v${sharcVersion}; "
+				+ "missing version macros: ${missingMacros.join(', ')}")
+	}
 	def digest = java.security.MessageDigest.getInstance("SHA-256")
 	def invalid = sharcHeaderHashes.findAll { relative, expected ->
 		def candidate = new File(root, relative)
@@ -1105,6 +1122,28 @@ def verifyProductionArtifact = tasks.register("verifyProductionArtifact") {
 				"caustica/rt/world_sharc.rmiss.spv",
 				"caustica/rt/world_sharc_guide.rmiss.spv",
 				"caustica/rt/sharc_resolve.comp.spv",
+				"caustica/rt/sharc_atomic_probe.comp.spv",
+				"caustica/rt/world_sharc_sh.rgen.spv",
+				"caustica/rt/world_sharc_sh_base.rgen.spv",
+				"caustica/rt/world_sharc_sh_nv.rgen.spv",
+				"caustica/rt/world_sharc_diffuse_sh.rgen.spv",
+				"caustica/rt/world_sharc_diffuse_sh_base.rgen.spv",
+				"caustica/rt/world_sharc_diffuse_sh_nv.rgen.spv",
+				"caustica/rt/world_sharc_primary_sh.rgen.spv",
+				"caustica/rt/world_sharc_primary_sh_base.rgen.spv",
+				"caustica/rt/world_sharc_primary_sh_nv.rgen.spv",
+				"caustica/rt/world_sharc_update_sh.rgen.spv",
+				"caustica/rt/world_sharc_update_sh_base.rgen.spv",
+				"caustica/rt/world_sharc_update_sh_nv.rgen.spv",
+				"caustica/rt/world_sharc_diagnostic_sh.rgen.spv",
+				"caustica/rt/world_sharc_diagnostic_sh_base.rgen.spv",
+				"caustica/rt/world_sharc_diagnostic_sh_nv.rgen.spv",
+				"caustica/rt/world_sharc_primary_diagnostic_sh.rgen.spv",
+				"caustica/rt/world_sharc_primary_diagnostic_sh_base.rgen.spv",
+				"caustica/rt/world_sharc_primary_diagnostic_sh_nv.rgen.spv",
+				"caustica/rt/world_sharc_update_diagnostic_sh.rgen.spv",
+				"caustica/rt/world_sharc_update_diagnostic_sh_base.rgen.spv",
+				"caustica/rt/world_sharc_update_diagnostic_sh_nv.rgen.spv",
 				"META-INF/licenses/nvidia/NVIDIA-SHARC-SDK.txt"
 			])
 		}

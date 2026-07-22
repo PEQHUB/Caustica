@@ -13,6 +13,7 @@ import java.util.Objects;
 import org.lwjgl.system.MemoryStack;
 import org.lwjgl.vulkan.VKCapabilitiesDevice;
 import org.lwjgl.vulkan.VK10;
+import org.lwjgl.vulkan.VK11;
 import org.lwjgl.vulkan.VK12;
 import org.lwjgl.vulkan.VkDevice;
 import org.lwjgl.vulkan.VkPhysicalDeviceAccelerationStructureFeaturesKHR;
@@ -26,6 +27,7 @@ import org.lwjgl.vulkan.VkPhysicalDeviceRayTracingInvocationReorderFeaturesEXT;
 import org.lwjgl.vulkan.VkPhysicalDeviceRayTracingInvocationReorderFeaturesNV;
 import org.lwjgl.vulkan.VkPhysicalDeviceFeatures;
 import org.lwjgl.vulkan.VkPhysicalDeviceFeatures2;
+import org.lwjgl.vulkan.VkPhysicalDeviceVulkan11Features;
 import org.lwjgl.vulkan.VkPhysicalDeviceVulkan12Features;
 import org.lwjgl.vulkan.VkPhysicalDeviceOpacityMicromapFeaturesEXT;
 import org.lwjgl.vulkan.VkPhysicalDeviceOpacityMicromapPropertiesEXT;
@@ -441,6 +443,26 @@ public final class RtDeviceBringup {
         }
     }
 
+    private static boolean supportsShaderFloat16(VulkanPhysicalDevice physicalDevice) {
+        try (MemoryStack stack = MemoryStack.stackPush()) {
+            VkPhysicalDeviceVulkan12Features features = VkPhysicalDeviceVulkan12Features.calloc(stack).sType$Default();
+            VkPhysicalDeviceFeatures2 features2 = VkPhysicalDeviceFeatures2.calloc(stack).sType$Default()
+                    .pNext(features.address());
+            VK12.vkGetPhysicalDeviceFeatures2(physicalDevice.vkPhysicalDevice(), features2);
+            return features.shaderFloat16();
+        }
+    }
+
+    private static boolean supportsStorageBuffer16BitAccess(VulkanPhysicalDevice physicalDevice) {
+        try (MemoryStack stack = MemoryStack.stackPush()) {
+            VkPhysicalDeviceVulkan11Features features = VkPhysicalDeviceVulkan11Features.calloc(stack).sType$Default();
+            VkPhysicalDeviceFeatures2 features2 = VkPhysicalDeviceFeatures2.calloc(stack).sType$Default()
+                    .pNext(features.address());
+            VK11.vkGetPhysicalDeviceFeatures2(physicalDevice.vkPhysicalDevice(), features2);
+            return features.storageBuffer16BitAccess();
+        }
+    }
+
     private static FeatureSupport queryFeatureSupport(VulkanPhysicalDevice physicalDevice) {
         try (MemoryStack stack = MemoryStack.stackPush()) {
             VkPhysicalDeviceFeatures2 available = VkPhysicalDeviceFeatures2.calloc(stack).sType$Default();
@@ -544,6 +566,10 @@ public final class RtDeviceBringup {
             features.add(new VulkanFeature(VulkanBackend.VK12_FEATURES_STRUCT, "shaderBufferInt64Atomics",
                     VkPhysicalDeviceVulkan12Features.SHADERBUFFERINT64ATOMICS));
         }
+        // SHARC 1.8 directional encoding requires native FP16 and 16-bit storage-buffer access.
+        boolean float16 = supportsShaderFloat16(physicalDevice);
+        boolean storage16bit = supportsStorageBuffer16BitAccess(physicalDevice);
+        RtSharcSupport.setDeviceCapabilities(float16, storage16bit);
         if (selectedSerBackend != SerBackend.NONE) {
             features.add(selectedSerBackend == SerBackend.NV ? SER_NV_FEATURE : SER_EXT_FEATURE);
         }
@@ -586,6 +612,8 @@ public final class RtDeviceBringup {
                 "Ray tracing: enabling {}{}{} + features [bufferDeviceAddress, accelerationStructure, rayTracingPipeline, rayQuery, optionalInvocationReorder({}), liveReorder=off, offlineReorder={}"
                         + (wideLinesEnabled ? ", wideLines(max=" + maxLineWidth + ")" : "")
                         + (sharcInt64AtomicsEnabled ? ", shaderBufferInt64Atomics(SHaRC)" : "")
+                        + (RtSharcSupport.shaderFloat16Supported() ? ", shaderFloat16(SHaRC)" : "")
+                        + (RtSharcSupport.storageBuffer16BitAccessSupported() ? ", storageBuffer16BitAccess(SHaRC)" : "")
                         + (ommEnabled ? ", opacityMicromap" : "") + "] + overlayMsaa=" + overlayMsaaSamples + "x on [{}]",
                 RT_EXTENSIONS, serBackend.extensionName == null ? "" : " + " + serBackend.extensionName,
                 ommEnabled ? " + " + OPTIONAL_RT_EXTENSIONS : "", serBackend.label,

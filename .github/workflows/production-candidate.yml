@@ -120,7 +120,7 @@ jobs:
           $sdk = Split-Path (Split-Path (Split-Path $interposer.FullName -Parent) -Parent) -Parent
           "STREAMLINE_SDK=$sdk" | Out-File -FilePath $env:GITHUB_ENV -Append
 
-      - name: Download pinned private SHaRC 1.6.5 SDK
+      - name: Download pinned private SHaRC 1.8.0.0 SDK
         shell: pwsh
         env:
           SHARC_SDK_URL: ${{ secrets.SHARC_SDK_URL }}
@@ -141,6 +141,18 @@ jobs:
             throw "SHaRC include/SharcCommon.h was not found"
           }
           $sdk = Split-Path $header.DirectoryName -Parent
+          $commonText = Get-Content $header.FullName -Raw
+          $expectedMacros = @(
+            "#define SHARC_VERSION_MAJOR                     1",
+            "#define SHARC_VERSION_MINOR                     8",
+            "#define SHARC_VERSION_BUILD                     0",
+            "#define SHARC_VERSION_REVISION                  0"
+          )
+          foreach ($macro in $expectedMacros) {
+            if (-not $commonText.Contains($macro)) {
+              throw "SHaRC SDK is not v1.8.0.0; missing: $macro"
+            }
+          }
           "SHARC_SDK=$sdk" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Download Linux NRD payload
@@ -160,6 +172,30 @@ jobs:
       - name: Build and test exact production candidate
         shell: pwsh
         run: .\gradlew.bat clean build --stacktrace
+
+      - name: Validate all SHaRC SPIR-V modules
+        shell: pwsh
+        run: |
+          $spirvVal = Join-Path $env:VULKAN_SDK "Bin\spirv-val.exe"
+          if (-not (Test-Path $spirvVal)) {
+            throw "spirv-val.exe not found at $spirvVal"
+          }
+          $spvFiles = Get-ChildItem build -Recurse -Filter "*.spv" |
+            Where-Object { $_.FullName -match "sharc" }
+          if ($spvFiles.Count -eq 0) {
+            throw "No SHaRC SPIR-V modules found in build output"
+          }
+          $failed = @()
+          foreach ($spv in $spvFiles) {
+            $result = & $spirvVal $spv.FullName 2>&1
+            if ($LASTEXITCODE -ne 0) {
+              $failed += "$($spv.Name): $result"
+            }
+          }
+          Write-Host "Validated $($spvFiles.Count) SHaRC SPIR-V modules"
+          if ($failed.Count -gt 0) {
+            throw "spirv-val failed for:$($failed | ForEach-Object { "`n  $_" })"
+          }
 
       - name: Record candidate hashes
         shell: pwsh

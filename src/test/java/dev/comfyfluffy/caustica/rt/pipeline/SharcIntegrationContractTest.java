@@ -400,6 +400,28 @@ final class SharcIntegrationContractTest {
         assertFalse(bridge.contains("bool antiFirefly"));
     }
 
+    @Test
+    void sharedSharcBridgeIsStageAgnostic() throws Exception {
+        String bridge = read("shaders/sharc/sharc_bridge.slang");
+        assertFalse(bridge.contains("payload."),
+                "Shared bridge must not reference ray payload");
+        assertTrue(bridge.contains("SharcHitData causticaMakeSharcHit("));
+        assertFalse(bridge.contains("SharcHitData causticaSharcHit("));
+
+        String world = read("shaders/world/world.rgen.slang");
+        assertFalse(world.contains("SharcHitData causticaSharcHit("));
+        assertTrue(world.contains("causticaMakeSharcHit(hitPos, payload.geometricNormal,"));
+    }
+
+    @Test
+    void bridgeExplicitlyDisablesUnportedFeatures() throws Exception {
+        String bridge = read("shaders/sharc/sharc_bridge.slang");
+        assertTrue(bridge.contains("#define SHARC_ENABLE_CACHE_RESAMPLING 0"),
+                "Cache resampling must be explicitly disabled for initial 1.8 migration");
+        assertTrue(bridge.contains("#define SHARC_ENABLE_RESPONSIVE_LIGHTING 0"),
+                "Responsive lighting must be explicitly disabled for initial 1.8 migration");
+    }
+
     private static String read(String path) throws Exception {
         return Files.readString(Path.of(path));
     }

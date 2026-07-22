@@ -94,6 +94,33 @@ jobs:
         shell: bash
         run: ./gradlew check --stacktrace
 
+      - name: Validate compiled SPIR-V modules
+        shell: bash
+        run: |
+          spirvVal="${VULKAN_SDK}/bin/spirv-val"
+          if [ ! -x "$spirvVal" ]; then
+            echo "spirv-val not found, skipping SPIR-V validation"
+            exit 0
+          fi
+          spvFiles=$(find build -name "*.spv" 2>/dev/null || true)
+          if [ -z "$spvFiles" ]; then
+            echo "No SPIR-V modules found, skipping validation"
+            exit 0
+          fi
+          failed=0
+          count=0
+          for f in $spvFiles; do
+            count=$((count + 1))
+            if ! "$spirvVal" "$f" 2>&1; then
+              echo "FAILED: $f"
+              failed=$((failed + 1))
+            fi
+          done
+          echo "Validated $count SPIR-V modules, $failed failures"
+          if [ "$failed" -gt 0 ]; then
+            exit 1
+          fi
+
       - name: Explain artifact boundary
         shell: bash
         run: |

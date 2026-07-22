@@ -29,6 +29,10 @@
 #define SHARC_PROPAGATION_DEPTH 4
 #define SHARC_MATERIAL_DEMODULATION 1
 #define SHARC_SEPARATE_EMISSIVE 1
+// Keep the first 1.8 migration limited to directional encoding.
+// Port and validate these independently.
+#define SHARC_ENABLE_CACHE_RESAMPLING 0
+#define SHARC_ENABLE_RESPONSIVE_LIGHTING 0
 
 typealias SharcRWPtr<T> = Ptr<T, Access.ReadWrite, AddressSpace.Device>;
 
@@ -56,14 +60,15 @@ float causticaSharcDirectionalityWeight(
     return smoothness * smoothness;
 }
 
-SharcHitData causticaSharcHit(
-        float3 position,
+SharcHitData causticaMakeSharcHit(
+        float3 positionWorld,
+        float3 normalWorld,
         float3 albedo,
         float3 emissive,
         float3 outgoingDirectionToPreviousVertex) {
     SharcHitData hit;
-    hit.positionWorld = position;
-    hit.normalWorld = payload.geometricNormal;
+    hit.positionWorld = positionWorld;
+    hit.normalWorld = normalWorld;
     hit.materialDemodulation = max(albedo, float3(1.0e-3));
     hit.emissive = emissive;
 #if SHARC_ENABLE_SH_ENCODING

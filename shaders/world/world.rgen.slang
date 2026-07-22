@@ -162,19 +162,7 @@ void sharcStatMax(uint index, uint value) {
 #endif
 }
 
-SharcHitData causticaSharcHit(float3 position, float3 albedo, float3 emissive,
-        float3 outgoingDirectionToPreviousVertex) {
-    SharcHitData hit;
-    hit.positionWorld = position;
-    hit.normalWorld = payload.geometricNormal;
-    hit.materialDemodulation = max(albedo, float3(1.0e-3));
-    hit.emissive = emissive;
-#if SHARC_ENABLE_SH_ENCODING
-    hit.radianceDirectionWorld = causticaSafeDirection(outgoingDirectionToPreviousVertex);
-    hit.radianceDirectionWeight = 0.0;
-#endif
-    return hit;
-}
+
 
 float causticaSharcVoxelSize(float3 position) {
     uint level = HashGridGetLevel(position, sharcParameters.hashGridParameters);
@@ -248,8 +236,8 @@ bool causticaTrySharcQuery(int bounce, float3 hitPos, float3 outgoingDirectionTo
                 hitPos, payload.geometricNormal, sharcParameters.hashGridParameters);
     }
 #endif
-    SharcHitData queryHit = causticaSharcHit(hitPos, albedo, materialEmissive,
-            outgoingDirectionToPreviousVertex);
+    SharcHitData queryHit = causticaMakeSharcHit(hitPos, payload.geometricNormal,
+            albedo, materialEmissive, outgoingDirectionToPreviousVertex);
     if (!SharcGetCachedRadiance(sharcParameters, queryHit, cachedRadiance, false)) {
 #if CAUSTICA_SHARC_DIAGNOSTICS
         if (statsEnabled) sharcStatAdd(SHARC_STAT_QUERY_MISSES, 1u);
@@ -2801,7 +2789,8 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
             sharcStatAdd(SHARC_STAT_UPDATE_MISSES, 1u);
             break;
         }
-        SharcHitData updateHit = causticaSharcHit(hitPos, sharcAlbedo, materialEmissive, -rd);
+        SharcHitData updateHit = causticaMakeSharcHit(hitPos, payload.geometricNormal,
+                sharcAlbedo, materialEmissive, -rd);
         bool continueUpdate = causticaSharcUpdateHit(sharcParameters, sharcState, updateHit,
                 cacheableDirectLighting, cacheableDirectLighting + liveDirectLighting);
 #if CAUSTICA_SHARC_DIAGNOSTICS
