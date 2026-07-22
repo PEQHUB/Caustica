@@ -397,6 +397,77 @@ abstract class CompileShaders extends DefaultTask {
 			}
 			compileOneSlang(new File(sharc, "sharc_resolve.comp.slang"),
 					new File(scratchDir, "sharc_resolve.comp.spv"), sharcInclude)
+			// --- SH encoding variants (SHARC_ENABLE_SH_ENCODING=1) ---
+			def shEncodingDefines = ["-DSHARC_ENABLE_SH_ENCODING=1"]
+			def shEncodingVariantDefines = variantDefines + shEncodingDefines
+			def shEncodingQueryDefines = queryDefines + shEncodingDefines
+			def shEncodingDiffuseQueryDefines = diffuseQueryDefines + shEncodingDefines
+			def shEncodingPrimaryQueryDefines = primaryQueryDefines + shEncodingDefines
+			def shEncodingUpdateDefines = updateDefines + shEncodingDefines
+			def shEncodingDiagnosticQueryDefines = diagnosticQueryDefines + shEncodingDefines
+			def shEncodingPrimaryDiagnosticQueryDefines = primaryDiagnosticQueryDefines + shEncodingDefines
+			def shEncodingDiagnosticUpdateDefines = diagnosticUpdateDefines + shEncodingDefines
+			// Query SH variants
+			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_sh.rgen.spv"),
+					shEncodingQueryDefines + sharcInclude + ["-capability", "spvShaderInvocationReorderEXT"])
+			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_sh_base.rgen.spv"),
+					shEncodingQueryDefines + sharcInclude + ["-DCAUSTICA_PORTABLE_TRACE=1"])
+			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_sh_nv.rgen.spv"),
+					shEncodingQueryDefines + sharcInclude + ["-capability", "spvShaderInvocationReorderNV"])
+			// Diffuse query SH variants
+			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_diffuse_sh.rgen.spv"),
+					shEncodingDiffuseQueryDefines + sharcInclude + ["-capability", "spvShaderInvocationReorderEXT"])
+			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_diffuse_sh_base.rgen.spv"),
+					shEncodingDiffuseQueryDefines + sharcInclude + ["-DCAUSTICA_PORTABLE_TRACE=1"])
+			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_diffuse_sh_nv.rgen.spv"),
+					shEncodingDiffuseQueryDefines + sharcInclude + ["-capability", "spvShaderInvocationReorderNV"])
+			// Primary query SH variants
+			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_primary_sh.rgen.spv"),
+					shEncodingPrimaryQueryDefines + sharcInclude + ["-capability", "spvShaderInvocationReorderEXT"])
+			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_primary_sh_base.rgen.spv"),
+					shEncodingPrimaryQueryDefines + sharcInclude + ["-DCAUSTICA_PORTABLE_TRACE=1"])
+			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_primary_sh_nv.rgen.spv"),
+					shEncodingPrimaryQueryDefines + sharcInclude + ["-capability", "spvShaderInvocationReorderNV"])
+			// Update SH variants
+			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_update_sh.rgen.spv"),
+					shEncodingUpdateDefines + sharcInclude + ["-capability", "spvShaderInvocationReorderEXT"])
+			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_update_sh_base.rgen.spv"),
+					shEncodingUpdateDefines + sharcInclude + ["-DCAUSTICA_PORTABLE_TRACE=1"])
+			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_update_sh_nv.rgen.spv"),
+					shEncodingUpdateDefines + sharcInclude + ["-capability", "spvShaderInvocationReorderNV"])
+			// Diagnostic query SH variants
+			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_diagnostic_sh.rgen.spv"),
+					shEncodingDiagnosticQueryDefines + sharcInclude + ["-capability", "spvShaderInvocationReorderEXT"])
+			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_diagnostic_sh_base.rgen.spv"),
+					shEncodingDiagnosticQueryDefines + sharcInclude + ["-DCAUSTICA_PORTABLE_TRACE=1"])
+			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_diagnostic_sh_nv.rgen.spv"),
+					shEncodingDiagnosticQueryDefines + sharcInclude + ["-capability", "spvShaderInvocationReorderNV"])
+			// Primary diagnostic SH variants
+			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_primary_diagnostic_sh.rgen.spv"),
+					shEncodingPrimaryDiagnosticQueryDefines + sharcInclude + ["-capability", "spvShaderInvocationReorderEXT"])
+			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_primary_diagnostic_sh_base.rgen.spv"),
+					shEncodingPrimaryDiagnosticQueryDefines + sharcInclude + ["-DCAUSTICA_PORTABLE_TRACE=1"])
+			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_primary_diagnostic_sh_nv.rgen.spv"),
+					shEncodingPrimaryDiagnosticQueryDefines + sharcInclude + ["-capability", "spvShaderInvocationReorderNV"])
+			// Update diagnostic SH variants
+			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_update_diagnostic_sh.rgen.spv"),
+					shEncodingDiagnosticUpdateDefines + sharcInclude + ["-capability", "spvShaderInvocationReorderEXT"])
+			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_update_diagnostic_sh_base.rgen.spv"),
+					shEncodingDiagnosticUpdateDefines + sharcInclude + ["-DCAUSTICA_PORTABLE_TRACE=1"])
+			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_update_diagnostic_sh_nv.rgen.spv"),
+					shEncodingDiagnosticUpdateDefines + sharcInclude + ["-capability", "spvShaderInvocationReorderNV"])
+			// Shared SHaRC helper shaders with SH encoding (rchit, rahit, rmiss, guide share layout-dependent types)
+			[
+					"world.rchit.slang": "world_sharc_sh.rchit.spv",
+					"world.rahit.slang": "world_sharc_sh.rahit.spv",
+					"world.rmiss.slang": "world_sharc_sh.rmiss.spv",
+					"world_guide.rmiss.slang": "world_sharc_sh_guide.rmiss.spv"
+			].each { sourceName, outputName ->
+				compileOneSlang(new File(world, sourceName), new File(scratchDir, outputName),
+						shEncodingVariantDefines + sharcInclude)
+			}
+			compileOneSlang(new File(sharc, "sharc_resolve.comp.slang"),
+					new File(scratchDir, "sharc_resolve_sh.comp.spv"), sharcInclude + shEncodingDefines)
 			// Prove the exact BDA + native 64-bit atomic contract independently of the runtime shaders.
 			compileOneSlang(new File(sharc, "sharc_atomic_probe.comp.slang"),
 					new File(temporaryDir, "sharc_atomic_probe.comp.spv"), sharcInclude)
@@ -418,6 +489,27 @@ abstract class CompileShaders extends DefaultTask {
 				def raygen = new File(scratchDir, name)
 				if (!raygen.isFile() || raygen.length() > 200_000L) {
 					throw new GradleException("SHaRC primary-query raygen complexity budget exceeded: ${name} is "
+							+ "${raygen.isFile() ? raygen.length() : 'missing'} bytes (limit 200000)")
+				}
+			}
+			["world_sharc_sh.rgen.spv", "world_sharc_sh_nv.rgen.spv"].each { name ->
+				def raygen = new File(scratchDir, name)
+				if (!raygen.isFile() || raygen.length() > 200_000L) {
+					throw new GradleException("SHaRC SH query raygen complexity budget exceeded: ${name} is "
+							+ "${raygen.isFile() ? raygen.length() : 'missing'} bytes (limit 200000)")
+				}
+			}
+			["world_sharc_diffuse_sh.rgen.spv", "world_sharc_diffuse_sh_nv.rgen.spv"].each { name ->
+				def raygen = new File(scratchDir, name)
+				if (!raygen.isFile() || raygen.length() > 200_000L) {
+					throw new GradleException("SHaRC SH diffuse-query raygen complexity budget exceeded: ${name} is "
+							+ "${raygen.isFile() ? raygen.length() : 'missing'} bytes (limit 200000)")
+				}
+			}
+			["world_sharc_primary_sh.rgen.spv", "world_sharc_primary_sh_nv.rgen.spv"].each { name ->
+				def raygen = new File(scratchDir, name)
+				if (!raygen.isFile() || raygen.length() > 200_000L) {
+					throw new GradleException("SHaRC SH primary-query raygen complexity budget exceeded: ${name} is "
 							+ "${raygen.isFile() ? raygen.length() : 'missing'} bytes (limit 200000)")
 				}
 			}

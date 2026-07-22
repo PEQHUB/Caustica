@@ -2,6 +2,7 @@ package dev.comfyfluffy.caustica.rt.pipeline;
 
 import dev.comfyfluffy.caustica.rt.RtContext;
 import dev.comfyfluffy.caustica.rt.RtDebugLabels;
+import dev.comfyfluffy.caustica.rt.SharcRadianceEncoding;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.ByteBuffer;
@@ -15,7 +16,8 @@ import static org.lwjgl.vulkan.VK10.*;
 
 /** Descriptor-free SHaRC resolve pass; its sole push constant is the SharcFrame BDA. */
 public final class RtSharcResolvePipeline {
-    private static final String SHADER = "/caustica/rt/sharc_resolve.comp.spv";
+    private static final String SHADER_RGB = "/caustica/rt/sharc_resolve.comp.spv";
+    private static final String SHADER_SH = "/caustica/rt/sharc_resolve_sh.comp.spv";
     private final RtContext ctx;
     private final long layout;
     private final long pipeline;
@@ -25,7 +27,8 @@ public final class RtSharcResolvePipeline {
         this.ctx = ctx; this.layout = layout; this.pipeline = pipeline;
     }
 
-    public static RtSharcResolvePipeline create(RtContext ctx) {
+    public static RtSharcResolvePipeline create(RtContext ctx, SharcRadianceEncoding encoding) {
+        String shaderResource = encoding == SharcRadianceEncoding.DIRECTIONAL_SH ? SHADER_SH : SHADER_RGB;
         long layout = 0L;
         long module = 0L;
         long pipeline = 0L;
@@ -35,10 +38,11 @@ public final class RtSharcResolvePipeline {
             VkPipelineLayoutCreateInfo layoutInfo = VkPipelineLayoutCreateInfo.calloc(stack).sType$Default()
                     .pPushConstantRanges(range);
             LongBuffer p = stack.mallocLong(1);
-            check(vkCreatePipelineLayout(ctx.vk(), layoutInfo, null, p), "vkCreatePipelineLayout(SHaRC resolve)");
+            check(vkCreatePipelineLayout(ctx.vk(), layoutInfo, null, p),
+                    "vkCreatePipelineLayout(SHaRC resolve " + encoding.name() + ")");
             layout = p.get(0);
-            RtDebugLabels.name(ctx, VK_OBJECT_TYPE_PIPELINE_LAYOUT, layout, "SHaRC resolve layout");
-            module = loadModule(ctx, stack);
+            RtDebugLabels.name(ctx, VK_OBJECT_TYPE_PIPELINE_LAYOUT, layout, "SHaRC resolve layout (" + encoding.name() + ")");
+            module = loadModule(ctx, stack, shaderResource);
             VkPipelineShaderStageCreateInfo stage = VkPipelineShaderStageCreateInfo.calloc(stack).sType$Default()
                     .stage(VK_SHADER_STAGE_COMPUTE_BIT).module(module).pName(stack.UTF8("main"));
             VkComputePipelineCreateInfo.Buffer createInfo = VkComputePipelineCreateInfo.calloc(1, stack);
@@ -48,7 +52,7 @@ public final class RtSharcResolvePipeline {
             pipeline = p.get(0);
             vkDestroyShaderModule(ctx.vk(), module, null);
             module = 0L;
-            RtDebugLabels.name(ctx, VK_OBJECT_TYPE_PIPELINE, pipeline, "SHaRC resolve");
+            RtDebugLabels.name(ctx, VK_OBJECT_TYPE_PIPELINE, pipeline, "SHaRC resolve (" + encoding.name() + ")");
             return new RtSharcResolvePipeline(ctx, layout, pipeline);
         } catch (Throwable t) {
             if (module != 0L) vkDestroyShaderModule(ctx.vk(), module, null);
@@ -75,13 +79,13 @@ public final class RtSharcResolvePipeline {
         destroyed = true;
     }
 
-    private static long loadModule(RtContext ctx, MemoryStack stack) {
+    private static long loadModule(RtContext ctx, MemoryStack stack, String shaderResource) {
         byte[] bytes;
-        try (InputStream in = RtSharcResolvePipeline.class.getResourceAsStream(SHADER)) {
-            if (in == null) throw new IllegalStateException("missing SPIR-V resource: " + SHADER);
+        try (InputStream in = RtSharcResolvePipeline.class.getResourceAsStream(shaderResource)) {
+            if (in == null) throw new IllegalStateException("missing SPIR-V resource: " + shaderResource);
             bytes = in.readAllBytes();
         } catch (IOException e) {
-            throw new IllegalStateException("failed to read " + SHADER, e);
+            throw new IllegalStateException("failed to read " + shaderResource, e);
         }
         ByteBuffer code = MemoryUtil.memAlloc(bytes.length).put(bytes).flip();
         try {

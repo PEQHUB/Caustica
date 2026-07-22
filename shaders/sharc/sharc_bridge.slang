@@ -1,4 +1,8 @@
-// Caustica-owned adapter for NVIDIA SHaRC 1.6.5.0.
+// Caustica-owned adapter for NVIDIA SHaRC.
+//
+// Ported from 1.6.5.0 with the 1.7.2 path-length correction: pathLength can now reach the
+// full SHARC_PROPAGATION_DEPTH rather than being capped at depth - 1. This ensures the
+// last-vertex contribution is not missed during cache propagation.
 //
 // The NVIDIA SDK headers are an external build input selected with SHARC_SDK. They are intentionally
 // not copied into Caustica's LGPL source tree. The build adds SHARC_SDK/include to Slang's include path
@@ -58,13 +62,23 @@ bool causticaSharcUpdateHit(
         SharcAddVoxelData(sharcParameters, sharcState.cacheIndices[i], propagatedRadiance,
                 sharcState.sampleWeights[i], 0);
     }
-    for (uint i = sharcState.pathLength; i > 0; --i) {
+    // Preserve only the number of existing entries that can fit after
+    // inserting the new vertex at index zero.
+    uint shiftCount =
+        min(sharcState.pathLength, uint(SHARC_PROPAGATION_DEPTH - 1));
+
+    for (uint i = shiftCount; i > 0; --i) {
         sharcState.cacheIndices[i] = sharcState.cacheIndices[i - 1];
         sharcState.sampleWeights[i] = sharcState.sampleWeights[i - 1];
     }
+
     sharcState.cacheIndices[0] = cacheIndex;
     sharcState.sampleWeights[0] = SharcSampleWeight(1.0 / materialDemodulation);
-    sharcState.pathLength = min(++sharcState.pathLength, SHARC_PROPAGATION_DEPTH - 1);
+
+    // Unlike the old adapter, pathLength can reach the complete
+    // configured propagation depth.
+    sharcState.pathLength =
+        min(sharcState.pathLength + 1, uint(SHARC_PROPAGATION_DEPTH));
 #endif
     return true;
 }

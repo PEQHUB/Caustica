@@ -293,6 +293,46 @@ public final class RtDeviceBringup {
                 "world_sharc_update_diagnostic_nv.rgen.spv", "world_sharc_update_diagnostic_base.rgen.spv");
     }
 
+    public static String sharcQueryRaygenShader(SharcRadianceEncoding encoding) {
+        return withEncoding(sharcQueryRaygenShader(), encoding);
+    }
+
+    public static String sharcDiffuseQueryRaygenShader(SharcRadianceEncoding encoding) {
+        return withEncoding(sharcDiffuseQueryRaygenShader(), encoding);
+    }
+
+    public static String sharcPrimaryQueryRaygenShader(SharcRadianceEncoding encoding) {
+        return withEncoding(sharcPrimaryQueryRaygenShader(), encoding);
+    }
+
+    public static String sharcUpdateRaygenShader(SharcRadianceEncoding encoding) {
+        return withEncoding(sharcUpdateRaygenShader(), encoding);
+    }
+
+    public static String sharcDiagnosticQueryRaygenShader(SharcRadianceEncoding encoding) {
+        return withEncoding(sharcDiagnosticQueryRaygenShader(), encoding);
+    }
+
+    public static String sharcPrimaryDiagnosticQueryRaygenShader(SharcRadianceEncoding encoding) {
+        return withEncoding(sharcPrimaryDiagnosticQueryRaygenShader(), encoding);
+    }
+
+    public static String sharcDiagnosticUpdateRaygenShader(SharcRadianceEncoding encoding) {
+        return withEncoding(sharcDiagnosticUpdateRaygenShader(), encoding);
+    }
+
+    /**
+     * Appends the encoding suffix to a SHaRC shader filename.
+     * {@code "world_sharc.rgen.spv"} with {@code DIRECTIONAL_SH} becomes {@code "world_sharc_sh.rgen.spv"}.
+     */
+    private static String withEncoding(String shader, SharcRadianceEncoding encoding) {
+        String suffix = encoding.shaderSuffix();
+        if (suffix.isEmpty()) return shader;
+        int dotIndex = shader.lastIndexOf('.');
+        if (dotIndex < 0) return shader + suffix;
+        return shader.substring(0, dotIndex) + suffix + shader.substring(dotIndex);
+    }
+
     /** Standard TraceRay fallback needs a real shadow closest-hit; hit-object variants skip it entirely. */
     public static String shadowClosestHitShader() {
         return serBackend == SerBackend.NONE ? "world_shadow.rchit.spv" : null;

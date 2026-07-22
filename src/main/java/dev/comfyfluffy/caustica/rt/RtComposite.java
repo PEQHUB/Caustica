@@ -88,6 +88,8 @@ import dev.comfyfluffy.caustica.rt.terrain.RtTerrain;
 
 import java.nio.ByteBuffer;
 import java.nio.LongBuffer;
+import java.util.Objects;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * On-screen composite. Each frame, ray-trace into a render-res storage image (+ guide buffers), use
@@ -135,6 +137,10 @@ public final class RtComposite {
 
     public void requestSharcReset(String reason) {
         if (sharcCache != null) sharcCache.requestReset(reason);
+    }
+
+    public void requestSharcEncoding(SharcRadianceEncoding encoding) {
+        requestedSharcEncoding.set(Objects.requireNonNull(encoding, "encoding"));
     }
 
     /** Applies the live texture-bandwidth policy without rebuilding renderer resources. */
@@ -321,6 +327,9 @@ public final class RtComposite {
     private RtPipeline sharcPrimaryDiagnosticQueryPipeline;
     private RtSharcResolvePipeline sharcResolvePipeline;
     private RtSharcCache sharcCache;
+    private final AtomicReference<SharcRadianceEncoding> requestedSharcEncoding =
+            new AtomicReference<>(SharcRadianceEncoding.RGB);
+    private SharcRadianceEncoding activeSharcEncoding = SharcRadianceEncoding.RGB;
     private RtTraceGpuProfiler traceGpuProfiler;
     private int sharcTerrainX = Integer.MIN_VALUE;
     private int sharcTerrainY = Integer.MIN_VALUE;
@@ -1051,35 +1060,43 @@ public final class RtComposite {
     private void syncSharcResources(RtContext ctx, boolean allowed) {
         boolean want = allowed && sharcRequested();
         int exponent = CausticaConfig.Rt.Sharc.CACHE_EXPONENT.value();
+        SharcRadianceEncoding requestedEncoding = requestedSharcEncoding.get();
         if (!want) {
             if (sharcCache != null) {
                 ctx.waitIdle("disable SHaRC");
                 destroySharcResources();
                 sharcCreationResetReason = "enabled";
+                activeSharcEncoding = SharcRadianceEncoding.RGB;
             }
             return;
         }
-        if (sharcCache != null && sharcCache.exponent() == exponent) return;
+        boolean encodingChanged = sharcCache != null && sharcCache.encoding() != requestedEncoding;
+        if (sharcCache != null && sharcCache.exponent() == exponent && !encodingChanged) return;
         if (sharcCache != null) {
-            ctx.waitIdle("resize SHaRC cache");
+            ctx.waitIdle(encodingChanged ? "change SHaRC encoding" : "resize SHaRC cache");
             destroySharcResources();
-            sharcCreationResetReason = "cache size changed";
+            sharcCreationResetReason = encodingChanged ? "encoding changed" : "cache size changed";
         }
+        activeSharcEncoding = requestedEncoding;
+        boolean sh = activeSharcEncoding == SharcRadianceEncoding.DIRECTIONAL_SH;
+        String rmiss = sh ? "world_sharc_sh.rmiss.spv" : "world_sharc.rmiss.spv";
+        String guideRmiss = sh ? "world_sharc_sh_guide.rmiss.spv" : "world_sharc_guide.rmiss.spv";
+        String rchit = sh ? "world_sharc_sh.rchit.spv" : "world_sharc.rchit.spv";
+        String rahit = sh ? "world_sharc_sh.rahit.spv" : "world_sharc.rahit.spv";
+        String[] missShaders = new String[]{rmiss, guideRmiss, "world_shadow.rmiss.spv"};
         try {
-            sharcUpdatePipeline = RtPipeline.create(ctx, RtDeviceBringup.sharcUpdateRaygenShader(),
-                    new String[]{"world_sharc.rmiss.spv", "world_sharc_guide.rmiss.spv", "world_shadow.rmiss.spv"},
-                    "world_sharc.rchit.spv", RtDeviceBringup.shadowClosestHitShader(), "world_sharc.rahit.spv", SharcPushAddrData.BYTE_SIZE,
+            sharcUpdatePipeline = RtPipeline.create(ctx, RtDeviceBringup.sharcUpdateRaygenShader(activeSharcEncoding),
+                    missShaders, rchit, RtDeviceBringup.shadowClosestHitShader(), rahit, SharcPushAddrData.BYTE_SIZE,
                     true, BASE_GUIDE_COUNT, bindlessTextureCapacity, true, true);
-            sharcQueryPipeline = RtPipeline.create(ctx, RtDeviceBringup.sharcQueryRaygenShader(),
-                    new String[]{"world_sharc.rmiss.spv", "world_sharc_guide.rmiss.spv", "world_shadow.rmiss.spv"},
-                    "world_sharc.rchit.spv", RtDeviceBringup.shadowClosestHitShader(), "world_sharc.rahit.spv", SharcPushAddrData.BYTE_SIZE,
+            sharcQueryPipeline = RtPipeline.create(ctx, RtDeviceBringup.sharcQueryRaygenShader(activeSharcEncoding),
+                    missShaders, rchit, RtDeviceBringup.shadowClosestHitShader(), rahit, SharcPushAddrData.BYTE_SIZE,
                     true, BASE_GUIDE_COUNT, bindlessTextureCapacity, true, true);
-            sharcDiffuseQueryPipeline = RtPipeline.create(ctx, RtDeviceBringup.sharcDiffuseQueryRaygenShader(),
-                    new String[]{"world_sharc.rmiss.spv", "world_sharc_guide.rmiss.spv", "world_shadow.rmiss.spv"},
-                    "world_sharc.rchit.spv", RtDeviceBringup.shadowClosestHitShader(), "world_sharc.rahit.spv", SharcPushAddrData.BYTE_SIZE,
+            sharcDiffuseQueryPipeline = RtPipeline.create(ctx,
+                    RtDeviceBringup.sharcDiffuseQueryRaygenShader(activeSharcEncoding),
+                    missShaders, rchit, RtDeviceBringup.shadowClosestHitShader(), rahit, SharcPushAddrData.BYTE_SIZE,
                     true, BASE_GUIDE_COUNT, bindlessTextureCapacity, true, true);
-            sharcResolvePipeline = RtSharcResolvePipeline.create(ctx);
-            sharcCache = RtSharcCache.create(ctx, exponent);
+            sharcResolvePipeline = RtSharcResolvePipeline.create(ctx, activeSharcEncoding);
+            sharcCache = RtSharcCache.create(ctx, exponent, activeSharcEncoding);
             sharcCache.requestReset(sharcCreationResetReason);
             sharcCreationResetReason = "enabled";
             if (output != null) {
@@ -1091,10 +1108,11 @@ public final class RtComposite {
             bindPipelineTextures(ctx, sharcUpdatePipeline);
             bindPipelineTextures(ctx, sharcQueryPipeline);
             bindPipelineTextures(ctx, sharcDiffuseQueryPipeline);
-            CausticaMod.LOGGER.info("SHaRC enabled: {} entries, {} MiB, {}", sharcCache.capacity(),
-                    sharcCache.bytes() / (1024 * 1024), RtSharcSupport.status());
+            CausticaMod.LOGGER.info("SHaRC enabled: {} entries, {} MiB, encoding={}, {}", sharcCache.capacity(),
+                    sharcCache.bytes() / (1024 * 1024), activeSharcEncoding.name(), RtSharcSupport.status());
         } catch (Throwable t) {
             destroySharcResources();
+            activeSharcEncoding = SharcRadianceEncoding.RGB;
             RtSharcSupport.fail("pipeline setup failed: " + t.getClass().getSimpleName());
             RtReconstruction.requestHistoryReset();
             CausticaMod.LOGGER.error("SHaRC setup failed; using baseline tracer", t);
@@ -1106,9 +1124,15 @@ public final class RtComposite {
         boolean want = allowed && sharcCache != null && CausticaConfig.Rt.Sharc.PRIMARY_DIFFUSE_REUSE.value();
         if (!want || sharcPrimaryQueryPipeline != null) return;
         try {
-            sharcPrimaryQueryPipeline = RtPipeline.create(ctx, RtDeviceBringup.sharcPrimaryQueryRaygenShader(),
-                    new String[]{"world_sharc.rmiss.spv", "world_sharc_guide.rmiss.spv", "world_shadow.rmiss.spv"},
-                    "world_sharc.rchit.spv", RtDeviceBringup.shadowClosestHitShader(), "world_sharc.rahit.spv", SharcPushAddrData.BYTE_SIZE,
+            boolean sh = activeSharcEncoding == SharcRadianceEncoding.DIRECTIONAL_SH;
+            String rmiss = sh ? "world_sharc_sh.rmiss.spv" : "world_sharc.rmiss.spv";
+            String guideRmiss = sh ? "world_sharc_sh_guide.rmiss.spv" : "world_sharc_guide.rmiss.spv";
+            String rchit = sh ? "world_sharc_sh.rchit.spv" : "world_sharc.rchit.spv";
+            String rahit = sh ? "world_sharc_sh.rahit.spv" : "world_sharc.rahit.spv";
+            sharcPrimaryQueryPipeline = RtPipeline.create(ctx,
+                    RtDeviceBringup.sharcPrimaryQueryRaygenShader(activeSharcEncoding),
+                    new String[]{rmiss, guideRmiss, "world_shadow.rmiss.spv"},
+                    rchit, RtDeviceBringup.shadowClosestHitShader(), rahit, SharcPushAddrData.BYTE_SIZE,
                     true, BASE_GUIDE_COUNT, bindlessTextureCapacity, true, true);
             if (output != null) {
                 sharcPrimaryQueryPipeline.setStorageImage(output.view);
@@ -1116,7 +1140,7 @@ public final class RtComposite {
             }
             bindPipelineTextures(ctx, sharcPrimaryQueryPipeline);
             RtReconstruction.requestHistoryReset();
-            CausticaMod.LOGGER.info("SHaRC primary-diffuse reuse pipeline ready");
+            CausticaMod.LOGGER.info("SHaRC primary-diffuse reuse pipeline ready ({})", activeSharcEncoding.name());
         } catch (Throwable t) {
             if (sharcPrimaryQueryPipeline != null) sharcPrimaryQueryPipeline.destroy();
             sharcPrimaryQueryPipeline = null;
@@ -1145,24 +1169,27 @@ public final class RtComposite {
             return;
         }
         if (sharcDiagnosticUpdatePipeline == null) {
-            sharcDiagnosticUpdatePipeline = RtPipeline.create(ctx, RtDeviceBringup.sharcDiagnosticUpdateRaygenShader(),
-                    new String[]{"world_sharc.rmiss.spv", "world_sharc_guide.rmiss.spv", "world_shadow.rmiss.spv"},
-                    "world_sharc.rchit.spv", RtDeviceBringup.shadowClosestHitShader(), "world_sharc.rahit.spv", SharcPushAddrData.BYTE_SIZE,
+            boolean sh = activeSharcEncoding == SharcRadianceEncoding.DIRECTIONAL_SH;
+            String rmiss = sh ? "world_sharc_sh.rmiss.spv" : "world_sharc.rmiss.spv";
+            String guideRmiss = sh ? "world_sharc_sh_guide.rmiss.spv" : "world_sharc_guide.rmiss.spv";
+            String rchit = sh ? "world_sharc_sh.rchit.spv" : "world_sharc.rchit.spv";
+            String rahit = sh ? "world_sharc_sh.rahit.spv" : "world_sharc.rahit.spv";
+            String[] missShaders = new String[]{rmiss, guideRmiss, "world_shadow.rmiss.spv"};
+            sharcDiagnosticUpdatePipeline = RtPipeline.create(ctx,
+                    RtDeviceBringup.sharcDiagnosticUpdateRaygenShader(activeSharcEncoding),
+                    missShaders, rchit, RtDeviceBringup.shadowClosestHitShader(), rahit, SharcPushAddrData.BYTE_SIZE,
                     true, BASE_GUIDE_COUNT, bindlessTextureCapacity, true, true);
-        }
-        if (sharcDiagnosticQueryPipeline == null) {
-            sharcDiagnosticQueryPipeline = RtPipeline.create(ctx, RtDeviceBringup.sharcDiagnosticQueryRaygenShader(),
-                    new String[]{"world_sharc.rmiss.spv", "world_sharc_guide.rmiss.spv", "world_shadow.rmiss.spv"},
-                    "world_sharc.rchit.spv", RtDeviceBringup.shadowClosestHitShader(), "world_sharc.rahit.spv", SharcPushAddrData.BYTE_SIZE,
+            sharcDiagnosticQueryPipeline = RtPipeline.create(ctx,
+                    RtDeviceBringup.sharcDiagnosticQueryRaygenShader(activeSharcEncoding),
+                    missShaders, rchit, RtDeviceBringup.shadowClosestHitShader(), rahit, SharcPushAddrData.BYTE_SIZE,
                     true, BASE_GUIDE_COUNT, bindlessTextureCapacity, true, true);
-        }
-        if (CausticaConfig.Rt.Sharc.PRIMARY_DIFFUSE_REUSE.value()
-                && sharcPrimaryDiagnosticQueryPipeline == null) {
-            sharcPrimaryDiagnosticQueryPipeline = RtPipeline.create(ctx,
-                    RtDeviceBringup.sharcPrimaryDiagnosticQueryRaygenShader(),
-                    new String[]{"world_sharc.rmiss.spv", "world_sharc_guide.rmiss.spv", "world_shadow.rmiss.spv"},
-                    "world_sharc.rchit.spv", RtDeviceBringup.shadowClosestHitShader(), "world_sharc.rahit.spv", SharcPushAddrData.BYTE_SIZE,
-                    true, BASE_GUIDE_COUNT, bindlessTextureCapacity, true, true);
+            if (CausticaConfig.Rt.Sharc.PRIMARY_DIFFUSE_REUSE.value()
+                    && sharcPrimaryDiagnosticQueryPipeline == null) {
+                sharcPrimaryDiagnosticQueryPipeline = RtPipeline.create(ctx,
+                        RtDeviceBringup.sharcPrimaryDiagnosticQueryRaygenShader(activeSharcEncoding),
+                        missShaders, rchit, RtDeviceBringup.shadowClosestHitShader(), rahit, SharcPushAddrData.BYTE_SIZE,
+                        true, BASE_GUIDE_COUNT, bindlessTextureCapacity, true, true);
+            }
         }
         if (output != null) {
             sharcDiagnosticUpdatePipeline.setStorageImage(output.view);

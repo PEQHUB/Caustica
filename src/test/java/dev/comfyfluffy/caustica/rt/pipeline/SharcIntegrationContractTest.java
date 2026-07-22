@@ -1,8 +1,10 @@
 package dev.comfyfluffy.caustica.rt.pipeline;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import dev.comfyfluffy.caustica.rt.SharcRadianceEncoding;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import org.junit.jupiter.api.Test;
@@ -202,6 +204,94 @@ final class SharcIntegrationContractTest {
         assertTrue(helper.contains("-PwithoutSharc=true"));
         assertTrue(build.contains("Production JARs include SHaRC by default"));
         assertTrue(build.contains("explicitOptOut=${sharcOptOut}"));
+    }
+
+    @Test
+    void radianceEncodingHasCorrectStridesAndSizing() throws Exception {
+        assertEquals(16, SharcRadianceEncoding.RGB.accumulationStride());
+        assertEquals(16, SharcRadianceEncoding.RGB.resolvedStride());
+        assertEquals("", SharcRadianceEncoding.RGB.shaderSuffix());
+        assertEquals(32, SharcRadianceEncoding.DIRECTIONAL_SH.accumulationStride());
+        assertEquals(24, SharcRadianceEncoding.DIRECTIONAL_SH.resolvedStride());
+        assertEquals("_sh", SharcRadianceEncoding.DIRECTIONAL_SH.shaderSuffix());
+        // 8 (hash) + 16 + 16 = 40 bytes/entry for RGB
+        assertEquals(40L, SharcRadianceEncoding.RGB.cacheBytes(1L));
+        assertEquals(40L * (1L << 24), SharcRadianceEncoding.RGB.cacheBytes(1L << 24));
+        // 8 (hash) + 32 + 24 = 64 bytes/entry for SH
+        assertEquals(64L, SharcRadianceEncoding.DIRECTIONAL_SH.cacheBytes(1L));
+        assertEquals(64L * (1L << 24), SharcRadianceEncoding.DIRECTIONAL_SH.cacheBytes(1L << 24));
+    }
+
+    @Test
+    void radianceEncodingIsWiredThroughConfigCacheAndPipeline() throws Exception {
+        String config = read("src/main/java/dev/comfyfluffy/caustica/CausticaConfig.java");
+        String cache = read("src/main/java/dev/comfyfluffy/caustica/rt/RtSharcCache.java");
+        String resolve = read("src/main/java/dev/comfyfluffy/caustica/rt/pipeline/RtSharcResolvePipeline.java");
+        String bringup = read("src/main/java/dev/comfyfluffy/caustica/rt/RtDeviceBringup.java");
+        String composite = read("src/main/java/dev/comfyfluffy/caustica/rt/RtComposite.java");
+        // Config exposes the encoding setting
+        assertTrue(config.contains("\"sharc.radiance-encoding\", 0, 0, 1"));
+        // Cache accepts and stores encoding
+        assertTrue(cache.contains("SharcRadianceEncoding encoding"));
+        assertTrue(cache.contains("encoding.accumulationStride()"));
+        assertTrue(cache.contains("encoding.resolvedStride()"));
+        assertTrue(cache.contains("public SharcRadianceEncoding encoding()"));
+        // Resolve pipeline loads encoding-specific shader
+        assertTrue(resolve.contains("SHADER_RGB"));
+        assertTrue(resolve.contains("SHADER_SH"));
+        assertTrue(resolve.contains("encoding == SharcRadianceEncoding.DIRECTIONAL_SH"));
+        // DeviceBringup has encoding-aware overloads
+        assertTrue(bringup.contains("sharcQueryRaygenShader(SharcRadianceEncoding encoding)"));
+        assertTrue(bringup.contains("withEncoding(String shader, SharcRadianceEncoding encoding)"));
+        // Composite uses encoding for pipeline selection
+        assertTrue(composite.contains("requestedSharcEncoding"));
+        assertTrue(composite.contains("activeSharcEncoding"));
+        assertTrue(composite.contains("requestSharcEncoding(SharcRadianceEncoding encoding)"));
+    }
+
+    @Test
+    void buildGradleCompilesShEncodingShaderVariants() throws Exception {
+        String build = read("build.gradle");
+        // SH encoding flag is passed to the compiler
+        assertTrue(build.contains("-DSHARC_ENABLE_SH_ENCODING=1"));
+        // Core SH raygen variants exist
+        assertTrue(build.contains("world_sharc_sh.rgen.spv"));
+        assertTrue(build.contains("world_sharc_sh_nv.rgen.spv"));
+        assertTrue(build.contains("world_sharc_sh_base.rgen.spv"));
+        // Diffuse SH variants
+        assertTrue(build.contains("world_sharc_diffuse_sh.rgen.spv"));
+        assertTrue(build.contains("world_sharc_diffuse_sh_nv.rgen.spv"));
+        // Update SH variants
+        assertTrue(build.contains("world_sharc_update_sh.rgen.spv"));
+        assertTrue(build.contains("world_sharc_update_sh_nv.rgen.spv"));
+        // Resolve SH compute
+        assertTrue(build.contains("sharc_resolve_sh.comp.spv"));
+        // Shared helper shaders with SH encoding
+        assertTrue(build.contains("world_sharc_sh.rchit.spv"));
+        assertTrue(build.contains("world_sharc_sh.rahit.spv"));
+        assertTrue(build.contains("world_sharc_sh.rmiss.spv"));
+        assertTrue(build.contains("world_sharc_sh_guide.rmiss.spv"));
+        // Complexity budget checks for SH variants
+        assertTrue(build.contains("SHaRC SH query raygen complexity budget exceeded"));
+        assertTrue(build.contains("SHaRC SH diffuse-query raygen complexity budget exceeded"));
+    }
+
+    @Test
+    void resolvePipelineLoadsCorrectShaderPerEncoding() throws Exception {
+        String resolve = read("src/main/java/dev/comfyfluffy/caustica/rt/pipeline/RtSharcResolvePipeline.java");
+        assertTrue(resolve.contains("private static final String SHADER_RGB = \"/caustica/rt/sharc_resolve.comp.spv\""));
+        assertTrue(resolve.contains("private static final String SHADER_SH = \"/caustica/rt/sharc_resolve_sh.comp.spv\""));
+        assertTrue(resolve.contains("encoding == SharcRadianceEncoding.DIRECTIONAL_SH ? SHADER_SH : SHADER_RGB"));
+        assertTrue(resolve.contains("loadModule(ctx, stack, shaderResource)"));
+    }
+
+    @Test
+    void screenExposesEncodingSelectorWithResetWarning() throws Exception {
+        String screen = read("src/main/java/dev/comfyfluffy/caustica/client/RtSharcOptionsScreen.java");
+        assertTrue(screen.contains("caustica.options.rt.sharcEncoding"));
+        assertTrue(screen.contains("SharcRadianceEncoding"));
+        assertTrue(screen.contains("requestSharcReset(\"radiance encoding changed\")"));
+        assertTrue(screen.contains("RADIANCE_ENCODING.set(0)"));
     }
 
     private static String read(String path) throws Exception {
