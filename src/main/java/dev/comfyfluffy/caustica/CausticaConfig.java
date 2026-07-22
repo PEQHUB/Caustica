@@ -993,7 +993,7 @@ public final class CausticaConfig {
             public static final IntSetting MAX_INFLIGHT_SECTIONS =
                     intAtLeast("caustica.rt.maxInflightSections", "terrain.max-inflight-sections", 32, 0);
             public static final IntSetting GPU_BUILD_BATCH_SIZE =
-                    clampedInt("caustica.rt.gpuBuildBatchSize", "terrain.gpu-build-batch-size", 4, 1, 4);
+                    clampedInt("caustica.rt.gpuBuildBatchSize", "terrain.gpu-build-batch-size", 1, 1, 4);
             public static final FloatSetting STREAM_BUDGET_MS =
                     clampedFloat("caustica.rt.streamBudgetMs", "terrain.stream-budget-ms", 1.5f, 0.0f, 100.0f);
             public static final FloatSetting STREAM_BUDGET_MAX_MS =
