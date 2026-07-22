@@ -18,7 +18,9 @@ final class TerrainTelemetryContractTest {
                 "src/main/java/dev/comfyfluffy/caustica/client/CausticaDebugBridge.java"));
 
         for (String counter : new String[] {"terrainMaterialEpochRejects", "terrainOutstandingTasks",
-                "terrainCancelledTasks", "terrainDiscardedBuilds", "terrainBuildLatencyNanos"}) {
+                "terrainCancelledTasks", "terrainDiscardedBuilds", "terrainBuildLatencyNanos",
+                "terrainInteractiveOutstanding", "terrainInteractiveSubmitted",
+                "terrainInteractivePublished"}) {
             assertTrue(terrain.contains('"' + counter + '"'));
             assertTrue(stats.contains('"' + counter + '"'));
         }
