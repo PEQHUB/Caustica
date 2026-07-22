@@ -66,10 +66,19 @@ public final class RtWorkerPool {
         executor().execute(new WorkerTask(interactive, nextSequence.incrementAndGet(), job));
     }
 
-    /** Stop all workers and drop queued jobs. Safe to call when never started. */
+    /** Stop all workers after joining queued jobs. Safe to call when never started. */
     public synchronized void shutdown() {
         if (exec != null) {
-            exec.shutdownNow();
+            exec.shutdown();
+            try {
+                if (!exec.awaitTermination(Long.MAX_VALUE, TimeUnit.NANOSECONDS)) {
+                    throw new IllegalStateException("RT worker pool did not terminate");
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                exec.shutdownNow();
+                throw new IllegalStateException("Interrupted while stopping RT worker pool", e);
+            }
             exec = null;
         }
     }

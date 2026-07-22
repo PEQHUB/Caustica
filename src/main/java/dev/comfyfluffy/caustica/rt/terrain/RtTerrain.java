@@ -160,7 +160,7 @@ public final class RtTerrain {
     private final LongOpenHashSet loadedColumns = new LongOpenHashSet();
     private final LongArrayList missing = new LongArrayList();
     private final Long2IntOpenHashMap missingIndex = new Long2IntOpenHashMap();
-    private final LongOpenHashSet interactiveMissing = new LongOpenHashSet();
+    private final TerrainMissingPriority interactiveMissing = new TerrainMissingPriority();
     private final Long2LongOpenHashMap queuedDirtyGroup = new Long2LongOpenHashMap();
     private final LongArrayList reextract = new LongArrayList();
     private final LongOpenHashSet queuedReextract = new LongOpenHashSet();
@@ -908,7 +908,7 @@ public final class RtTerrain {
             missing.add(key);
         }
         if (interactive) {
-            interactiveMissing.add(key);
+            interactiveMissing.mark(key, true);
         }
         setQueuedGroup(key, dirtyGroup);
         return true;
@@ -1367,8 +1367,7 @@ public final class RtTerrain {
                         return;
                     }
                     // The immutable source BLAS is already complete and traceable. Publish it directly;
-                    // the optional compact-size query/copy phase has produced repeatable device loss on
-                    // the current NVIDIA driver while startup terrain builds overlap graphics work.
+                    // the optional compact-size query/copy phase is intentionally not part of publication.
                     prepared.releaseBuildInputs();
                     completeTask(task, prepared, build, null);
                 });
