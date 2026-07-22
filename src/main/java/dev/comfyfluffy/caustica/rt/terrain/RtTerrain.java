@@ -131,6 +131,7 @@ public final class RtTerrain {
     // screens / hidden window — states where render-driven streaming has stopped).
     private static final long STREAM_FALLBACK_AFTER_NANOS = 200_000_000L;
     private static final long LIGHT_HIERARCHY_UPDATE_INTERVAL_NANOS = 100_000_000L;
+    static final int INTERACTIVE_BURST_SLOTS = 4;
 
     private static int sectionTableInitialCapacity() {
         return CausticaConfig.Rt.Terrain.SECTION_TABLE_INITIAL_CAPACITY.value();
@@ -648,23 +649,33 @@ public final class RtTerrain {
         // Snapshot and dispatch a bounded number of new worker-owned section builds.
         try (RtFrameStats.Scope ignored = RtFrameStats.FRAME.stage("terrain.snapshotDispatch")) {
             DispatchContext dispatch = null;
-            int dispatchSlots = Math.min(asyncDispatchPerPass(),
-                    Math.max(0, maxInflight() - taskTracker.outstanding()));
-            if (dispatchSlots > 0 && !reextract.isEmpty() && System.nanoTime() < deadline) {
+            int dispatchSlots = asyncDispatchPerPass();
+            int interactiveSlots = Math.min(dispatchSlots,
+                    Math.max(0, maxInflight() + INTERACTIVE_BURST_SLOTS - taskTracker.outstanding()));
+            if (interactiveSlots > 0 && !reextract.isEmpty() && System.nanoTime() < deadline) {
                 if (dispatch == null) {
                     dispatch = dispatchContext(ctx, level);
                 }
-                dispatchSlots -= dispatchReextract(dispatch, chunkSource, dispatchSlots, pcx, psy, pcz, deadline);
+                int dispatched = dispatchReextract(dispatch, chunkSource, interactiveSlots, pcx, psy, pcz, deadline);
+                interactiveSlots -= dispatched;
+                dispatchSlots -= dispatched;
             }
-            if (dispatchSlots > 0 && !missing.isEmpty() && System.nanoTime() < deadline) {
+            if (interactiveSlots > 0 && !missing.isEmpty() && System.nanoTime() < deadline) {
                 if (dispatch == null) {
                     dispatch = dispatchContext(ctx, level);
                 }
-                dispatchSlots -= dispatchMissingBuilds(dispatch, chunkSource, dispatchSlots, pcx, psy, pcz,
+                int dispatched = dispatchMissingBuilds(dispatch, chunkSource, interactiveSlots, pcx, psy, pcz,
                         deadline, true);
-                if (dispatchSlots > 0 && System.nanoTime() < deadline) {
-                    dispatchMissingBuilds(dispatch, chunkSource, dispatchSlots, pcx, psy, pcz, deadline, false);
+                interactiveSlots -= dispatched;
+                dispatchSlots -= dispatched;
+            }
+            int normalSlots = Math.min(dispatchSlots,
+                    Math.max(0, maxInflight() - taskTracker.outstanding()));
+            if (normalSlots > 0 && !missing.isEmpty() && System.nanoTime() < deadline) {
+                if (dispatch == null) {
+                    dispatch = dispatchContext(ctx, level);
                 }
+                dispatchMissingBuilds(dispatch, chunkSource, normalSlots, pcx, psy, pcz, deadline, false);
             }
         }
         flushLightHierarchyUpdate(ctx);
