@@ -1885,6 +1885,8 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
     // diffuse-sampled continuation rays — those are already covered by the sun NEE, so the tiny disc
     // would be a double-counted firefly. Reset true on every specular/water bounce, false on a diffuse one.
     bool showCelestial = true;
+    // Camera-connected specular/transmissive misses remain presentation sky until a diffuse lobe is sampled.
+    bool presentationSkyPath = CAUSTICA_SHARC_UPDATE == 0;
     // RIS emitter NEE: direct lighting from block emitters is active when lights are published and the
     // candidate count is non-zero. Off => emitters are gathered only on path hits (legacy behaviour).
 #if !CAUSTICA_OFFLINE
@@ -1906,6 +1908,7 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
 #endif
         payloadSetTraceState(showCelestial, exactMirrorDepth > 0, primaryVisibilityRay,
                 rayConeWidth, rayConeSpread);
+        payload.flags |= presentationSkyPath ? PAYLOAD_PRESENTATION_SKY : 0u;
         // Radiance SBT records run any-hit only for true alpha cutout. Translucent/water go straight to
         // closest-hit for dielectric handling. Geometry is double-sided; the chit flips the normal.
         // Primary (bounce 0) is the camera ray (CULL_PRIMARY): sees particles and the first-person body,
@@ -2275,6 +2278,7 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
                 gv_diffuseGuidePending = true;
             }
             rayConeSpread = max(rayConeSpread, RAY_CONE_DIFFUSE_SPREAD);
+            presentationSkyPath = false;
             showCelestial = false; // diffuse receiver: direct sun/moon was handled by NEE above
             ++scatteringDepth;
             continue;
@@ -2929,6 +2933,7 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
                     gv_diffuseGuidePending = true;
                 }
                 rayConeSpread = max(rayConeSpread, RAY_CONE_DIFFUSE_SPREAD);
+                presentationSkyPath = false;
                 showCelestial = false; // diffuse lobe: disc covered by NEE, hide it (anti-firefly)
             }
         } else {
@@ -2943,6 +2948,7 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
             sharcPreviousGlossyAlpha = 0.0;
 #endif
             throughput *= diffAlb;
+            presentationSkyPath = false;
             showCelestial = false; // diffuse bounce: hide the disc (covered by NEE)
             rd = cosineDir(n, sampler);
             if (dot(geometricNormal, rd) <= 0.0) {

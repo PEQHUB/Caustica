@@ -219,6 +219,9 @@ public static const uint PAYLOAD_LAVA_SURFACE = 1u << 16u;
 public static const uint PAYLOAD_FIBER_SURFACE = 1u << 17u;
 public static const uint PAYLOAD_ENCHANTED = 1u << 18u;
 public static const uint PAYLOAD_EMITTER_IN_LIST = 1u << 19u;
+// Camera-connected reflection/refraction misses need the visible below-horizon sky fallback, but are
+// not primary rays: keeping this separate preserves the direct-sky star compositing contract.
+public static const uint PAYLOAD_PRESENTATION_SKY = 1u << 20u;
 
 public static const uint PAYLOAD_MATERIAL_MASK = 3u;
 public static const uint MATERIAL_OPAQUE = 0u;
