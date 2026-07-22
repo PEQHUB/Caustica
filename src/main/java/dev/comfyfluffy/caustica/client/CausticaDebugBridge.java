@@ -294,6 +294,9 @@ final class CausticaDebugBridge {
         state.setProperty("terrainGpuQueueDepth", Integer.toString(terrain.gpuQueueDepth()));
         state.setProperty("terrainBuildsSubmitted", Long.toString(terrain.buildsSubmitted()));
         state.setProperty("terrainBuildsPublished", Long.toString(terrain.buildsPublished()));
+        state.setProperty("terrainInteractiveOutstanding", Long.toString(RtTerrain.interactiveOutstanding()));
+        state.setProperty("terrainInteractiveSubmitted", Long.toString(RtTerrain.interactiveSubmittedTotal()));
+        state.setProperty("terrainInteractivePublished", Long.toString(RtTerrain.interactivePublishedTotal()));
         state.setProperty("terrainBuildLatencyNanos", Long.toString(terrain.lastBuildLatencyNanos()));
         state.setProperty("terrainBuildLatencyKind", "host-submit-to-timeline-completion");
         state.setProperty("terrainActiveCompactionQueries", Integer.toString(terrain.activeCompactionQueries()));

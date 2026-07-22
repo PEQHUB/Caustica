@@ -58,6 +58,7 @@ import java.util.List;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.concurrent.atomic.AtomicLong;
@@ -159,6 +160,7 @@ public final class RtTerrain {
     private final LongOpenHashSet loadedColumns = new LongOpenHashSet();
     private final LongArrayList missing = new LongArrayList();
     private final Long2IntOpenHashMap missingIndex = new Long2IntOpenHashMap();
+    private final LongOpenHashSet interactiveMissing = new LongOpenHashSet();
     private final Long2LongOpenHashMap queuedDirtyGroup = new Long2LongOpenHashMap();
     private final LongArrayList reextract = new LongArrayList();
     private final LongOpenHashSet queuedReextract = new LongOpenHashSet();
@@ -166,7 +168,7 @@ public final class RtTerrain {
     // frames, so evicted geometry waits here until the next publish pass retires it.
     private final List<SectionGeom> removed = new ArrayList<>();
     private final List<PreparedSection> prepared = new ArrayList<>();
-    private final IdentityHashMap<PreparedSection, TerrainTaskTracker.Ticket> publicationTickets =
+    private final IdentityHashMap<PreparedSection, PublicationOwner> publicationTickets =
             new IdentityHashMap<>();
     // Publish identity and admission ownership are separate: cancellation revokes a ticket immediately,
     // while TerrainTaskTracker retains its capacity until the terminal result is drained.
@@ -174,6 +176,8 @@ public final class RtTerrain {
     private final Long2LongOpenHashMap inFlightDirtyGroup = new Long2LongOpenHashMap();
     private final Long2ObjectOpenHashMap<DirtyGroup> dirtyGroups = new Long2ObjectOpenHashMap<>();
     private final ConcurrentLinkedQueue<SectionResult> completedBuilds = new ConcurrentLinkedQueue<>();
+    private final ConcurrentLinkedQueue<SectionResult> interactiveCompletedBuilds = new ConcurrentLinkedQueue<>();
+    private final TerrainCompletionFairness<SectionResult> completionFairness = new TerrainCompletionFairness<>();
     private final Object activeTaskLock = new Object();
     private int activeTasks;
     /** Invalidates all worker/GPU work from a detached world residency without joining it. */
@@ -185,6 +189,12 @@ public final class RtTerrain {
     private final AtomicLong buildsSubmitted = new AtomicLong();
     private final AtomicLong buildsSubmittedSinceSample = new AtomicLong();
     private final AtomicLong buildsPublished = new AtomicLong();
+    private final AtomicLong buildsPublishedSinceSample = new AtomicLong();
+    private final AtomicLong interactiveOutstanding = new AtomicLong();
+    private final AtomicLong interactiveSubmittedTotal = new AtomicLong();
+    private final AtomicLong interactivePublishedTotal = new AtomicLong();
+    private final AtomicLong interactiveSubmittedSinceSample = new AtomicLong();
+    private final AtomicLong interactivePublishedSinceSample = new AtomicLong();
     private volatile long lastBuildLatencyNanos;
     private final RtSectionTable table = new RtSectionTable();
     private boolean ready;
@@ -345,7 +355,19 @@ public final class RtTerrain {
     public record Status(int outstandingTasks, int outstandingLimit, int queuedMissing, int queuedReextract,
                          int residentSections, long cancelledTasks, long discardedBuilds, int gpuQueueDepth,
                          long buildsSubmitted, long buildsPublished, long lastBuildLatencyNanos,
-                         int activeCompactionQueries) {
+                          int activeCompactionQueries) {
+    }
+
+    public static long interactiveOutstanding() {
+        return INSTANCE.interactiveOutstanding.get();
+    }
+
+    public static long interactiveSubmittedTotal() {
+        return INSTANCE.interactiveSubmittedTotal.get();
+    }
+
+    public static long interactivePublishedTotal() {
+        return INSTANCE.interactivePublishedTotal.get();
     }
 
     /** Per-tick residency update: window sync + dirty drain (plus the streaming fallback, see {@link #frame}). */
@@ -468,7 +490,7 @@ public final class RtTerrain {
             active = t.activeTasks;
         }
         int workers = benchmarkWorkerActive.get();
-        int completed = t.completedBuilds.size();
+        int completed = t.completedBuilds.size() + t.interactiveCompletedBuilds.size();
         int inFlight = t.taskTracker.outstanding();
         RtContext ctx = RtContext.currentOrNull();
         int gpuQueued = ctx == null ? 0 : ctx.gpuExecutor().queuedBuilds();
@@ -579,7 +601,7 @@ public final class RtTerrain {
             return;
         }
         if (reextract.isEmpty() && missing.isEmpty()
-                && completedBuilds.isEmpty()
+                && completedBuilds.isEmpty() && interactiveCompletedBuilds.isEmpty()
                 && !lightGrid.hasCompletions()
                 && !lightHierarchyDirty
                 && removed.isEmpty() && prepared.isEmpty()) {
@@ -592,7 +614,8 @@ public final class RtTerrain {
 
         ClientChunkCache chunkSource = level.getChunkSource();
         long started = System.nanoTime();
-        int queued = missing.size() + reextract.size() + completedBuilds.size();
+        int queued = missing.size() + reextract.size()
+                + completedBuilds.size() + interactiveCompletedBuilds.size();
         long budget = fallback
                 ? TerrainStreamBudget.fixedBudgetNanos(CausticaConfig.Rt.Terrain.STREAM_FALLBACK_BUDGET_MS.value())
                 : TerrainStreamBudget.adaptiveBudgetNanos(
@@ -637,7 +660,11 @@ public final class RtTerrain {
                 if (dispatch == null) {
                     dispatch = dispatchContext(ctx, level);
                 }
-                dispatchMissingBuilds(dispatch, chunkSource, dispatchSlots, pcx, psy, pcz, deadline);
+                dispatchSlots -= dispatchMissingBuilds(dispatch, chunkSource, dispatchSlots, pcx, psy, pcz,
+                        deadline, true);
+                if (dispatchSlots > 0 && System.nanoTime() < deadline) {
+                    dispatchMissingBuilds(dispatch, chunkSource, dispatchSlots, pcx, psy, pcz, deadline, false);
+                }
             }
         }
         flushLightHierarchyUpdate(ctx);
@@ -652,6 +679,12 @@ public final class RtTerrain {
         RtFrameStats.FRAME.count("terrainResidentSections", resident.size());
         RtFrameStats.FRAME.count("terrainGpuQueueDepth", ctx.gpuExecutor().queuedBuilds());
         RtFrameStats.FRAME.count("terrainBuildsSubmitted", buildsSubmittedSinceSample.getAndSet(0L));
+        RtFrameStats.FRAME.count("terrainBuildsPublished", buildsPublishedSinceSample.getAndSet(0L));
+        RtFrameStats.FRAME.count("terrainInteractiveOutstanding", interactiveOutstanding.get());
+        RtFrameStats.FRAME.count("terrainInteractiveSubmitted",
+                interactiveSubmittedSinceSample.getAndSet(0L));
+        RtFrameStats.FRAME.count("terrainInteractivePublished",
+                interactivePublishedSinceSample.getAndSet(0L));
         RtFrameStats.FRAME.count("terrainBuildLatencyNanos", lastBuildLatencyNanos);
         RtFrameStats.FRAME.count("terrainActiveCompactionQueries", RtAccel.activeTerrainCompactionQueries());
     }
@@ -677,6 +710,7 @@ public final class RtTerrain {
         loadedColumns.clear();
         missing.clear();
         missingIndex.clear();
+        interactiveMissing.clear();
 
         for (int scx = pcx - radius; scx <= pcx + radius; scx++) {
             for (int scz = pcz - radius; scz <= pcz + radius; scz++) {
@@ -855,24 +889,15 @@ public final class RtTerrain {
             setQueuedGroup(key, dirtyGroup);
             return true;
         } else {
-            return enqueueMissing(key, dirtyGroup);
+            return enqueueMissing(key, dirtyGroup, true);
         }
     }
 
     private boolean enqueueMissingIfNeeded(long key) {
-        if (resident.containsKey(key) || empty.contains(key) || taskTracker.containsCurrent(key)) {
-            return false;
-        }
-        if (missingIndex.get(key) != NO_MISSING_INDEX) {
-            return false;
-        }
-        setQueuedGroup(key, NO_DIRTY_GROUP);
-        missingIndex.put(key, missing.size());
-        missing.add(key);
-        return true;
+        return enqueueMissing(key, NO_DIRTY_GROUP, false);
     }
 
-    private boolean enqueueMissing(long key, long dirtyGroup) {
+    private boolean enqueueMissing(long key, long dirtyGroup, boolean interactive) {
         if (resident.containsKey(key) || empty.contains(key) || taskTracker.containsCurrent(key)) {
             return false;
         }
@@ -881,6 +906,9 @@ public final class RtTerrain {
         if (index == NO_MISSING_INDEX) {
             missingIndex.put(key, missing.size());
             missing.add(key);
+        }
+        if (interactive) {
+            interactiveMissing.add(key);
         }
         setQueuedGroup(key, dirtyGroup);
         return true;
@@ -913,6 +941,7 @@ public final class RtTerrain {
 
     /** Remove an unsorted missing entry in O(1) by moving the last entry into its slot. */
     private void removeMissing(long key) {
+        interactiveMissing.remove(key);
         int index = missingIndex.remove(key);
         if (index == NO_MISSING_INDEX) {
             return;
@@ -1049,10 +1078,10 @@ public final class RtTerrain {
      * {@link RenderRegionCache} dedupes {@code SectionCopy}s, so after a column's first snapshot the rest
      * are nearly free.
      */
-    private void dispatchMissingBuilds(DispatchContext dispatch, ClientChunkCache chunkSource, int remaining,
-                                       int pcx, int psy, int pcz, long deadline) {
+    private int dispatchMissingBuilds(DispatchContext dispatch, ClientChunkCache chunkSource, int remaining,
+                                      int pcx, int psy, int pcz, long deadline, boolean interactiveOnly) {
         if (missing.isEmpty() || remaining <= 0) {
-            return;
+            return 0;
         }
         // Over-collect 2x the remaining slots so candidates skipped for unready neighbour chunks (they cluster at
         // the window edge) don't leave dispatch slots idle.
@@ -1063,6 +1092,9 @@ public final class RtTerrain {
         int heapSize = 0;
         for (int read = 0, n = missing.size(); read < n && System.nanoTime() < deadline; read++) {
             long key = missing.getLong(read);
+            if (interactiveMissing.contains(key) != interactiveOnly) {
+                continue;
+            }
             // rank = columnDist²(16+) | |Δy|(0..15): column-major nearest-first.
             long rank = distanceRank(key, pcx, psy, pcz);
             if (heapSize < k) {
@@ -1081,6 +1113,7 @@ public final class RtTerrain {
             long q = heapKey[0]; heapKey[0] = heapKey[end]; heapKey[end] = q;
             siftDown(heapRank, heapKey, end, 0);
         }
+        int dispatched = 0;
         for (int i = 0; i < heapSize && remaining > 0 && System.nanoTime() < deadline; i++) {
             long key = heapKey[i];
             if (!desired.contains(key) || resident.containsKey(key) || empty.contains(key)
@@ -1097,8 +1130,10 @@ public final class RtTerrain {
             }
             removeMissing(key);
             remaining--;
-            dispatchSectionBuild(dispatch, key, sx, sectionY(key), sz);
+            dispatchSectionBuild(dispatch, key, sx, sectionY(key), sz, interactiveOnly);
+            dispatched++;
         }
+        return dispatched;
     }
 
     /** Max-heap sift-up on parallel (rank, key) arrays — worst candidate at the root. */
@@ -1195,7 +1230,7 @@ public final class RtTerrain {
             SectionGeom g = resident.get(key);
             queuedReextract.remove(key);
             removeUnsorted(reextract, reextract.indexOf(key));
-            dispatchSectionBuild(dispatch, key, g.sx >> 4, g.sy >> 4, g.sz >> 4);
+            dispatchSectionBuild(dispatch, key, g.sx >> 4, g.sy >> 4, g.sz >> 4, true);
             remaining--;
             dispatched++;
         }
@@ -1219,7 +1254,8 @@ public final class RtTerrain {
     }
 
     /** Snapshot one section and dispatch its complete worker → GPU build lifecycle. */
-    private void dispatchSectionBuild(DispatchContext dispatch, long key, int sx, int sy, int sz) {
+    private void dispatchSectionBuild(DispatchContext dispatch, long key, int sx, int sy, int sz,
+                                      boolean interactive) {
         RtFrameStats.FRAME.count("sectionsSnapshotted", 1);
         long snapshotStart = benchmarkTelemetryEnabled ? System.nanoTime() : 0L;
         RtSectionSnapshots.Region region = snapshots.createRegion(dispatch.level(), sx, sy, sz);
@@ -1235,15 +1271,18 @@ public final class RtTerrain {
         RtMaterialRegistry.Snapshot materialSnapshot = RtMaterialRegistry.INSTANCE.requireSnapshot();
         TerrainTaskTracker.Ticket ticket = taskTracker.accept(key, token);
         SectionTask task = new SectionTask(ticket, key, token, sx << 4, sy << 4, sz << 4, dirtyGroup,
-                terrainEpoch, materialSnapshot.epoch());
+                terrainEpoch, materialSnapshot.epoch(), interactive);
         if (dirtyGroup != NO_DIRTY_GROUP) {
             inFlightDirtyGroup.put(key, dirtyGroup);
         } else {
             inFlightDirtyGroup.remove(key);
         }
         beginActiveTask();
+        if (interactive) {
+            interactiveOutstanding.incrementAndGet();
+        }
         try {
-            RtWorkerPool.INSTANCE.submit(() -> {
+            RtWorkerPool.INSTANCE.submit(interactive, () -> {
                 long cpuStart = benchmarkTelemetryEnabled ? System.nanoTime() : 0L;
                 if (benchmarkTelemetryEnabled) benchmarkWorkerActive.incrementAndGet();
                 try {
@@ -1294,6 +1333,9 @@ public final class RtTerrain {
             taskTracker.cancelCurrent(key);
             taskTracker.retire(ticket);
             inFlightDirtyGroup.remove(key);
+            if (interactive) {
+                interactiveOutstanding.decrementAndGet();
+            }
             finishActiveTask();
             throw t;
         }
@@ -1302,9 +1344,7 @@ public final class RtTerrain {
     /** Build/query, then compact-copy a terrain BLAS before making it eligible for publication. */
     private void submitTerrainBuild(RtContext ctx, SectionTask task, PreparedSection prepared) {
         if (benchmarkTelemetryEnabled) task.gpuStartedNanos = System.nanoTime();
-        buildsSubmitted.incrementAndGet();
-        buildsSubmittedSinceSample.incrementAndGet();
-        ctx.gpuExecutor().submit(
+        ctx.gpuExecutor().submit(task.interactive,
                 () -> !isTaskCurrent(task),
                 cmd -> {
                     RtSectionBuilder.recordUpload(cmd, prepared);
@@ -1332,6 +1372,12 @@ public final class RtTerrain {
                     prepared.releaseBuildInputs();
                     completeTask(task, prepared, build, null);
                 });
+        buildsSubmitted.incrementAndGet();
+        buildsSubmittedSinceSample.incrementAndGet();
+        if (task.interactive) {
+            interactiveSubmittedTotal.incrementAndGet();
+            interactiveSubmittedSinceSample.incrementAndGet();
+        }
     }
 
     private void completeTask(SectionTask task, PreparedSection prepared, RtGpuExecutor.Build build, Throwable failure) {
@@ -1339,6 +1385,9 @@ public final class RtTerrain {
     }
 
     private void completeTask(SectionResult result) {
+        if (!result.task().terminalCompleted.compareAndSet(false, true)) {
+            return;
+        }
         try {
             long gpuStarted = result.task().gpuStartedNanos;
             if (gpuStarted != 0L) {
@@ -1346,7 +1395,12 @@ public final class RtTerrain {
                 benchmarkGpuNanos.add(System.nanoTime() - gpuStarted);
                 benchmarkGpuCompleted.increment();
             }
-            completedBuilds.add(result);
+            if (result.task().interactive) {
+                interactiveOutstanding.decrementAndGet();
+                interactiveCompletedBuilds.add(result);
+            } else {
+                completedBuilds.add(result);
+            }
         } finally {
             finishActiveTask();
         }
@@ -1386,6 +1440,10 @@ public final class RtTerrain {
         }
     }
 
+    private SectionResult pollCompletedBuild() {
+        return completionFairness.poll(interactiveCompletedBuilds, completedBuilds);
+    }
+
     /**
      * Publish terminal worker/executor results (up to the configured result count per pass). A task
      * whose ticket is no longer current is stale and its unpublished native result is
@@ -1395,7 +1453,7 @@ public final class RtTerrain {
                                       int resultCap, long deadline) {
         int remaining = resultCap;
         while (remaining > 0 && System.nanoTime() < deadline) {
-            SectionResult result = completedBuilds.poll();
+            SectionResult result = pollCompletedBuild();
             if (result == null) {
                 break;
             }
@@ -1413,7 +1471,7 @@ public final class RtTerrain {
                         taskTracker.cancelCurrent(task.key);
                         long staleGroup = inFlightDirtyGroup.remove(task.key);
                         if (staleGroup != NO_DIRTY_GROUP) cancelDirtyGroup(staleGroup);
-                        enqueueMissingIfNeeded(task.key);
+                        enqueueMissing(task.key, NO_DIRTY_GROUP, task.interactive);
                         if (!materialValid) {
                             RtFrameStats.FRAME.count("terrainMaterialEpochRejects", 1);
                         }
@@ -1447,7 +1505,7 @@ public final class RtTerrain {
                         throw new RuntimeException("RT terrain GPU build failed for section "
                                 + (task.sox >> 4) + "," + (task.soy >> 4) + "," + (task.soz >> 4), t);
                     }
-                    publicationTickets.put(built, task.ticket);
+                    publicationTickets.put(built, new PublicationOwner(task.ticket, task.interactive));
                     publicationPending = true;
                 }
                 if (dirtyGroup != NO_DIRTY_GROUP && dirtyGroups.containsKey(dirtyGroup)) {
@@ -1542,7 +1600,7 @@ public final class RtTerrain {
                 }
             } else {
                 empty.remove(key);
-                enqueueMissingIfNeeded(key);
+                enqueueMissing(key, NO_DIRTY_GROUP, true);
             }
         }
     }
@@ -1572,9 +1630,9 @@ public final class RtTerrain {
     }
 
     private void retirePublicationTicket(PreparedSection ps) {
-        TerrainTaskTracker.Ticket ticket = publicationTickets.remove(ps);
-        if (ticket != null) {
-            taskTracker.retire(ticket);
+        PublicationOwner owner = publicationTickets.remove(ps);
+        if (owner != null) {
+            taskTracker.retire(owner.ticket());
         }
     }
 
@@ -1614,9 +1672,11 @@ public final class RtTerrain {
         final long dirtyGroup;
         final long terrainEpoch;
         final long materialEpoch;
+        final boolean interactive;
+        final AtomicBoolean terminalCompleted = new AtomicBoolean();
         volatile long gpuStartedNanos;
         SectionTask(TerrainTaskTracker.Ticket ticket, long key, long token, int sox, int soy, int soz, long dirtyGroup,
-                    long terrainEpoch, long materialEpoch) {
+                    long terrainEpoch, long materialEpoch, boolean interactive) {
             this.ticket = ticket;
             this.key = key;
             this.token = token;
@@ -1626,7 +1686,11 @@ public final class RtTerrain {
             this.dirtyGroup = dirtyGroup;
             this.terrainEpoch = terrainEpoch;
             this.materialEpoch = materialEpoch;
+            this.interactive = interactive;
         }
+    }
+
+    private record PublicationOwner(TerrainTaskTracker.Ticket ticket, boolean interactive) {
     }
 
     private record SectionResult(SectionTask task, PreparedSection prepared,
@@ -1668,7 +1732,7 @@ public final class RtTerrain {
         }
 
         for (PreparedSection ps : prepared) {
-            TerrainTaskTracker.Ticket publicationTicket = publicationTickets.remove(ps);
+            PublicationOwner publicationOwner = publicationTickets.remove(ps);
             try {
             SectionGeom g = new SectionGeom(ps.key(), ps.uvs(), ps.material(),
                     ps.blas().accel, ps.triBase(), ps.sx(), ps.sy(), ps.sz(), ps.lights());
@@ -1703,11 +1767,16 @@ public final class RtTerrain {
             published.add(ps.key());
             if (benchmarkTelemetryEnabled) benchmarkPublished.increment();
             buildsPublished.incrementAndGet();
+            buildsPublishedSinceSample.incrementAndGet();
+            if (publicationOwner != null && publicationOwner.interactive()) {
+                interactivePublishedTotal.incrementAndGet();
+                interactivePublishedSinceSample.incrementAndGet();
+            }
             RtFrameStats.FRAME.count("terrainBuildsPublished", 1);
             RtFrameStats.FRAME.count("sectionsUploaded", 1);
             } finally {
-                if (publicationTicket != null) {
-                    taskTracker.retire(publicationTicket);
+                if (publicationOwner != null) {
+                    taskTracker.retire(publicationOwner.ticket());
                 }
             }
         }
@@ -1823,7 +1892,7 @@ public final class RtTerrain {
         lightGrid.awaitIdle();
         Throwable failure = null;
         SectionResult result;
-        while ((result = completedBuilds.poll()) != null) {
+        while ((result = pollCompletedBuild()) != null) {
             try {
                 if (result.prepared() != null) {
                     destroyPreparedSection(result.prepared());
@@ -1837,6 +1906,10 @@ public final class RtTerrain {
         }
         taskTracker.cancelAllCurrent();
         inFlightDirtyGroup.clear();
+        if (interactiveOutstanding.get() != 0L) {
+            throw new IllegalStateException("interactive terrain tasks remain after join: "
+                    + interactiveOutstanding.get());
+        }
         if (failure != null) {
             throw new RuntimeException("RT terrain worker/build failed during teardown", failure);
         }
@@ -1871,6 +1944,7 @@ public final class RtTerrain {
         loadedColumns.clear();
         missing.clear();
         missingIndex.clear();
+        interactiveMissing.clear();
         queuedDirtyGroup.clear();
         reextract.clear();
         queuedReextract.clear();
@@ -1955,7 +2029,7 @@ public final class RtTerrain {
         }
         prepared.clear();
         SectionResult completed;
-        while ((completed = completedBuilds.poll()) != null) {
+        while ((completed = pollCompletedBuild()) != null) {
             try {
                 if (completed.prepared() != null) {
                     oldPrepared.add(completed.prepared());
@@ -1978,6 +2052,7 @@ public final class RtTerrain {
         loadedColumns.clear();
         missing.clear();
         missingIndex.clear();
+        interactiveMissing.clear();
         queuedDirtyGroup.clear();
         reextract.clear();
         queuedReextract.clear();

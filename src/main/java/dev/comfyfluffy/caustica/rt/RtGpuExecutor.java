@@ -24,7 +24,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.CancellationException;
-import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.PriorityBlockingQueue;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BiConsumer;
@@ -45,8 +45,11 @@ public final class RtGpuExecutor {
     private static int maxBuildBatch() {
         return dev.comfyfluffy.caustica.CausticaConfig.Rt.Terrain.GPU_BUILD_BATCH_SIZE.value();
     }
-    private static final Job STOP = new Job(null, null, null, null, null);
-    private static final Job WAKE = new Job(null, null, null, null, null);
+    private static final int KIND_BUILD = 0;
+    private static final int KIND_WAKE = 1;
+    private static final int KIND_STOP = 2;
+    private static final Job WAKE = new Job(null, null, null, null, null, KIND_WAKE, false, Long.MAX_VALUE - 1L);
+    private static final Job STOP = new Job(null, null, null, null, null, KIND_STOP, false, Long.MAX_VALUE);
     private static final long TERRAIN_READ_STAGES =
             VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR
                     | VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR;
@@ -56,8 +59,9 @@ public final class RtGpuExecutor {
     private final long buildTimeline;
     private final long graphicsTimeline;
     private final RtDeviceBringup.AccelerationStructureLaneMode asLaneMode;
-    private final LinkedBlockingQueue<Job> jobs = new LinkedBlockingQueue<>();
-    private final AtomicLong nextBuildValue = new AtomicLong();
+    private final PriorityBlockingQueue<Job> jobs = new PriorityBlockingQueue<>();
+    private final AtomicLong nextJobSequence = new AtomicLong();
+    private final AtomicLong nextTimelineValue = new AtomicLong();
     private final AtomicLong pendingPublishWaitValue = new AtomicLong();
     private final AtomicLong latestSubmittedBuildValue = new AtomicLong();
     private final AtomicLong nextGraphicsValue = new AtomicLong();
@@ -91,7 +95,7 @@ public final class RtGpuExecutor {
      */
     public Build submit(Consumer<VkCommandBuffer> record, Runnable afterSuccess,
                         BiConsumer<Build, Throwable> finished) {
-        return submit(() -> false, record, afterSuccess, finished);
+        return submit(false, () -> false, record, afterSuccess, finished);
     }
 
     /**
@@ -100,14 +104,21 @@ public final class RtGpuExecutor {
      */
     public synchronized Build submit(BooleanSupplier cancelled, Consumer<VkCommandBuffer> record,
                                      Runnable afterSuccess, BiConsumer<Build, Throwable> finished) {
+        return submit(false, cancelled, record, afterSuccess, finished);
+    }
+
+    /** Enqueue a terrain build with bounded interactive priority. */
+    public synchronized Build submit(boolean interactive, BooleanSupplier cancelled,
+                                     Consumer<VkCommandBuffer> record, Runnable afterSuccess,
+                                     BiConsumer<Build, Throwable> finished) {
         checkExecutorFailure();
         if (closed) {
             throw new IllegalStateException("RT GPU executor is closed");
         }
-        long value = nextBuildValue.incrementAndGet();
-        Build build = new Build(value);
+        Build build = new Build();
         queuedBuilds.incrementAndGet();
-        jobs.add(new Job(cancelled, record, afterSuccess, finished, build));
+        jobs.add(new Job(cancelled, record, afterSuccess, finished, build, KIND_BUILD,
+                interactive, nextJobSequence.incrementAndGet()));
         return build;
     }
 
@@ -300,6 +311,7 @@ public final class RtGpuExecutor {
                 }
             }
             if (!executable.isEmpty()) {
+                assignTimelineValues(executable);
                 try {
                     execute(executable);
                     for (Job job : executable) {
@@ -402,6 +414,11 @@ public final class RtGpuExecutor {
         ArrayList<VkCommandBuffer> commands = new ArrayList<>(batch.size());
         boolean submitted = false;
         boolean completed = false;
+        for (int i = 1; i < batch.size(); i++) {
+            if (batch.get(i - 1).build.value() >= batch.get(i).build.value()) {
+                throw new IllegalStateException("GPU build timeline values are not increasing");
+            }
+        }
         long signalValue = batch.get(batch.size() - 1).build.value;
         long firstValue = batch.get(0).build.value;
         VulkanDiagnostics.setInFlight("async-compute",
@@ -473,6 +490,12 @@ public final class RtGpuExecutor {
         }
     }
 
+    private void assignTimelineValues(List<Job> executable) {
+        for (Job job : executable) {
+            job.build.assignTimelineValue(nextTimelineValue.incrementAndGet());
+        }
+    }
+
     private long createTimeline(String label) {
         try (MemoryStack stack = MemoryStack.stackPush()) {
             VkSemaphoreTypeCreateInfo type = VkSemaphoreTypeCreateInfo.calloc(stack).sType$Default()
@@ -517,16 +540,33 @@ public final class RtGpuExecutor {
     }
 
     public static final class Build {
-        private final long value;
+        private volatile long value;
         private final long enqueuedNanos;
 
-        private Build(long value) {
-            this.value = value;
+        Build() {
             this.enqueuedNanos = System.nanoTime();
         }
 
         public long value() {
-            return value;
+            long current = value;
+            if (current == 0L) {
+                throw new IllegalStateException("build has not entered a GPU submission");
+            }
+            return current;
+        }
+
+        public boolean submitted() {
+            return value != 0L;
+        }
+
+        void assignTimelineValue(long value) {
+            if (value <= 0L) {
+                throw new IllegalArgumentException("timeline value must be positive");
+            }
+            if (this.value != 0L) {
+                throw new IllegalStateException("timeline value already assigned");
+            }
+            this.value = value;
         }
 
         /** Host-observed time since this build was accepted; this is not a GPU timestamp. */
@@ -536,7 +576,20 @@ public final class RtGpuExecutor {
     }
 
     private record Job(BooleanSupplier cancelled, Consumer<VkCommandBuffer> record, Runnable afterSuccess,
-                       BiConsumer<Build, Throwable> finished, Build build) {
+                       BiConsumer<Build, Throwable> finished, Build build, int kind,
+                       boolean interactive, long sequence) implements Comparable<Job> {
+        @Override
+        public int compareTo(Job other) {
+            int kindOrder = Integer.compare(kind, other.kind);
+            if (kindOrder != 0) {
+                return kindOrder;
+            }
+            if (kind != KIND_BUILD) {
+                return Long.compare(sequence, other.sequence);
+            }
+            return TerrainJobOrder.compare(interactive, sequence,
+                    other.interactive, other.sequence);
+        }
     }
 
     private record DestroyJob(long lastUseValue, Runnable destroy) {

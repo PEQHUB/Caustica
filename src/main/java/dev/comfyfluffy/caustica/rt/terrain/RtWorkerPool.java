@@ -2,12 +2,14 @@ package dev.comfyfluffy.caustica.rt.terrain;
 
 import dev.comfyfluffy.caustica.CausticaConfig;
 import dev.comfyfluffy.caustica.CausticaMod;
+import dev.comfyfluffy.caustica.rt.TerrainJobOrder;
 
-import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.PriorityBlockingQueue;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Shared daemon thread pool for CPU-heavy RT work that must stay off the render thread — terrain
@@ -24,6 +26,7 @@ public final class RtWorkerPool {
     public static final RtWorkerPool INSTANCE = new RtWorkerPool();
 
     private ThreadPoolExecutor exec;
+    private final AtomicLong nextSequence = new AtomicLong();
 
     private RtWorkerPool() {}
 
@@ -45,7 +48,7 @@ public final class RtWorkerPool {
                 }
             };
             ThreadPoolExecutor e = new ThreadPoolExecutor(threads, threads, 30, TimeUnit.SECONDS,
-                    new LinkedBlockingQueue<>(), factory);
+                    new PriorityBlockingQueue<>(), factory);
             e.allowCoreThreadTimeOut(true);
             exec = e;
             CausticaMod.LOGGER.info("RT worker pool started with {} thread(s)", threads);
@@ -55,7 +58,12 @@ public final class RtWorkerPool {
 
     /** Submit worker-owned RT preparation; completion is delivered by the task itself. */
     public void submit(Runnable job) {
-        executor().execute(job);
+        submit(false, job);
+    }
+
+    /** Submit terrain work with bounded interactive priority. */
+    public void submit(boolean interactive, Runnable job) {
+        executor().execute(new WorkerTask(interactive, nextSequence.incrementAndGet(), job));
     }
 
     /** Stop all workers and drop queued jobs. Safe to call when never started. */
@@ -63,6 +71,20 @@ public final class RtWorkerPool {
         if (exec != null) {
             exec.shutdownNow();
             exec = null;
+        }
+    }
+
+    private record WorkerTask(boolean interactive, long sequence, Runnable delegate)
+            implements Runnable, Comparable<WorkerTask> {
+        @Override
+        public int compareTo(WorkerTask other) {
+            return TerrainJobOrder.compare(interactive, sequence,
+                    other.interactive, other.sequence);
+        }
+
+        @Override
+        public void run() {
+            delegate.run();
         }
     }
 }
