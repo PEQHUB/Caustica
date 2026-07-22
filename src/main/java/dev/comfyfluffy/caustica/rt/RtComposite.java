@@ -2371,6 +2371,13 @@ public final class RtComposite {
             // Push the BDA ring slot's address plus the small hot subset that rchit/rahit read on every
             // hit (tableAddr/entityTableAddr/frameIndex) as real inline push constants, so those lookups
             // don't pay for a second global-memory dereference through pcAddr.worldPushAddr first.
+            int pointSampleMaxSize =
+                    CausticaConfig.Rt.Composite.POINT_SAMPLE_MAX_SIZE.value();
+
+            if (pointSampleMaxSize == 0) {
+                pointSampleMaxSize = -1;
+            }
+
             if (sharcCache != null && !offlineGroundTruth) {
                 float sceneScale = CausticaConfig.Rt.Sharc.SCENE_SCALE.value();
                 float radianceScale = CausticaConfig.Rt.Sharc.RADIANCE_SCALE.value();
@@ -2405,7 +2412,7 @@ public final class RtComposite {
                 ByteBuffer sharcPush = stack.malloc(SharcPushAddrData.BYTE_SIZE);
                 new SharcPushAddrData(pushBuf.deviceAddress, terrain.tableAddress(), fe.geomTableAddr(),
                         RtMaterialRegistry.INSTANCE.tableAddress(), (int) frameCounter, worldDebugView,
-                        textureMipBias, CausticaConfig.Rt.Composite.POINT_SAMPLE_MAX_SIZE.value(),
+                        textureMipBias, pointSampleMaxSize,
                         sharcFrame.address()).write(sharcPush);
                 boolean sharcDiagnostics = CausticaConfig.Rt.Sharc.DETAILED_STATS.value()
                         || (worldDebugView >= 9 && worldDebugView <= 16);
@@ -2446,7 +2453,7 @@ public final class RtComposite {
                 ByteBuffer pushAddr = stack.malloc(WorldPushConstantsData.BYTE_SIZE);
                 new WorldPushConstantsData(pushBuf.deviceAddress, terrain.tableAddress(), fe.geomTableAddr(),
                         RtMaterialRegistry.INSTANCE.tableAddress(), (int) frameCounter, worldDebugView,
-                        textureMipBias, CausticaConfig.Rt.Composite.POINT_SAMPLE_MAX_SIZE.value()).write(pushAddr);
+                        textureMipBias, pointSampleMaxSize).write(pushAddr);
                 try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "world trace");
                      RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.trace")) {
                     active.trace(cmd, renderW, renderH, pushAddr);

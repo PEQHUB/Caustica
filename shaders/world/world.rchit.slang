@@ -33,9 +33,9 @@ uint materialEmissionSource(MaterialHeader header, float emission) {
     return EMISSION_SOURCE_UNIFORM;
 }
 
-// Strength of the LabPBR _n ambient-occlusion (blue) applied to albedo. Kept mild because the path
-// tracer already computes its own AO from sky-visibility rays (avoid double-darkening).
-static const float NORMAL_AO_STRENGTH = 0.5;
+// Strength of the LabPBR _n ambient-occlusion (blue) applied to albedo. PT intentionally disables this
+// baked AO term (0.0) to avoid double-darkening with path-traced sky-visibility occlusion.
+static const float NORMAL_AO_STRENGTH = 0.0;
 
 static const float RAY_CONE_MIN_WIDTH = 1.0e-5;
 static const float RAY_CONE_MIN_TEXEL_FOOTPRINT = 1.0e-4;

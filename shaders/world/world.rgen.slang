@@ -1114,7 +1114,8 @@ Reservoir resEmpty() {
 //   - back hemisphere with sss>0 (LabPBR leaves/grass): HG transmission phase — cosT = dot(wi,rd) peaks
 //     when the ray points from the light through the slab toward the camera (same as the sun SSS term).
 float3 evalSampleContrib(float3 sp, float3 lnrm, float3 le, float area, float3 hitPos, float3 n,
-                         float3 v, float3 rd, float3 diffAlb, float3 F0, float rough, bool pbr,
+                         float3 geometricNormal, float3 v, float3 rd, float3 diffAlb, float3 F0, float rough,
+                         bool pbr,
                          bool twoSided, float sss, out float phat) {
     phat = 0.0;
     float3 toL = sp - hitPos;
@@ -1129,11 +1130,12 @@ float3 evalSampleContrib(float3 sp, float3 lnrm, float3 le, float area, float3 h
         return float3(0.0, 0.0, 0.0); // receiver behind the emitter face
     }
     float ndl = dot(n, wi);
+    float geometricNdl = dot(geometricNormal, wi);
     if (twoSided) {
         ndl = abs(ndl);
     }
     float3 contrib = float3(0.0, 0.0, 0.0);
-    if (ndl > 0.0) {
+    if (ndl > 0.0 && geometricNdl > 0.0) {
         float G = ndl * cosL / dist2; // area-light geometry term (x area)
         float3 brdf = diffAlb * INV_PI;
         if (pbr) {
@@ -1147,7 +1149,7 @@ float3 evalSampleContrib(float3 sp, float3 lnrm, float3 le, float area, float3 h
             brdf += (D * Gs) * Fs / (4.0 * ndv * ndl);
         }
         contrib = brdf * le * (G * area);
-    } else if (sss > 0.0) {
+    } else if (!twoSided && sss > 0.0 && geometricNdl < 0.0) {
         float backNdl = -ndl;
         float G = backNdl * cosL / dist2;
         float cosT = dot(wi, rd);
@@ -1272,7 +1274,7 @@ void selectLightGridLight(LightGridCell cell, bool useLocal, inout uint proposal
 
 // Initial RIS over M power-weighted candidates -> one resampled sample, no shadow ray yet. The chosen
 // sample's W = wSum / (M * p-hat); M counts every candidate, including zero-weight ones.
-Reservoir risInitial(float3 hitPos, float3 n, float3 v, float3 rd, float3 diffAlb, float3 F0,
+Reservoir risInitial(float3 hitPos, float3 n, float3 geometricNormal, float3 v, float3 rd, float3 diffAlb, float3 F0,
                      float rough, bool pbr, bool twoSided, float sss,
                      inout uint seed, inout uint proposalSeed) {
     Reservoir r = resEmpty();
@@ -1311,7 +1313,7 @@ Reservoir risInitial(float3 hitPos, float3 n, float3 v, float3 rd, float3 diffAl
         float3 le = lightRadiance(lg);
         float3 lightNormal = lightGeometricNormal(lg);
         float phat;
-        evalSampleContrib(sp, lightNormal, le, lg.posArea.w, hitPos, n, v, rd,
+        evalSampleContrib(sp, lightNormal, le, lg.posArea.w, hitPos, n, geometricNormal, v, rd,
                 diffAlb, F0, rough, pbr, twoSided, sss, phat);
         if (phat <= 0.0) {
             continue;
@@ -1335,14 +1337,14 @@ Reservoir risInitial(float3 hitPos, float3 n, float3 v, float3 rd, float3 diffAl
 // ray, and return throughput-free radiance contrib*vis*W. The one ray serves whichever term fired for
 // the survivor (front BRDF, twoSided billboard, or SSS backscatter) — the origin is biased toward the
 // sample's side of the surface.
-float3 shadeReservoir(Reservoir s, float3 hitPos, float3 n, float3 v, float3 rd, float3 diffAlb,
+float3 shadeReservoir(Reservoir s, float3 hitPos, float3 n, float3 geometricNormal, float3 v, float3 rd, float3 diffAlb,
                       float3 F0, float rough, bool pbr, bool twoSided, float sss, out float3 vis) {
     vis = float3(0.0, 0.0, 0.0);
     if (s.W <= 0.0 || s.phat <= 0.0) {
         return float3(0.0, 0.0, 0.0);
     }
     float phat;
-    float3 contrib = evalSampleContrib(s.pos, s.lnrm, s.le, s.area, hitPos, n, v, rd,
+    float3 contrib = evalSampleContrib(s.pos, s.lnrm, s.le, s.area, hitPos, n, geometricNormal, v, rd,
             diffAlb, F0, rough, pbr, twoSided, sss, phat);
     if (phat <= 0.0) {
         return float3(0.0, 0.0, 0.0);
@@ -1351,8 +1353,9 @@ float3 shadeReservoir(Reservoir s, float3 hitPos, float3 n, float3 v, float3 rd,
     // that origin — measuring dist from hitPos while tracing from the biased origin shifts the ray tip
     // up to SURF_BIAS*ndl toward the emitter plane, beating the 0.001*dist stop-short margin for lights
     // closer than ~SURF_BIAS/0.001 blocks -> shadow ray hits the emitter's own face -> per-texel black.
-    float side = dot(n, s.pos - hitPos) >= 0.0 ? 1.0 : -1.0;
-    float3 origin = hitPos + side * n * RAY_ORIGIN_BIAS;
+    float3 shadowNormal = twoSided ? n : geometricNormal;
+    float side = dot(shadowNormal, s.pos - hitPos) >= 0.0 ? 1.0 : -1.0;
+    float3 origin = hitPos + side * shadowNormal * RAY_ORIGIN_BIAS;
     float3 toL = s.pos - origin;
     float dist = length(toL);
     // Stop just short of the sample point so the ray doesn't self-occlude on the emitter's own face.
@@ -2185,11 +2188,11 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
 #if !CAUSTICA_OFFLINE
             if (risOn) {
                 float3 v = -rd;
-                Reservoir r = risInitial(hitPos, n, v, rd, albedo, float3(0.0, 0.0, 0.0), 1.0, false,
+                Reservoir r = risInitial(hitPos, n, geometricNormal, v, rd, albedo, float3(0.0, 0.0, 0.0), 1.0, false,
                         true, 0.0, risSeed, proposalSeed);
                 float3 risVis;
-                float3 risContrib = throughput * shadeReservoir(r, hitPos, n, v, rd, albedo, float3(0.0, 0.0, 0.0), 1.0,
-                        false, true, 0.0, risVis);
+                float3 risContrib = throughput * shadeReservoir(r, hitPos, n, geometricNormal, v, rd, albedo,
+                        float3(0.0, 0.0, 0.0), 1.0, false, true, 0.0, risVis);
                 if (max(risVis.r, max(risVis.g, risVis.b)) > 0.0) {
                     L += risContrib;
 #if CAUSTICA_NRD
@@ -2462,6 +2465,9 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
             cameraVisibilityMask = CULL_SECONDARY;
             throughput *= fresnelSchlick(clamp(dot(n, v), 0.0, 1.0), F0);
             rd = reflect(rd, n);
+            if (dot(geometricNormal, rd) <= 0.0) {
+                break;
+            }
             // `p` is the true hit point. Respawning there with a zero trace TMin lets an exact mirror
             // immediately hit its own triangle again; the resulting mirror-depth contours appear as
             // concentric rings head-on and parallel bands at grazing angles. Offset along the geometric
@@ -2567,8 +2573,12 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
                 ? sampleCelestialDisk(pc.lightDir.xyz, pc.lightDir.w, sampler) : pc.lightDir.xyz;
         float3 directRadiance = pc.lightRadiance.xyz;
         float signedNdl = dot(n, lightDir);
-        float ndl = celestialNeeEligible ? max(0.0, signedNdl) : 0.0;
-        float backNdl = celestialNeeEligible && sss > 0.0 && scatteringDepth <= MAX_SSS_BOUNCE
+        float geometricNdl = dot(geometricNormal, lightDir);
+
+        float ndl = celestialNeeEligible && geometricNdl > 0.0
+                ? max(0.0, signedNdl) : 0.0;
+        float backNdl = celestialNeeEligible && geometricNdl < 0.0
+                && sss > 0.0 && scatteringDepth <= MAX_SSS_BOUNCE
                 ? max(0.0, -signedNdl) : 0.0;
         // Front lighting and thin-surface backlighting are mutually exclusive for one sampled direction.
         // Trace their identical geometric-normal visibility ray once and reuse its water-crossing data.
@@ -2656,10 +2666,10 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
 #if !CAUSTICA_OFFLINE
         if (risOn) {
             float activeSss = scatteringDepth <= MAX_SSS_BOUNCE ? sss : 0.0;
-            Reservoir r = risInitial(hitPos, n, v, rd, diffAlb, F0, rough, pbr, false, activeSss,
-                    risSeed, proposalSeed);
+            Reservoir r = risInitial(hitPos, n, geometricNormal, v, rd, diffAlb, F0, rough, pbr, false,
+                    activeSss, risSeed, proposalSeed);
             float3 risVis;
-            float3 risContrib = shadeReservoir(r, hitPos, n, v, rd, diffAlb, F0, rough, pbr, false,
+            float3 risContrib = shadeReservoir(r, hitPos, n, geometricNormal, v, rd, diffAlb, F0, rough, pbr, false,
                     activeSss, risVis);
             if (max(risVis.r, max(risVis.g, risVis.b)) > 0.0) {
 #if CAUSTICA_SHARC_UPDATE || CAUSTICA_SHARC_QUERY
@@ -2804,7 +2814,7 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
                 float3 h = sampleGGXVNDF(n, v, rough, sampler);
                 float3 l = reflect(rd, h); // rd = -v: reflect the incoming ray about the microfacet normal
                 float ndl2 = dot(n, l);
-                if (ndl2 <= 0.0) {
+                if (ndl2 <= 0.0 || dot(geometricNormal, l) <= 0.0) {
                     break; // microfacet reflects below the surface: terminate this path
                 }
                 // VNDF + separable Smith ⇒ weight = F · G2/G1(v) = F · G1(l); divide by the lobe pdf ps.
@@ -2839,6 +2849,9 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
 #endif
                 float diffusePdf;
                 float3 l = sampleEon(n, v, perceptualRough, sampler, diffusePdf);
+                if (dot(geometricNormal, l) <= 0.0) {
+                    break;
+                }
                 float3 diffuse = evaluateEonDiffuse(l, v, n, perceptualRough, diffAlb)
                         * ggxDiffuseTransmission(n, v, l, rough, F0);
                 diffuse += evaluateGgxMultiscatter(n, v, l, rough, F0);
@@ -2878,6 +2891,9 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
             throughput *= diffAlb;
             showCelestial = false; // diffuse bounce: hide the disc (covered by NEE)
             rd = cosineDir(n, sampler);
+            if (dot(geometricNormal, rd) <= 0.0) {
+                break;
+            }
             ro = offsetRayOrigin(hitPos, geometricNormal, rd);
 #if CAUSTICA_NRD
             if (nrdDiffuseDirectionHitDistance.w == 0.0 && !nrdDiffuseHitPending) {
