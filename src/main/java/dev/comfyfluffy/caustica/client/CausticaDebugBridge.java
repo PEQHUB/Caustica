@@ -277,6 +277,8 @@ final class CausticaDebugBridge {
         state.setProperty("ommEffective", Boolean.toString(RtDeviceBringup.ommEnabled()));
         state.setProperty("ommReason", RtDeviceBringup.ommEffectiveReason());
         state.setProperty("driverRaw", Integer.toHexString(RtDeviceBringup.rawDriverVersion()));
+        state.setProperty("asLaneMode", RtRuntimeStatus.actualAsLaneMode());
+        state.setProperty("asLaneModeConfigured", CausticaConfig.Rt.Compatibility.AS_LANE_MODE.get());
         state.setProperty("rtContextReady", Boolean.toString(RtRuntimeStatus.rtContextReady()));
         state.setProperty("rtFailureLatched", Boolean.toString(RtComposite.INSTANCE.hasFailed()));
         state.setProperty("rtStatus", RtRuntimeStatus.unavailableReason());

@@ -2,6 +2,7 @@ package dev.comfyfluffy.caustica.rt;
 
 import com.mojang.blaze3d.vulkan.VulkanCommandEncoder;
 import com.mojang.blaze3d.vulkan.VulkanQueue;
+import dev.comfyfluffy.caustica.CausticaMod;
 import org.lwjgl.PointerBuffer;
 import org.lwjgl.system.MemoryStack;
 import org.lwjgl.vulkan.VK10;
@@ -21,6 +22,7 @@ import java.nio.LongBuffer;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Locale;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.atomic.AtomicLong;
@@ -53,6 +55,7 @@ public final class RtGpuExecutor {
     private final VulkanQueue computeQueue;
     private final long buildTimeline;
     private final long graphicsTimeline;
+    private final RtDeviceBringup.AccelerationStructureLaneMode asLaneMode;
     private final LinkedBlockingQueue<Job> jobs = new LinkedBlockingQueue<>();
     private final AtomicLong nextBuildValue = new AtomicLong();
     private final AtomicLong pendingPublishWaitValue = new AtomicLong();
@@ -71,6 +74,9 @@ public final class RtGpuExecutor {
     RtGpuExecutor(RtContext ctx) {
         this.ctx = ctx;
         this.computeQueue = ctx.computeQueue();
+        this.asLaneMode = RtDeviceBringup.requestedAsLaneMode();
+        CausticaMod.LOGGER.info("RT acceleration-structure lane mode: {}",
+                asLaneMode.name().toLowerCase(Locale.ROOT));
         this.buildTimeline = createTimeline("RT terrain build timeline");
         this.graphicsTimeline = createTimeline("RT graphics-use timeline");
         createCommandPool();
@@ -119,7 +125,9 @@ public final class RtGpuExecutor {
     public long beginGraphicsTerrainUse(VulkanCommandEncoder encoder) {
         checkExecutorFailure();
         synchronized (asLaneOrderLock) {
-            long waitValue = Math.max(pendingPublishWaitValue.get(), latestSubmittedBuildValue.get());
+            long waitValue = serializesAccelerationStructureLanes()
+                    ? Math.max(pendingPublishWaitValue.get(), latestSubmittedBuildValue.get())
+                    : pendingPublishWaitValue.get();
             if (waitValue != 0L) {
                 encoder.waitSemaphore(buildTimeline, waitValue, TERRAIN_READ_STAGES);
             }
@@ -155,6 +163,14 @@ public final class RtGpuExecutor {
     /** Latest recorded graphics submission that can reference the currently published terrain state. */
     public long latestGraphicsUseValue() {
         return latestGraphicsUseValue.get();
+    }
+
+    public boolean serializesAccelerationStructureLanes() {
+        return asLaneMode == RtDeviceBringup.AccelerationStructureLaneMode.SERIALIZED;
+    }
+
+    public String accelerationStructureLaneMode() {
+        return asLaneMode.name().toLowerCase(Locale.ROOT);
     }
 
     /** Rethrow a latched executor failure on the calling thread. */
@@ -418,10 +434,9 @@ public final class RtGpuExecutor {
             synchronized (asLaneOrderLock) {
                 long priorGraphicsUse = latestGraphicsUseValue.get();
                 VkSemaphoreSubmitInfo.Buffer wait = null;
-                if (priorGraphicsUse != 0L) {
-                    // NVIDIA 610.62 has repeatedly faulted when terrain AS builds overlap a graphics TLAS
-                    // build/trace, even though the structures and scratch allocations are disjoint. Alternate
-                    // the two AS lanes through timelines, with this reservation ordered against graphics.
+                if (serializesAccelerationStructureLanes() && priorGraphicsUse != 0L) {
+                    // Serialized mode keeps terrain AS work ordered against graphics TLAS use. Explicit
+                    // overlap mode is experimental and intentionally omits this cross-lane wait.
                     wait = VkSemaphoreSubmitInfo.calloc(1, stack).sType$Default()
                             .semaphore(graphicsTimeline).value(priorGraphicsUse)
                             .stageMask(VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR);

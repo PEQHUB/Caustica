@@ -70,6 +70,11 @@ import static org.lwjgl.vulkan.NVRayTracingInvocationReorder.VK_STRUCTURE_TYPE_P
  * device features to an already-created device, so a config change only takes effect on restart.
  */
 public final class RtDeviceBringup {
+    public enum AccelerationStructureLaneMode {
+        SERIALIZED,
+        OVERLAP
+    }
+
     public static boolean enabledByProperty() {
         return CausticaConfig.Rt.ENABLED.value();
     }
@@ -367,6 +372,18 @@ public final class RtDeviceBringup {
             return "disabled-on-nvidia-portable-profile";
         }
         return ommEnabled ? "enabled" : "not-requested";
+    }
+
+    public static AccelerationStructureLaneMode requestedAsLaneMode() {
+        return requestedAsLaneMode(CausticaConfig.Rt.Compatibility.AS_LANE_MODE.get());
+    }
+
+    static AccelerationStructureLaneMode requestedAsLaneMode(String configured) {
+        return switch (configured == null ? "auto" : configured.trim().toLowerCase(java.util.Locale.ROOT)) {
+            case "overlap" -> AccelerationStructureLaneMode.OVERLAP;
+            case "serialized" -> AccelerationStructureLaneMode.SERIALIZED;
+            default -> AccelerationStructureLaneMode.SERIALIZED;
+        };
     }
 
     public static boolean traceRaysIndirectSupported() {

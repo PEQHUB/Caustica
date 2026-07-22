@@ -34,6 +34,11 @@ public final class RtRuntimeStatus {
         return RtContext.currentOrNull() != null;
     }
 
+    public static String actualAsLaneMode() {
+        RtContext context = RtContext.currentOrNull();
+        return context == null ? "not-initialized" : context.gpuExecutor().accelerationStructureLaneMode();
+    }
+
     public static String unavailableReason() {
         if (!vulkan()) return "Caustica requires Vulkan; current backend is " + backend();
         if (!RtDeviceBringup.rtRequested()) return "Vulkan device did not request Caustica RT features";
