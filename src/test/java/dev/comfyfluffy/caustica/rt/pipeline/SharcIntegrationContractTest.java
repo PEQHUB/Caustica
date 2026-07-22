@@ -334,6 +334,72 @@ final class SharcIntegrationContractTest {
         assertTrue(composite.contains("activeSharcEncoding = configuredSharcEncoding()"));
     }
 
+    @Test
+    void sharcShadersRejectStale16ApiNames() throws Exception {
+        String[] staleTokens = {
+                "HashMapFindEntry",
+                "HashMapInsertEntry",
+                "enableAntiFireflyFilter",
+                "SHARC_ENABLE_64_BIT_ATOMICS"
+        };
+        String[] sharcFiles = {
+                "shaders/sharc/sharc_bridge.slang",
+                "shaders/sharc/sharc_resolve.comp.slang",
+                "shaders/world/world.rgen.slang"
+        };
+        for (String file : sharcFiles) {
+            String content = read(file);
+            for (String token : staleTokens) {
+                assertFalse(content.contains(token),
+                        file + " contains stale 1.6 API token: " + token);
+            }
+        }
+        // Reject .hashMapData but not .hashGridParameters
+        for (String file : sharcFiles) {
+            String content = read(file);
+            assertFalse(content.contains(".hashMapData"),
+                    file + " contains stale .hashMapData member");
+        }
+    }
+
+    @Test
+    void sharcShadersUse18ApiNames() throws Exception {
+        String bridge = read("shaders/sharc/sharc_bridge.slang");
+        assertTrue(bridge.contains("HashGridInsertEntry("));
+        assertTrue(bridge.contains("hashGridKey"));
+        assertTrue(bridge.contains("sharcParameters.hashGridData"));
+        assertTrue(bridge.contains("sharcParameters.hashGridParameters"));
+        assertTrue(bridge.contains("SharcGetRadianceDirection("));
+        assertTrue(bridge.contains("SharcGetRadianceDirectionWeight("));
+        assertTrue(bridge.contains("SharcAddVoxelData("));
+        assertTrue(bridge.contains("causticaSafeDirection("));
+        assertTrue(bridge.contains("causticaSharcDirectionalityWeight("));
+
+        String resolve = read("shaders/sharc/sharc_resolve.comp.slang");
+        assertTrue(resolve.contains("responsiveFrameNum"));
+        assertTrue(resolve.contains("SharcGetAccumulatedSampleNum("));
+        assertTrue(resolve.contains("hashGridData"));
+
+        String rgen = read("shaders/world/world.rgen.slang");
+        assertTrue(rgen.contains("outgoingDirectionToPreviousVertex"));
+        assertTrue(rgen.contains("causticaSafeDirection("));
+        assertTrue(rgen.contains("HashGridFindEntry("));
+        assertTrue(rgen.contains("HashGridDebugOccupancy("));
+        assertTrue(rgen.contains("SharcSetRadianceDirectionWeight("));
+        assertTrue(rgen.contains("hashGridParameters"));
+        assertTrue(rgen.contains("hashGridData"));
+    }
+
+    @Test
+    void bridgeRemovesAntiFireflyFromParameters() throws Exception {
+        String bridge = read("shaders/sharc/sharc_bridge.slang");
+        assertFalse(bridge.contains("enableAntiFireflyFilter"));
+        assertFalse(bridge.contains("antiFirefly"));
+        assertTrue(bridge.contains("causticaSharcParameters("));
+        // Verify parameter list no longer has the bool
+        assertFalse(bridge.contains("bool antiFirefly"));
+    }
+
     private static String read(String path) throws Exception {
         return Files.readString(Path.of(path));
     }

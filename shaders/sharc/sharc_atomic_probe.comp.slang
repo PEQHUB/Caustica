@@ -25,8 +25,7 @@ void main(uint3 id : SV_DispatchThreadID) {
             probe.capacity,
             float3(0.0, 0.0, 0.0),
             1.0,
-            1000.0,
-            false);
+            1000.0);
     SharcState state;
     SharcInit(state);
     SharcHitData hit;

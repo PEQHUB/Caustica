@@ -25,7 +25,7 @@
 #endif
 
 #define SHARC_ENABLE_GLSL 0
-#define SHARC_ENABLE_64_BIT_ATOMICS 1
+#define HASH_GRID_ENABLE_64_BIT_ATOMICS 1
 #define SHARC_PROPAGATION_DEPTH 4
 #define SHARC_MATERIAL_DEMODULATION 1
 #define SHARC_SEPARATE_EMISSIVE 1
@@ -39,6 +39,11 @@ typealias SharcRWPtr<T> = Ptr<T, Access.ReadWrite, AddressSpace.Device>;
 
 #include "SharcCommon.h"
 
+float3 causticaSafeDirection(float3 direction) {
+    float lengthSquared = dot(direction, direction);
+    return lengthSquared > 1.0e-12 ? direction * rsqrt(lengthSquared) : float3(0.0, 0.0, 1.0);
+}
+
 // Directionality weight for a surface event. Diffuse surfaces return 0 (omnidirectional),
 // delta surfaces return 1 (fully directional), glossy surfaces return smoothness^2.
 float causticaSharcDirectionalityWeight(
@@ -49,6 +54,23 @@ float causticaSharcDirectionalityWeight(
     if (isDelta) return 1.0;
     float smoothness = saturate(1.0 - perceptualRoughness);
     return smoothness * smoothness;
+}
+
+SharcHitData causticaSharcHit(
+        float3 position,
+        float3 albedo,
+        float3 emissive,
+        float3 outgoingDirectionToPreviousVertex) {
+    SharcHitData hit;
+    hit.positionWorld = position;
+    hit.normalWorld = payload.geometricNormal;
+    hit.materialDemodulation = max(albedo, float3(1.0e-3));
+    hit.emissive = emissive;
+#if SHARC_ENABLE_SH_ENCODING
+    hit.radianceDirectionWorld = causticaSafeDirection(outgoingDirectionToPreviousVertex);
+    hit.radianceDirectionWeight = 0.0;
+#endif
+    return hit;
 }
 
 // The stock entry point uses one direct-lighting value both for the current directionless cache entry
@@ -63,21 +85,31 @@ bool causticaSharcUpdateHit(
         float3 cacheableDirectLighting,
         float3 propagatedDirectLighting) {
 #if SHARC_UPDATE
+    HashGridKey hashGridKey;
     HashGridIndex cacheIndex = HashGridInsertEntry(sharcParameters.hashGridData,
-            sharcHitData.positionWorld, sharcHitData.normalWorld, sharcParameters.hashGridParameters);
+            sharcHitData.positionWorld, sharcHitData.normalWorld,
+            sharcParameters.hashGridParameters, hashGridKey);
     float3 materialDemodulation = max(sharcHitData.materialDemodulation, float3(1.0e-3));
+
+    float3 currentDirection = SharcGetRadianceDirection(sharcHitData);
+    float currentDirectionWeight = SharcGetRadianceDirectionWeight(sharcHitData);
+
     SharcAddVoxelData(sharcParameters, cacheIndex, cacheableDirectLighting / materialDemodulation,
-            float3(1.0), 1,
-            sharcHitData.radianceDirectionWorld, sharcHitData.radianceDirectionWeight);
+            SharcSampleWeight(1.0), currentDirection, currentDirectionWeight, 1u);
 
     float3 propagatedRadiance = propagatedDirectLighting;
 #if SHARC_SEPARATE_EMISSIVE
     propagatedRadiance += sharcHitData.emissive;
 #endif
     for (uint i = 0; i < sharcState.pathLength; ++i) {
+        float3 propagatedDirection = float3(0.0, 0.0, 1.0);
+        float propagatedDirectionWeight = 0.0;
+#if SHARC_ENABLE_SH_ENCODING
+        propagatedDirection = sharcState.radianceDirections[i];
+        propagatedDirectionWeight = sharcState.radianceDirectionWeights[i];
+#endif
         SharcAddVoxelData(sharcParameters, sharcState.cacheIndices[i], propagatedRadiance,
-                sharcState.sampleWeights[i], 0,
-                sharcState.radianceDirections[i], sharcState.radianceDirectionWeights[i]);
+                sharcState.sampleWeights[i], propagatedDirection, propagatedDirectionWeight, 0u);
     }
     // Preserve only the number of existing entries that can fit after
     // inserting the new vertex at index zero.
@@ -96,8 +128,8 @@ bool causticaSharcUpdateHit(
     sharcState.cacheIndices[0] = cacheIndex;
     sharcState.sampleWeights[0] = SharcSampleWeight(1.0 / materialDemodulation);
 #if SHARC_ENABLE_SH_ENCODING
-    sharcState.radianceDirections[0] = sharcHitData.radianceDirectionWorld;
-    sharcState.radianceDirectionWeights[0] = sharcHitData.radianceDirectionWeight;
+    sharcState.radianceDirections[0] = currentDirection;
+    sharcState.radianceDirectionWeights[0] = currentDirectionWeight;
 #endif
 
     // Unlike the old adapter, pathLength can reach the complete
@@ -110,6 +142,7 @@ bool causticaSharcUpdateHit(
 
 // A sampled specular continuation is valid transport for older diffuse cache vertices, but the current
 // directionless voxel must not accumulate that view-dependent continuation on the next hit.
+// In SH mode, the vertex is retained with its directionality weight instead of being discarded.
 void causticaSharcDiscardCurrentVertex(inout SharcState sharcState) {
 #if SHARC_UPDATE
     if (sharcState.pathLength == 0) return;
@@ -132,8 +165,7 @@ SharcParameters causticaSharcParameters(
         uint capacity,
         float3 cameraPosition,
         float sceneScale,
-        float radianceScale,
-        bool antiFirefly) {
+        float radianceScale) {
     SharcParameters parameters;
     parameters.hashGridParameters.cameraPosition = cameraPosition;
     parameters.hashGridParameters.logarithmBase = SHARC_GRID_LOGARITHM_BASE;
@@ -142,7 +174,6 @@ SharcParameters causticaSharcParameters(
     parameters.hashGridData.capacity = capacity;
     parameters.hashGridData.hashEntriesBuffer = SharcRWPtr<uint64_t>(hashEntriesAddress);
     parameters.radianceScale = radianceScale;
-    parameters.enableAntiFireflyFilter = antiFirefly;
     parameters.accumulationBuffer = SharcRWPtr<SharcAccumulationData>(accumulationAddress);
     parameters.resolvedBuffer = SharcRWPtr<SharcPackedData>(resolvedAddress);
     return parameters;
