@@ -9,6 +9,7 @@ import dev.comfyfluffy.caustica.CausticaMod;
 import dev.comfyfluffy.caustica.rt.pipeline.RtDlssRr;
 import dev.comfyfluffy.caustica.rt.pipeline.RtNrd;
 import dev.comfyfluffy.caustica.rt.pipeline.RtReconstruction;
+import java.util.Objects;
 import org.lwjgl.system.MemoryStack;
 import org.lwjgl.vulkan.VKCapabilitiesDevice;
 import org.lwjgl.vulkan.VK10;
@@ -322,15 +323,33 @@ public final class RtDeviceBringup {
     }
 
     /**
-     * Appends the encoding suffix to a SHaRC shader filename.
+     * Inserts the encoding suffix before the stage in a SHaRC shader filename.
      * {@code "world_sharc.rgen.spv"} with {@code DIRECTIONAL_SH} becomes {@code "world_sharc_sh.rgen.spv"}.
+     * {@code "world_sharc_nv.rgen.spv"} becomes {@code "world_sharc_sh_nv.rgen.spv"}.
+     * {@code "world_sharc_base.rgen.spv"} becomes {@code "world_sharc_sh_base.rgen.spv"}.
      */
-    private static String withEncoding(String shader, SharcRadianceEncoding encoding) {
+    static String withEncoding(String shader, SharcRadianceEncoding encoding) {
+        Objects.requireNonNull(shader, "shader");
+        Objects.requireNonNull(encoding, "encoding");
         String suffix = encoding.shaderSuffix();
         if (suffix.isEmpty()) return shader;
-        int dotIndex = shader.lastIndexOf('.');
-        if (dotIndex < 0) return shader + suffix;
-        return shader.substring(0, dotIndex) + suffix + shader.substring(dotIndex);
+
+        final String stageSuffix = ".rgen.spv";
+        if (!shader.endsWith(stageSuffix)) {
+            throw new IllegalArgumentException(
+                    "Expected a raygen shader ending in " + stageSuffix + ": " + shader);
+        }
+        String stem = shader.substring(0, shader.length() - stageSuffix.length());
+        String backendSuffix;
+        if (stem.endsWith("_nv")) {
+            backendSuffix = "_nv";
+        } else if (stem.endsWith("_base")) {
+            backendSuffix = "_base";
+        } else {
+            backendSuffix = "";
+        }
+        int insertionPoint = stem.length() - backendSuffix.length();
+        return stem.substring(0, insertionPoint) + suffix + stem.substring(insertionPoint) + stageSuffix;
     }
 
     /** Standard TraceRay fallback needs a real shadow closest-hit; hit-object variants skip it entirely. */

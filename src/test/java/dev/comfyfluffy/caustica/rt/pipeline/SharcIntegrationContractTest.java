@@ -4,9 +4,11 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import dev.comfyfluffy.caustica.rt.RtDeviceBringup;
 import dev.comfyfluffy.caustica.rt.SharcRadianceEncoding;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 import org.junit.jupiter.api.Test;
 
 final class SharcIntegrationContractTest {
@@ -290,8 +292,46 @@ final class SharcIntegrationContractTest {
         String screen = read("src/main/java/dev/comfyfluffy/caustica/client/RtSharcOptionsScreen.java");
         assertTrue(screen.contains("caustica.options.rt.sharcEncoding"));
         assertTrue(screen.contains("SharcRadianceEncoding"));
+        assertTrue(screen.contains("requestSharcEncoding(value)"));
+        assertTrue(screen.contains("requestSharcEncoding(SharcRadianceEncoding.RGB)"));
         assertTrue(screen.contains("requestSharcReset(\"radiance encoding changed\")"));
         assertTrue(screen.contains("RADIANCE_ENCODING.set(0)"));
+    }
+
+    @Test
+    void directionalSharcRaygenNamesMatchPackagedBuildOutputs() throws Exception {
+        List<String> stems = List.of(
+                "world_sharc",
+                "world_sharc_diffuse",
+                "world_sharc_primary",
+                "world_sharc_update",
+                "world_sharc_diagnostic",
+                "world_sharc_primary_diagnostic",
+                "world_sharc_update_diagnostic"
+        );
+        for (String stem : stems) {
+            assertEquals(stem + "_sh.rgen.spv",
+                    RtDeviceBringup.withEncoding(stem + ".rgen.spv", SharcRadianceEncoding.DIRECTIONAL_SH));
+            assertEquals(stem + "_sh_nv.rgen.spv",
+                    RtDeviceBringup.withEncoding(stem + "_nv.rgen.spv", SharcRadianceEncoding.DIRECTIONAL_SH));
+            assertEquals(stem + "_sh_base.rgen.spv",
+                    RtDeviceBringup.withEncoding(stem + "_base.rgen.spv", SharcRadianceEncoding.DIRECTIONAL_SH));
+        }
+        // RGB encoding returns input unchanged
+        assertEquals("world_sharc.rgen.spv",
+                RtDeviceBringup.withEncoding("world_sharc.rgen.spv", SharcRadianceEncoding.RGB));
+        assertEquals("world_sharc_nv.rgen.spv",
+                RtDeviceBringup.withEncoding("world_sharc_nv.rgen.spv", SharcRadianceEncoding.RGB));
+    }
+
+    @Test
+    void compositeAppliesPersistedEncodingOnInit() throws Exception {
+        String composite = read("src/main/java/dev/comfyfluffy/caustica/rt/RtComposite.java");
+        assertTrue(composite.contains("configuredSharcEncoding()"));
+        assertTrue(composite.contains("private static SharcRadianceEncoding configuredSharcEncoding()"));
+        assertTrue(composite.contains("CausticaConfig.Rt.Sharc.RADIANCE_ENCODING.value()"));
+        assertTrue(composite.contains("new AtomicReference<>(configuredSharcEncoding())"));
+        assertTrue(composite.contains("activeSharcEncoding = configuredSharcEncoding()"));
     }
 
     private static String read(String path) throws Exception {

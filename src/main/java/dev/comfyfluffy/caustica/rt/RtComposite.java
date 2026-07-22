@@ -143,6 +143,13 @@ public final class RtComposite {
         requestedSharcEncoding.set(Objects.requireNonNull(encoding, "encoding"));
     }
 
+    private static SharcRadianceEncoding configuredSharcEncoding() {
+        SharcRadianceEncoding[] values = SharcRadianceEncoding.values();
+        int index = Math.max(0, Math.min(values.length - 1,
+                CausticaConfig.Rt.Sharc.RADIANCE_ENCODING.value()));
+        return values[index];
+    }
+
     /** Applies the live texture-bandwidth policy without rebuilding renderer resources. */
     public void requestTextureFilteringRefresh() {
         textureMipBias = currentTextureMipBias();
@@ -328,8 +335,8 @@ public final class RtComposite {
     private RtSharcResolvePipeline sharcResolvePipeline;
     private RtSharcCache sharcCache;
     private final AtomicReference<SharcRadianceEncoding> requestedSharcEncoding =
-            new AtomicReference<>(SharcRadianceEncoding.RGB);
-    private SharcRadianceEncoding activeSharcEncoding = SharcRadianceEncoding.RGB;
+            new AtomicReference<>(configuredSharcEncoding());
+    private SharcRadianceEncoding activeSharcEncoding = configuredSharcEncoding();
     private RtTraceGpuProfiler traceGpuProfiler;
     private int sharcTerrainX = Integer.MIN_VALUE;
     private int sharcTerrainY = Integer.MIN_VALUE;

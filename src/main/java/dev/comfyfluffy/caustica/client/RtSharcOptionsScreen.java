@@ -74,7 +74,10 @@ public final class RtSharcOptionsScreen extends Screen {
                 Component.translatable("caustica.options.rt.sharcEncoding"), ENCODINGS,
                 () -> SharcRadianceEncoding.values()[
                         Math.max(0, Math.min(1, CausticaConfig.Rt.Sharc.RADIANCE_ENCODING.value()))],
-                value -> CausticaConfig.Rt.Sharc.RADIANCE_ENCODING.set(value.ordinal()),
+                value -> {
+                    CausticaConfig.Rt.Sharc.RADIANCE_ENCODING.set(value.ordinal());
+                    RtComposite.INSTANCE.requestSharcEncoding(value);
+                },
                 value -> Component.translatable("caustica.options.rt.sharcEncoding." + value.name()),
                 () -> {
                     RtComposite.INSTANCE.requestSharcReset("radiance encoding changed");
@@ -83,7 +86,7 @@ public final class RtSharcOptionsScreen extends Screen {
                 .tooltip(Component.translatable("caustica.options.rt.sharcEncoding.tooltip"))
                 .resetOnShift(() -> {
                     CausticaConfig.Rt.Sharc.RADIANCE_ENCODING.set(0);
-                    RtComposite.INSTANCE.requestSharcReset("radiance encoding restored");
+                    RtComposite.INSTANCE.requestSharcEncoding(SharcRadianceEncoding.RGB);
                     rebuild();
                 });
         dropdowns.add(encoding);
@@ -206,6 +209,7 @@ public final class RtSharcOptionsScreen extends Screen {
         CausticaConfig.Rt.Sharc.PRIMARY_DIFFUSE_REUSE.set(false);
         CausticaConfig.Rt.Sharc.DETAILED_STATS.set(false);
         CausticaConfig.Rt.Sharc.RADIANCE_ENCODING.set(0);
+        RtComposite.INSTANCE.requestSharcEncoding(SharcRadianceEncoding.RGB);
         CausticaConfig.Rt.Composite.DEBUG_VIEW.set(0);
         CausticaConfig.Rt.FrameStats.ENABLED.set(false);
         RtComposite.INSTANCE.requestSharcReset("visual-parity defaults restored");
