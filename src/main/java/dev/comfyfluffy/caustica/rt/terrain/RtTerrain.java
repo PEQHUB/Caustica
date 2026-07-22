@@ -722,6 +722,7 @@ public final class RtTerrain {
         missing.clear();
         missingIndex.clear();
         interactiveMissing.clear();
+        completionFairness.reset();
 
         for (int scx = pcx - radius; scx <= pcx + radius; scx++) {
             for (int scz = pcz - radius; scz <= pcz + radius; scz++) {
@@ -1496,6 +1497,8 @@ public final class RtTerrain {
                     }
                     if (dirtyGroup != NO_DIRTY_GROUP) {
                         cancelDirtyGroup(dirtyGroup);
+                    } else {
+                        requeueFailedTask(task);
                     }
                     throw new RuntimeException("RT terrain section build failed for section "
                             + (task.sox >> 4) + "," + (task.soy >> 4) + "," + (task.soz >> 4),
@@ -1560,6 +1563,21 @@ public final class RtTerrain {
             return;
         }
         destroyPreparedSection(result.prepared());
+    }
+
+    private void requeueFailedTask(SectionTask task) {
+        taskTracker.cancelCurrent(task.key);
+        if (!desired.contains(task.key)) {
+            return;
+        }
+        if (resident.containsKey(task.key)) {
+            if (queuedReextract.add(task.key)) {
+                reextract.add(task.key);
+            }
+        } else {
+            empty.remove(task.key);
+            enqueueMissing(task.key, NO_DIRTY_GROUP, true);
+        }
     }
 
     private void completeDirtyGroupMember(DirtyGroup group, List<PreparedSection> prepared, List<SectionGeom> removed) {
@@ -1955,6 +1973,7 @@ public final class RtTerrain {
         missing.clear();
         missingIndex.clear();
         interactiveMissing.clear();
+        completionFairness.reset();
         queuedDirtyGroup.clear();
         reextract.clear();
         queuedReextract.clear();
@@ -2063,6 +2082,7 @@ public final class RtTerrain {
         missing.clear();
         missingIndex.clear();
         interactiveMissing.clear();
+        completionFairness.reset();
         queuedDirtyGroup.clear();
         reextract.clear();
         queuedReextract.clear();

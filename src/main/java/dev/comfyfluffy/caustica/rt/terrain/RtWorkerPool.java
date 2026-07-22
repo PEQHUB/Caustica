@@ -69,17 +69,28 @@ public final class RtWorkerPool {
     /** Stop all workers after joining queued jobs. Safe to call when never started. */
     public synchronized void shutdown() {
         if (exec != null) {
-            exec.shutdown();
+            ThreadPoolExecutor stopping = exec;
+            stopping.shutdown();
+            boolean interrupted = false;
             try {
-                if (!exec.awaitTermination(Long.MAX_VALUE, TimeUnit.NANOSECONDS)) {
-                    throw new IllegalStateException("RT worker pool did not terminate");
+                while (!stopping.awaitTermination(Long.MAX_VALUE, TimeUnit.NANOSECONDS)) {
+                    // Unbounded wait is intentional: accepted terrain tasks own terminal callbacks.
                 }
             } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                exec.shutdownNow();
-                throw new IllegalStateException("Interrupted while stopping RT worker pool", e);
+                interrupted = true;
+                while (!stopping.isTerminated()) {
+                    try {
+                        stopping.awaitTermination(Long.MAX_VALUE, TimeUnit.NANOSECONDS);
+                    } catch (InterruptedException ignored) {
+                        interrupted = true;
+                    }
+                }
             }
             exec = null;
+            if (interrupted) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException("Interrupted while stopping RT worker pool");
+            }
         }
     }
 

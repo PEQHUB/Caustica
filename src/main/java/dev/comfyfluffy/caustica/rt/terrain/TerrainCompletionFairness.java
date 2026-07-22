@@ -13,7 +13,7 @@ final class TerrainCompletionFairness<T> {
                 && (!normalAvailable || interactiveStreak < MAX_INTERACTIVE_STREAK)) {
             T interactive = interactiveQueue.poll();
             if (interactive != null) {
-                interactiveStreak++;
+                interactiveStreak = Math.min(MAX_INTERACTIVE_STREAK, interactiveStreak + 1);
                 return interactive;
             }
         }
@@ -24,8 +24,12 @@ final class TerrainCompletionFairness<T> {
         }
         T interactive = interactiveQueue.poll();
         if (interactive != null) {
-            interactiveStreak++;
+            interactiveStreak = Math.min(MAX_INTERACTIVE_STREAK, interactiveStreak + 1);
         }
         return interactive;
+    }
+
+    void reset() {
+        interactiveStreak = 0;
     }
 }
