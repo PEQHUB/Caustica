@@ -269,6 +269,14 @@ final class CausticaDebugBridge {
         state.setProperty("outputScaleFailure", RtComposite.INSTANCE.outputScaleFailure());
         state.setProperty("backend", RtRuntimeStatus.backend());
         state.setProperty("rtRequested", Boolean.toString(RtDeviceBringup.rtRequested()));
+        state.setProperty("hardwareProfile", RtDeviceBringup.hardwareProfile());
+        state.setProperty("portableTraceBackend", Boolean.toString(RtDeviceBringup.portableTraceBackend()));
+        state.setProperty("serBackend", RtDeviceBringup.serBackendLabel());
+        state.setProperty("ommSupported", Boolean.toString(RtDeviceBringup.opacityMicromapSupported()));
+        state.setProperty("ommPolicy", RtDeviceBringup.ommPolicy());
+        state.setProperty("ommEffective", Boolean.toString(RtDeviceBringup.ommEnabled()));
+        state.setProperty("ommReason", RtDeviceBringup.ommEffectiveReason());
+        state.setProperty("driverRaw", Integer.toHexString(RtDeviceBringup.rawDriverVersion()));
         state.setProperty("rtContextReady", Boolean.toString(RtRuntimeStatus.rtContextReady()));
         state.setProperty("rtFailureLatched", Boolean.toString(RtComposite.INSTANCE.hasFailed()));
         state.setProperty("rtStatus", RtRuntimeStatus.unavailableReason());
@@ -294,7 +302,8 @@ final class CausticaDebugBridge {
         state.setProperty("terrainResults", Integer.toString(CausticaConfig.Rt.Terrain.COMPLETION_RESULTS_PER_PASS.value()));
         state.setProperty("terrainInflight", Integer.toString(CausticaConfig.Rt.Terrain.MAX_INFLIGHT_SECTIONS.value()));
         state.setProperty("terrainBuildBatch", Integer.toString(CausticaConfig.Rt.Terrain.GPU_BUILD_BATCH_SIZE.value()));
-        state.setProperty("terrainOmm", Boolean.toString(CausticaConfig.Rt.Omm.ENABLED.value()));
+        state.setProperty("terrainOmm", Boolean.toString(RtDeviceBringup.ommEnabled()));
+        state.setProperty("terrainOmmConfigured", Boolean.toString(CausticaConfig.Rt.Omm.ENABLED.value()));
         state.setProperty("terrainOmmSubdivision", Integer.toString(CausticaConfig.Rt.Omm.SUBDIVISION.value()));
         state.setProperty("terrainBenchmarkStartedNanos", Long.toString(streaming.startedNanos()));
         state.setProperty("terrainDesired", Integer.toString(streaming.desired()));

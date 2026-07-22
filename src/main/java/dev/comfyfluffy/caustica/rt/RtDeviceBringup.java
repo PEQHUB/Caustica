@@ -98,10 +98,9 @@ public final class RtDeviceBringup {
     /**
      * OPTIONAL RT extensions: enabled only when the selected device supports them AND the gate is on, but
      * never required — a device lacking them still comes up RT-capable (unlike {@link #RT_EXTENSIONS}, whose
-     * absence disables RT entirely). {@code VK_EXT_opacity_micromap} (any-hit opt, lever C): per-triangle
-     * opacity micromaps let the hardware skip {@code world.rahit} on fully-opaque/transparent cutout micro-
-     * triangles, so the alpha-test any-hit runs only on the foliage silhouette. Hardware-accelerated on RTX
-     * 40-series and Blackwell; absent / software elsewhere, hence optional.
+     * absence disables RT entirely). {@code VK_EXT_opacity_micromap} lets the hardware skip {@code world.rahit}
+     * on fully-opaque/transparent cutout micro-triangles. OMM is optional across RTX hardware; portable
+     * NVIDIA profiles use the ordinary any-hit path by default unless explicitly forced.
      */
     public static final List<String> OPTIONAL_RT_EXTENSIONS = List.of(
             VK_EXT_OPACITY_MICROMAP_EXTENSION_NAME);
@@ -109,6 +108,9 @@ public final class RtDeviceBringup {
     private static volatile boolean rtRequested;
     private static volatile SerBackend serBackend = SerBackend.NONE;
     private static volatile boolean ommEnabled; // VK_EXT_opacity_micromap actually enabled on the device
+    private static volatile boolean opacityMicromapSupported;
+    private static volatile boolean nvidiaDevice;
+    private static volatile int rawDriverVersion;
     private static volatile boolean traceRaysIndirectSupported;
     private static volatile int maxRayDispatchInvocationCount;
     private static volatile boolean wideLinesEnabled; // VkPhysicalDeviceFeatures.wideLines actually enabled
@@ -178,7 +180,7 @@ public final class RtDeviceBringup {
             DESCRIPTOR_PARTIALLY_BOUND_FEATURE, SAMPLED_IMAGE_UPDATE_AFTER_BIND_FEATURE, SHADER_INT64_FEATURE,
             ACCELERATION_STRUCTURE_FEATURE, RAY_TRACING_PIPELINE_FEATURE, POSITION_FETCH_FEATURE, RAY_QUERY_FEATURE);
 
-    private enum SerBackend {
+    enum SerBackend {
         NONE("none", null, "world_base.rgen.spv"),
         NV("NV", VK_NV_RAY_TRACING_INVOCATION_REORDER_EXTENSION_NAME, "world_nv.rgen.spv"),
         EXT("EXT", VK_EXT_RAY_TRACING_INVOCATION_REORDER_EXTENSION_NAME, "world.rgen.spv");
@@ -265,10 +267,10 @@ public final class RtDeviceBringup {
                 "world_sharc_primary_diagnostic_base.rgen.spv");
     }
 
-    private record FeatureSupport(List<String> missingRequired, SerBackend serBackend,
-                                  boolean omm, boolean wideLines) {
+    record FeatureSupport(List<String> missingRequired, SerBackend serBackend,
+                          boolean ommSupported, boolean wideLines) {
         boolean supportsRt() {
-            return missingRequired.isEmpty() && serBackend != SerBackend.NONE;
+            return missingRequired.isEmpty();
         }
     }
 
@@ -323,6 +325,50 @@ public final class RtDeviceBringup {
         return ommEnabled;
     }
 
+    /** True if the physical device exposed the OMM feature during bring-up. */
+    public static boolean opacityMicromapSupported() {
+        return opacityMicromapSupported;
+    }
+
+    public static String serBackendLabel() {
+        return serBackend.label;
+    }
+
+    public static boolean portableTraceBackend() {
+        return serBackend == SerBackend.NONE;
+    }
+
+    public static String hardwareProfile() {
+        if (nvidiaDevice) {
+            return portableTraceBackend() ? "nvidia-portable-rt" : "nvidia-modern-rt";
+        }
+        return "cross-vendor-rt";
+    }
+
+    public static int rawDriverVersion() {
+        return rawDriverVersion;
+    }
+
+    public static String ommPolicy() {
+        return CausticaConfig.Rt.Compatibility.OMM_MODE.get();
+    }
+
+    public static String ommEffectiveReason() {
+        if (!CausticaConfig.Rt.Omm.ENABLED.value()) {
+            return "disabled-by-user-gate";
+        }
+        if (!opacityMicromapSupported) {
+            return "unsupported";
+        }
+        if ("off".equals(ommPolicy())) {
+            return "disabled-by-compatibility-policy";
+        }
+        if (nvidiaDevice && serBackend == SerBackend.NONE && "auto".equals(ommPolicy())) {
+            return "disabled-on-nvidia-portable-profile";
+        }
+        return ommEnabled ? "enabled" : "not-requested";
+    }
+
     public static boolean traceRaysIndirectSupported() {
         return traceRaysIndirectSupported;
     }
@@ -358,17 +404,29 @@ public final class RtDeviceBringup {
     }
 
     /** Optional extensions the gate wants AND the device supports — added but never required. */
-    private static List<String> supportedOptionalExtensions(FeatureSupport support) {
+    private static List<String> supportedOptionalExtensions(FeatureSupport support, boolean nvidia) {
         List<String> supported = new ArrayList<>();
-        if (support.omm) supported.add(VK_EXT_OPACITY_MICROMAP_EXTENSION_NAME);
+        if (support.ommSupported && effectiveOmmRequested(nvidia, support.serBackend)) {
+            supported.add(VK_EXT_OPACITY_MICROMAP_EXTENSION_NAME);
+        }
         return supported;
     }
 
-    private static boolean ommRequested() {
-        // OMM is an optional acceleration representation with a complete any-hit fallback. Keep the
-        // persisted device-creation gate authoritative so a faulting driver/workload can disable the
-        // extension before Vulkan device creation rather than merely skipping its later classifier.
-        return CausticaConfig.Rt.Omm.ENABLED.value();
+    static boolean effectiveOmmRequested(boolean nvidia, SerBackend candidateBackend) {
+        return effectiveOmmRequested(nvidia, candidateBackend,
+                CausticaConfig.Rt.Omm.ENABLED.value(), CausticaConfig.Rt.Compatibility.OMM_MODE.get());
+    }
+
+    static boolean effectiveOmmRequested(boolean nvidia, SerBackend candidateBackend,
+                                         boolean userEnabled, String policy) {
+        if (!userEnabled) {
+            return false;
+        }
+        return switch (policy == null ? "auto" : policy.trim().toLowerCase(java.util.Locale.ROOT)) {
+            case "on" -> true;
+            case "off" -> false;
+            default -> !(nvidia && candidateBackend == SerBackend.NONE);
+        };
     }
 
     /** Optional SHaRC feature query; absence keeps the separately packaged SHaRC shaders disabled. */
@@ -394,8 +452,7 @@ public final class RtDeviceBringup {
                     VK_NV_RAY_TRACING_INVOCATION_REORDER_EXTENSION_NAME);
             if (hasSerExt) SER_EXT_FEATURE.struct().findOrCreateStructInPNextChain(available, stack);
             if (hasSerNv) SER_NV_FEATURE.struct().findOrCreateStructInPNextChain(available, stack);
-            boolean queryOmm = ommRequested()
-                    && physicalDevice.hasDeviceExtension(VK_EXT_OPACITY_MICROMAP_EXTENSION_NAME);
+            boolean queryOmm = physicalDevice.hasDeviceExtension(VK_EXT_OPACITY_MICROMAP_EXTENSION_NAME);
             if (queryOmm) OMM_FEATURE.struct().findOrCreateStructInPNextChain(available, stack);
             WIDE_LINES_FEATURE.struct().findOrCreateStructInPNextChain(available, stack);
             VK12.vkGetPhysicalDeviceFeatures2(physicalDevice.vkPhysicalDevice(), available);
@@ -406,7 +463,6 @@ public final class RtDeviceBringup {
             }
             SerBackend supportedSer = hasSerExt && SER_EXT_FEATURE.get(available) ? SerBackend.EXT
                     : hasSerNv && SER_NV_FEATURE.get(available) ? SerBackend.NV : SerBackend.NONE;
-            if (supportedSer == SerBackend.NONE) missing.add("rayTracingInvocationReorder(NV or EXT)");
             return new FeatureSupport(missing, supportedSer,
                     queryOmm && OMM_FEATURE.get(available), WIDE_LINES_FEATURE.get(available));
         }
@@ -437,7 +493,7 @@ public final class RtDeviceBringup {
         if (serExtension != null && !augmentedExtensions.contains(serExtension)) {
             augmentedExtensions.add(serExtension);
         }
-        for (String ext : supportedOptionalExtensions(support)) {
+        for (String ext : supportedOptionalExtensions(support, isNvidia(physicalDevice))) {
             if (!augmentedExtensions.contains(ext)) {
                 augmentedExtensions.add(ext);
             }
@@ -453,6 +509,9 @@ public final class RtDeviceBringup {
         rtRequested = false;
         serBackend = SerBackend.NONE;
         ommEnabled = false;
+        opacityMicromapSupported = false;
+        nvidiaDevice = isNvidia(physicalDevice);
+        rawDriverVersion = physicalDevice.vkPhysicalDeviceProperties().driverVersion();
         wideLinesEnabled = false;
         sharcInt64AtomicsEnabled = false;
         maxLineWidth = 1.0f;
@@ -514,7 +573,9 @@ public final class RtDeviceBringup {
 
         // Optional: opacity micromaps (any-hit opt). Only when the gate is on AND the device advertises the
         // extension — its absence must not disable RT, so it is kept out of the mandatory feature set above.
-        ommEnabled = support.omm;
+        opacityMicromapSupported = support.ommSupported;
+        ommEnabled = opacityMicromapSupported
+                && effectiveOmmRequested(nvidiaDevice, selectedSerBackend);
         if (ommEnabled) {
             features.add(OMM_FEATURE);
         }
@@ -524,6 +585,13 @@ public final class RtDeviceBringup {
         rtRequested = true;
         serBackend = selectedSerBackend;
         CausticaMod.LOGGER.info(
+                "RT compatibility: device='{}' profile={} traceBackend={} ser={} ommSupported={} "
+                        + "ommConfigured={} ommPolicy={} ommEnabled={} ommReason={} driverRaw=0x{}",
+                physicalDevice.deviceName(), hardwareProfile(),
+                portableTraceBackend() ? "portable-TraceRay" : "HitObject", serBackend.label,
+                opacityMicromapSupported, CausticaConfig.Rt.Omm.ENABLED.value(), ommPolicy(), ommEnabled,
+                ommEffectiveReason(), Integer.toHexString(rawDriverVersion));
+        CausticaMod.LOGGER.info(
                 "Ray tracing: enabling {}{}{} + features [bufferDeviceAddress, accelerationStructure, rayTracingPipeline, rayQuery, optionalInvocationReorder({}), liveReorder=off, offlineReorder={}"
                         + (wideLinesEnabled ? ", wideLines(max=" + maxLineWidth + ")" : "")
                         + (sharcInt64AtomicsEnabled ? ", shaderBufferInt64Atomics(SHaRC)" : "")
@@ -531,6 +599,10 @@ public final class RtDeviceBringup {
                 RT_EXTENSIONS, serBackend.extensionName == null ? "" : " + " + serBackend.extensionName,
                 ommEnabled ? " + " + OPTIONAL_RT_EXTENSIONS : "", serBackend.label,
                 serBackend != SerBackend.NONE ? "on" : "off", physicalDevice.deviceName());
+    }
+
+    private static boolean isNvidia(VulkanPhysicalDevice physicalDevice) {
+        return physicalDevice.vkPhysicalDeviceProperties().vendorID() == 0x10DE;
     }
 
     /**

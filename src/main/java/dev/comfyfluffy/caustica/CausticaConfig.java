@@ -83,6 +83,7 @@ public final class CausticaConfig {
             Rt.Terrain.ASYNC_DISPATCH_PER_PASS, Rt.Terrain.COMPLETION_RESULTS_PER_PASS,
             Rt.Terrain.MAX_INFLIGHT_SECTIONS, Rt.Terrain.STREAM_BUDGET_MS,
             Rt.Terrain.STREAM_BUDGET_MAX_MS, Rt.Terrain.STREAM_FALLBACK_BUDGET_MS, Rt.Omm.ENABLED,
+            Rt.Compatibility.AS_LANE_MODE, Rt.Compatibility.OMM_MODE,
             Rt.Entities.ENABLED, Rt.Entities.GLOW_ENABLED, Rt.FirstPerson.ENABLED,
             Rt.FirstPerson.DISABLE_VANILLA_MODEL, Rt.EntityTextures.MAX_TEXTURES,
             Rt.Reconstruction.BACKEND, Rt.DlssRr.ENABLED, Rt.DlssRr.DIFFUSE_PATH_GUIDE,
@@ -187,6 +188,12 @@ public final class CausticaConfig {
                         + " grid are always active whenever RIS is on. min-fill-ratio drops emissive footprints\n"
                         + " below that fraction of their bounding rectangle (speckle/sparse crossed planes), so\n"
                         + " only reasonably compact glows become lights. stats/dump/dump-radius are debug logging.");
+        FILE.setComment("compatibility",
+                " Driver and hardware compatibility policy. These settings are selected during Vulkan\n"
+                        + " device/executor creation and require a restart.\n"
+                        + " as-lane-mode: auto, serialized, or overlap.\n"
+                        + " omm-mode: auto, on, or off. Auto suppresses OMM on NVIDIA portable-RT\n"
+                        + " hardware where SER is unavailable; on explicitly requests OMM when supported.");
         FILE.setComment("offline-renderer",
                 " Uncapped progressive native-resolution rendering started with F7.\n"
                         + " The scene, camera, water time, and exposure are frozen for the session.\n"
@@ -1046,6 +1053,34 @@ public final class CausticaConfig {
             public static final BooleanSetting STATS = bool("caustica.rt.ommStats", "omm.stats", false);
 
             private Omm() {
+            }
+        }
+
+        public static final class Compatibility {
+            public static final StringSetting AS_LANE_MODE = string(
+                    "caustica.rt.asLaneMode", "compatibility.as-lane-mode", "auto",
+                    Compatibility::sanitizeAsLaneMode);
+            public static final StringSetting OMM_MODE = string(
+                    "caustica.rt.ommMode", "compatibility.omm-mode", "auto",
+                    Compatibility::sanitizeOmmMode);
+
+            private Compatibility() {
+            }
+
+            private static String sanitizeAsLaneMode(String value) {
+                String normalized = value == null ? "" : value.trim().toLowerCase(Locale.ROOT);
+                return switch (normalized) {
+                    case "serialized", "overlap" -> normalized;
+                    default -> "auto";
+                };
+            }
+
+            private static String sanitizeOmmMode(String value) {
+                String normalized = value == null ? "" : value.trim().toLowerCase(Locale.ROOT);
+                return switch (normalized) {
+                    case "on", "off" -> normalized;
+                    default -> "auto";
+                };
             }
         }
 
