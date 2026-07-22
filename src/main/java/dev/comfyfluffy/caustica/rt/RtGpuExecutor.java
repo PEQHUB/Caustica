@@ -311,7 +311,6 @@ public final class RtGpuExecutor {
                 }
             }
             if (!executable.isEmpty()) {
-                assignTimelineValues(executable);
                 try {
                     execute(executable);
                     for (Job job : executable) {
@@ -414,12 +413,12 @@ public final class RtGpuExecutor {
         ArrayList<VkCommandBuffer> commands = new ArrayList<>(batch.size());
         boolean submitted = false;
         boolean completed = false;
+        long signalValue = assignTimelineValues(batch);
         for (int i = 1; i < batch.size(); i++) {
             if (batch.get(i - 1).build.value() >= batch.get(i).build.value()) {
                 throw new IllegalStateException("GPU build timeline values are not increasing");
             }
         }
-        long signalValue = batch.get(batch.size() - 1).build.value;
         long firstValue = batch.get(0).build.value;
         VulkanDiagnostics.setInFlight("async-compute",
                 "recording builds=" + firstValue + ".." + signalValue + " batch=" + batch.size()
@@ -490,10 +489,22 @@ public final class RtGpuExecutor {
         }
     }
 
-    private void assignTimelineValues(List<Job> executable) {
+    private long assignTimelineValues(List<Job> executable) {
+        ArrayList<Build> builds = new ArrayList<>(executable.size());
         for (Job job : executable) {
-            job.build.assignTimelineValue(nextTimelineValue.incrementAndGet());
+            builds.add(job.build);
         }
+        return assignTimelineValues(builds, nextTimelineValue);
+    }
+
+    static long assignTimelineValues(List<Build> executionOrder, AtomicLong nextValue) {
+        long maximum = 0L;
+        for (Build build : executionOrder) {
+            long value = nextValue.incrementAndGet();
+            build.assignTimelineValue(value);
+            maximum = Math.max(maximum, value);
+        }
+        return maximum;
     }
 
     private long createTimeline(String label) {
