@@ -104,7 +104,7 @@ final class GlassOnlyIntegrationContractTest {
         assertTrue(validPath.contains("gv_normal = destinationNormal"));
         assertTrue(validPath.contains("gv_rough = destinationRoughness"));
         assertFalse(raygen.contains(
-                "gv_albedo = destinationDiffuseAlbedo"));
+                "gv_albedo = destinationDiffuseAlbedo;"));
         assertTrue(raygen.contains(
                 "gv_albedo = destinationDiffuseAlbedo * destinationTransmissionFilter;"));
         assertTrue(raygen.contains("float3 specSurfaceCamRel = gv_hitCamRel"));

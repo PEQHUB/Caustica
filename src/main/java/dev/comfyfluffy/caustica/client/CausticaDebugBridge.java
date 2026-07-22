@@ -191,6 +191,25 @@ final class CausticaDebugBridge {
         state.setProperty("exposureGpuNanos", Long.toString(RtComposite.INSTANCE.exposureGpuNanos()));
         state.setProperty("displayGpuNanos", Long.toString(RtComposite.INSTANCE.displayGpuNanos()));
         state.setProperty("copyGpuNanos", Long.toString(RtComposite.INSTANCE.copyGpuNanos()));
+        state.setProperty("pilotGpuNanos", Long.toString(RtComposite.INSTANCE.pilotGpuNanos()));
+        state.setProperty("mainTraceGpuNanos", Long.toString(RtComposite.INSTANCE.mainTraceGpuNanos()));
+        state.setProperty("scheduleGpuNanos", Long.toString(RtComposite.INSTANCE.scheduleGpuNanos()));
+        state.setProperty("offlineActive", Boolean.toString(OfflineGroundTruth.INSTANCE.active()));
+        state.setProperty("offlinePhase", OfflineGroundTruth.INSTANCE.phaseLabel());
+        state.setProperty("offlineConfiguredBatchLimit", Integer.toString(
+                OfflineGroundTruth.INSTANCE.samplesPerBatch()));
+        state.setProperty("offlineSubmittedMainPaths", Long.toString(
+                OfflineGroundTruth.INSTANCE.submittedSamples()));
+        var offlineMetadata = RtComposite.INSTANCE.completedOfflineDispatchMetadata();
+        state.setProperty("offlineGpuFrameSerial", Integer.toString(
+                RtComposite.INSTANCE.completedOfflineGpuFrameSerial()));
+        state.setProperty("offlineMainPaths", Long.toString(offlineMetadata.mainPaths()));
+        state.setProperty("offlinePilotPaths", Long.toString(offlineMetadata.pilotPaths()));
+        state.setProperty("offlineActiveTiles", Integer.toString(offlineMetadata.activeTiles()));
+        state.setProperty("offlineTotalTiles", Integer.toString(offlineMetadata.totalTiles()));
+        state.setProperty("offlineIndirectInvocations", Integer.toString(
+                offlineMetadata.indirectInvocations()));
+        state.setProperty("offlineIndirect", Boolean.toString(offlineMetadata.indirect()));
         state.setProperty("dlssgBeforePresentCpuNanos",
                 Long.toString(dev.comfyfluffy.caustica.rt.pipeline.RtDlssFg.INSTANCE.beforePresentCpuNanos()));
         state.setProperty("dlssgAfterPresentCpuNanos",

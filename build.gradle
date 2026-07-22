@@ -287,6 +287,28 @@ abstract class CompileShaders extends DefaultTask {
 					compileOneSlang(src, new File(scratchDir, "world_offline_nv.rgen.spv"),
 							["-DCAUSTICA_OFFLINE=1", "-DCAUSTICA_SER=1", "-DCAUSTICA_PORTABLE_TRACE=0", "-O2", "-fp-mode", "precise",
 							 "-capability", "spvShaderInvocationReorderNV"])
+					compileOneSlang(src, new File(scratchDir, "world_offline_pilot_base.rgen.spv"),
+							["-DCAUSTICA_OFFLINE=1", "-DCAUSTICA_OFFLINE_PILOT=1", "-DCAUSTICA_SER=0",
+							 "-DCAUSTICA_PORTABLE_TRACE=1", "-O2", "-fp-mode", "precise"])
+					compileOneSlang(src, new File(scratchDir, "world_offline_pilot.rgen.spv"),
+							["-DCAUSTICA_OFFLINE=1", "-DCAUSTICA_OFFLINE_PILOT=1", "-DCAUSTICA_SER=1",
+							 "-DCAUSTICA_PORTABLE_TRACE=0", "-O2", "-fp-mode", "precise",
+							 "-capability", "spvShaderInvocationReorderEXT"])
+					compileOneSlang(src, new File(scratchDir, "world_offline_pilot_nv.rgen.spv"),
+							["-DCAUSTICA_OFFLINE=1", "-DCAUSTICA_OFFLINE_PILOT=1", "-DCAUSTICA_SER=1",
+							 "-DCAUSTICA_PORTABLE_TRACE=0", "-O2", "-fp-mode", "precise",
+							 "-capability", "spvShaderInvocationReorderNV"])
+					compileOneSlang(src, new File(scratchDir, "world_offline_indirect_base.rgen.spv"),
+							["-DCAUSTICA_OFFLINE=1", "-DCAUSTICA_OFFLINE_INDIRECT=1", "-DCAUSTICA_SER=0",
+							 "-DCAUSTICA_PORTABLE_TRACE=1", "-O2", "-fp-mode", "precise"])
+					compileOneSlang(src, new File(scratchDir, "world_offline_indirect.rgen.spv"),
+							["-DCAUSTICA_OFFLINE=1", "-DCAUSTICA_OFFLINE_INDIRECT=1", "-DCAUSTICA_SER=1",
+							 "-DCAUSTICA_PORTABLE_TRACE=0", "-O2", "-fp-mode", "precise",
+							 "-capability", "spvShaderInvocationReorderEXT"])
+					compileOneSlang(src, new File(scratchDir, "world_offline_indirect_nv.rgen.spv"),
+							["-DCAUSTICA_OFFLINE=1", "-DCAUSTICA_OFFLINE_INDIRECT=1", "-DCAUSTICA_SER=1",
+							 "-DCAUSTICA_PORTABLE_TRACE=0", "-O2", "-fp-mode", "precise",
+							 "-capability", "spvShaderInvocationReorderNV"])
 				}
 			} else {
 				def particleHistory = base == "dlssd_disocclusion.comp"
@@ -451,6 +473,20 @@ abstract class CompileShaders extends DefaultTask {
 				throw new GradleException(name == "world_offline_base.rgen.spv"
 						? "Baseline offline world raygen unexpectedly contains invocation reorder"
 						: "Offline world raygen is missing its independent invocation reorder: ${name}")
+			}
+		}
+		["world_offline_pilot_base.rgen.spv", "world_offline_pilot.rgen.spv", "world_offline_pilot_nv.rgen.spv"].each { name ->
+			def raygen = new File(scratchDir, name)
+			if (!raygen.isFile() || raygen.length() > 124_000L) {
+				throw new GradleException("Offline pilot raygen complexity budget exceeded: ${name} is "
+						+ "${raygen.isFile() ? raygen.length() : 'missing'} bytes (limit 124000)")
+			}
+		}
+		["world_offline_indirect_base.rgen.spv", "world_offline_indirect.rgen.spv", "world_offline_indirect_nv.rgen.spv"].each { name ->
+			def raygen = new File(scratchDir, name)
+			if (!raygen.isFile() || raygen.length() > 124_000L) {
+				throw new GradleException("Offline indirect raygen complexity budget exceeded: ${name} is "
+						+ "${raygen.isFile() ? raygen.length() : 'missing'} bytes (limit 124000)")
 			}
 		}
 		scratchDir.listFiles().findAll { it.name.startsWith("world_sharc") && it.name.endsWith(".rgen.spv") }
@@ -914,6 +950,13 @@ def verifyProductionArtifact = tasks.register("verifyProductionArtifact") {
 			"caustica/rt/world_offline_base.rgen.spv",
 			"caustica/rt/world_offline.rgen.spv",
 			"caustica/rt/world_offline_nv.rgen.spv",
+			"caustica/rt/world_offline_pilot_base.rgen.spv",
+			"caustica/rt/world_offline_pilot.rgen.spv",
+			"caustica/rt/world_offline_pilot_nv.rgen.spv",
+			"caustica/rt/world_offline_indirect_base.rgen.spv",
+			"caustica/rt/world_offline_indirect.rgen.spv",
+			"caustica/rt/world_offline_indirect_nv.rgen.spv",
+			"caustica/rt/offline_schedule.comp.spv",
 			"caustica/rt/world_shadow.rchit.spv",
 			"caustica/rt/world_shadow.rmiss.spv",
 			"caustica/rt/nrd_resolve.comp.spv",

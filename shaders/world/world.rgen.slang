@@ -42,6 +42,12 @@
 #ifndef CAUSTICA_OFFLINE
 #define CAUSTICA_OFFLINE 0
 #endif
+#ifndef CAUSTICA_OFFLINE_PILOT
+#define CAUSTICA_OFFLINE_PILOT 0
+#endif
+#ifndef CAUSTICA_OFFLINE_INDIRECT
+#define CAUSTICA_OFFLINE_INDIRECT 0
+#endif
 #ifndef CAUSTICA_SER
 #define CAUSTICA_SER 0
 #endif
@@ -103,7 +109,8 @@ static SharcRWPtr<uint> sharcStats;
 [[vk::binding(19, 0)]] [format("rgba16f")] RWTexture2D<float4> gNrdViewDirection;
 #endif
 #else
-[[vk::binding(9, 0)]] [format("rgba32f")] RWTexture2D<float4> groundTruthAccum; // RGB mean + sample count
+[[vk::binding(9, 0)]] [format("rgba32f")] RWTexture2D<float4> groundTruthAccum; // RGB mean
+[[vk::binding(10, 0)]] [format("r32ui")] RWTexture2D<uint> offlineSampleCount;
 [[vk::binding(11, 0)]] [format("rgba32f")] RWTexture2D<float4> offlinePilotRead;
 [[vk::binding(12, 0)]] [format("rgba32f")] RWTexture2D<float4> offlinePilotWrite;
 #endif
@@ -939,10 +946,18 @@ inline uint owenScramble(uint x, uint seed) {
 // Driver-safe, bounce-scoped Owen-scrambled Sobol sampling for the converged offline renderer. Live mode
 // uses a compact precomputed two-dimensional Burley/Heitz sequence and does not fetch this large buffer.
 static const uint SAMPLE_SEQUENCE_DIMENSIONS = 8u;
-static const uint SAMPLE_SEQUENCE_MASK = 1048575u;
+static const uint SAMPLE_SEQUENCE_BITS = 20u;
+static const uint SAMPLE_SEQUENCE_PERIOD = 1u << SAMPLE_SEQUENCE_BITS;
+static const uint SAMPLE_SEQUENCE_MASK = SAMPLE_SEQUENCE_PERIOD - 1u;
+
+inline uint offlineSampleEpochSeed(uint sampleIndex) {
+    uint epoch = sampleIndex >> SAMPLE_SEQUENCE_BITS;
+    return epoch == 0u ? 0u : sampleHash(epoch ^ 0xa511e9b3u);
+}
 
 inline void beginBounce(inout PathSampler sampler, uint bounce) {
-    sampler.bounceHash = sampleHash(sampler.pixelHash ^ ((bounce + 1u) * 0x9e3779b9u));
+    sampler.bounceHash = sampleHash(sampler.pixelHash ^ ((bounce + 1u) * 0x9e3779b9u)
+            ^ offlineSampleEpochSeed(sampler.sampleIndex));
     sampler.dimension = 0u;
     ConstPtr<uint> sequence = ConstPtr<uint>(pc.sampleSequenceAddr);
     uint sequenceBase = (sampler.sampleIndex & SAMPLE_SEQUENCE_MASK) * SAMPLE_SEQUENCE_DIMENSIONS;
@@ -956,7 +971,15 @@ inline void beginBounce(inout PathSampler sampler, uint bounce) {
 }
 
 inline float rndf(inout PathSampler sampler) {
-    uint value = sampler.randomBits[sampler.dimension++ & (SAMPLE_SEQUENCE_DIMENSIONS - 1u)];
+    uint dimension = sampler.dimension++;
+    uint value;
+    if (dimension < SAMPLE_SEQUENCE_DIMENSIONS) {
+        value = sampler.randomBits[dimension];
+    } else {
+        // Keep paths deterministic without silently reusing one of the eight Sobol dimensions.
+        value = owenScramble(sampleHash(sampler.bounceHash ^ (dimension * 0x02e5be93u)),
+                sampleHash(sampler.bounceHash ^ (dimension * 0x9e3779b9u)));
+    }
     return float(value >> 8u) * (1.0 / 16777216.0);
 }
 #else
@@ -2585,7 +2608,12 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
         // extent (pc.lightDir.w half-angle) so the shadow ray samples the light's quad — soft penumbrae
         // over accumulation. The same sampled direction drives ndl, the shadow ray, and the specular
         // half-vector.
-        bool celestialNeeEligible = scatteringDepth <= int(pc.celestialMaxBounces);
+#if CAUSTICA_OFFLINE
+        bool celestialNeeEligible = true;
+#else
+        bool celestialNeeEligible =
+                scatteringDepth <= int(pc.celestialMaxBounces);
+#endif
         float3 lightDir = pc.lightDir.w > 0.0
                 ? sampleCelestialDisk(pc.lightDir.xyz, pc.lightDir.w, sampler) : pc.lightDir.xyz;
         float3 directRadiance = pc.lightRadiance.xyz;
@@ -3026,27 +3054,104 @@ void main() {
     float2 uv = (float2(pix) + 0.5) / size;
     float2 ndc = uv * 2.0 - 1.0;
 #if CAUSTICA_OFFLINE
+ #if CAUSTICA_OFFLINE_PILOT
+    uint2 tile = DispatchRaysIndex().xy;
+    uint2 tileOrigin = tile << 3u;
+    uint imageWidth;
+    uint imageHeight;
+    groundTruthAccum.GetDimensions(imageWidth, imageHeight);
+    int2 fullSize = int2(imageWidth, imageHeight);
+    uint validWidth = min(8u, imageWidth - tileOrigin.x);
+    uint validHeight = min(8u, imageHeight - tileOrigin.y);
+    uint tilePixels = max(validWidth * validHeight, 1u);
+    float3 pilotA = float3(0.0);
+    float3 pilotB = float3(0.0);
+    float2 fullImageSize = float2(fullSize);
+    for (uint pilotLane = 0u; pilotLane < 2u; pilotLane++) {
+        uint offset = (pc.frameIndex + tile.x * 17u + tile.y * 29u) % tilePixels;
+        int2 probePix = int2(tileOrigin)
+                + int2(int(offset % validWidth), int(offset / validWidth));
+        float2 sampleUv = (float2(probePix) + 0.5) / fullImageSize;
+        uint pixelHash = sampleHash(uint(probePix.x) ^ sampleHash(uint(probePix.y) + 0x9e3779b9u));
+        PathSampler sampler;
+        sampler.pixelHash = sampleHash(pixelHash ^ (0x13198a2eu + pilotLane * 0x2dc966b0u));
+        sampler.sampleIndex = pc.frameIndex * 2u + pilotLane;
+        sampler.bounceHash = 0u;
+        sampler.dimension = 0u;
+        beginBounce(sampler, 0xfffffffeu);
+        float2 pixelJitter = float2(rndf(sampler) - 0.5, rndf(sampler) - 0.5);
+        float2 sampleNdc = (sampleUv + pixelJitter / fullImageSize) * 2.0 - 1.0;
+        float4 nearH = mul(pc.invViewProj, float4(sampleNdc.x, sampleNdc.y, 1.0, 1.0));
+        float4 farH = mul(pc.invViewProj, float4(sampleNdc.x, sampleNdc.y, 0.0, 1.0));
+        float3 nearP = nearH.xyz / nearH.w;
+        float3 farP = farH.xyz / farH.w;
+        float3 origin = nearP + pc.camOffset;
+        float3 direction = normalize(farP - nearP);
+        float3 sampleRadiance = tracePath(origin, direction,
+                primaryRayConeSpread(sampleNdc, fullImageSize, direction), false, false, false, sampler);
+        if (pilotLane == 0u) pilotA = sampleRadiance;
+        else pilotB = sampleRadiance;
+    }
+    float3 scale = max(abs(pilotA) + abs(pilotB), float3(0.02));
+    float3 relativeDelta = (pilotA - pilotB) / scale;
+    float3 pairVariance = 0.5 * relativeDelta * relativeDelta;
+    float4 pilotState = offlinePilotRead[int2(tile)];
+    float pilotCount = pilotState.a + 1.0;
+    float3 pilotMean = pilotState.rgb + (pairVariance - pilotState.rgb) / pilotCount;
+    offlinePilotWrite[int2(tile)] = float4(pilotMean, pilotCount);
+    return;
+ #else
     bool offlineCalibrating = (pc.flags & FRAME_FLAG_OFFLINE_CALIBRATING) != 0u;
+#if CAUSTICA_OFFLINE_INDIRECT
+    uint linearIndex = DispatchRaysIndex().x;
+    if (linearIndex == 0u) {
+        return;
+    }
+    struct OfflineTileWork {
+        uint tileIndex;
+        uint pathCount;
+    };
+    ConstPtr<OfflineTileWork> offlineWork = ConstPtr<OfflineTileWork>(pcAddr.offlineWorkAddress);
+    OfflineTileWork workItem = offlineWork[(linearIndex - 1u) >> 6u];
+    uint lane = (linearIndex - 1u) & 63u;
+    uint2 indirectTile = uint2(workItem.tileIndex % pcAddr.offlineTileWidth,
+            workItem.tileIndex / pcAddr.offlineTileWidth);
+    pix = int2((indirectTile.x << 3u) + (lane & 7u),
+            (indirectTile.y << 3u) + (lane >> 3u));
+    size = float2(pcAddr.offlineImageWidth, pcAddr.offlineImageHeight);
+    if (pix.x >= int(pcAddr.offlineImageWidth) || pix.y >= int(pcAddr.offlineImageHeight)) {
+        return;
+    }
+#endif
+    uv = (float2(pix) + 0.5) / size;
     float4 offlineState = groundTruthAccum[pix];
-    uint completedSamples = uint(max(offlineState.a, 0.0) + 0.5);
+    float3 previousMean = offlineState.rgb;
+    uint completedSamples = offlineSampleCount[pix];
     uint spp = max(pc.spp, 1u);
     int2 pilotTile = pix >> 3;
     float4 pilotState = offlinePilotRead[pilotTile];
+#if CAUSTICA_OFFLINE_INDIRECT
+    uint pathCount = workItem.pathCount;
+#else
     uint pathCount = spp;
     if (!offlineCalibrating && pilotState.a >= 4.0) {
         float relativeNoise = sqrt(max(pilotState.r, max(pilotState.g, pilotState.b)));
         float predictedError = relativeNoise / sqrt(float(completedSamples + 1u));
         pathCount = min(spp, max(1u, uint(predictedError * 100.0 + 0.999)));
     }
-    float3 runningMean = offlineState.rgb;
-    uint runningCount = completedSamples;
-    bool pilotLeader = !offlineCalibrating && (pix.x & 7) == 0 && (pix.y & 7) == 0;
-    uint totalPathCount = pathCount + (pilotLeader ? 2u : 0u);
+#endif
+    bool pilotLeader = false;
+    uint totalPathCount = pathCount;
     uint pixelHash = sampleHash(uint(pix.x) ^ sampleHash(uint(pix.y) + 0x9e3779b9u));
     float3 pilotA = float3(0.0);
     float3 pilotB = float3(0.0);
+    float3 batchSum = float3(0.0);
+    uint newCount = completedSamples + pathCount;
+    if (newCount < completedSamples) {
+        return;
+    }
     for (uint s = 0u; s < totalPathCount; s++) {
-        bool pilotSample = s >= pathCount;
+        bool pilotSample = false;
         uint pilotLane = s - pathCount;
         PathSampler sampler;
         float2 sampleUv = uv;
@@ -3076,25 +3181,23 @@ void main() {
         float3 direction = normalize(farP - nearP);
         float3 sampleRadiance = tracePath(origin, direction,
                 primaryRayConeSpread(sampleNdc, size, direction), false, false, false, sampler);
-        if (pilotSample) {
-            if (pilotLane == 0u) pilotA = sampleRadiance;
-            else pilotB = sampleRadiance;
-        } else {
-            runningCount++;
-            runningMean += (sampleRadiance - runningMean) / float(runningCount);
+        if (!pilotSample) {
+            if (any(isnan(sampleRadiance)) || any(isinf(sampleRadiance))) {
+                return;
+            }
+            batchSum += sampleRadiance;
         }
     }
-    groundTruthAccum[pix] = float4(runningMean, float(runningCount));
-    if (pilotLeader) {
-        float3 scale = max(abs(pilotA) + abs(pilotB), float3(0.02));
-        float3 relativeDelta = (pilotA - pilotB) / scale;
-        float3 pairVariance = 0.5 * relativeDelta * relativeDelta;
-        float pilotCount = pilotState.a + 1.0;
-        float3 pilotMean = pilotState.rgb + (pairVariance - pilotState.rgb) / pilotCount;
-        offlinePilotWrite[pilotTile] = float4(pilotMean, pilotCount);
+    float3 runningMean = previousMean
+            + (batchSum - previousMean * float(pathCount)) / float(max(newCount, 1u));
+    if (any(isnan(runningMean)) || any(isinf(runningMean))) {
+        return;
     }
+    groundTruthAccum[pix] = float4(runningMean, 1.0);
+    offlineSampleCount[pix] = newCount;
     outImage[pix] = float4(runningMean, 1.0);
     return;
+ #endif
 #else
     uint spp = max(pc.spp, 1u);
 #if CAUSTICA_SHARC_QUERY && CAUSTICA_SHARC_DIAGNOSTICS

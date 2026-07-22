@@ -25,6 +25,10 @@ final class PathSamplingContractTest {
         assertTrue(raygen.contains("sampler.sampleIndex = completedSamples + s"));
         assertTrue(raygen.contains("pc.sampleSequenceAddr"));
         assertTrue(raygen.contains("owenScramble(value, dimensionSeed)"));
+        assertTrue(raygen.contains("SAMPLE_SEQUENCE_BITS = 20u"));
+        assertTrue(raygen.contains("offlineSampleEpochSeed"));
+        assertTrue(raygen.contains("dimension < SAMPLE_SEQUENCE_DIMENSIONS"));
+        assertTrue(raygen.contains("without silently reusing"));
         assertTrue(raygen.contains("inline uint liveRandom(inout uint state)"));
         assertTrue(raygen.contains("state = value * 747796405u + 2891336453u"));
         assertTrue(raygen.contains("(sampler.blueIndex << 3u) + (salt << 1u)"));

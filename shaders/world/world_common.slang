@@ -24,6 +24,11 @@ public struct WorldPushConstants {
     public uint debugView;
     public float textureMipBias;
     public uint pointSampleMaxSize;
+    public uint64_t offlineWorkAddress;
+    public uint offlineTileWidth;
+    public uint offlineImageWidth;
+    public uint offlineImageHeight;
+    public uint offlineIndirect;
 };
 
 // Fork transport modules historically call this exact ABI PushAddr.
