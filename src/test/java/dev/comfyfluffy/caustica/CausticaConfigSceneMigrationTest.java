@@ -144,12 +144,14 @@ final class CausticaConfigSceneMigrationTest {
     void schemaEightDerivesInputResolutionFromTheSavedDlssPreset() {
         CommentedConfig quality = CommentedConfig.inMemory();
         quality.set("config-version", 7);
+        quality.set("reconstruction.backend", "nrd");
         quality.set("dlss-rr.quality", 2);
         assertTrue(CausticaConfig.migrateLegacySceneConfig(quality));
         assertEquals(15, ((Number) quality.get("dlss-rr.input-scale-percent")).intValue());
 
         CommentedConfig custom = CommentedConfig.inMemory();
         custom.set("config-version", 7);
+        custom.set("reconstruction.backend", "nrd");
         custom.set("dlss-rr.quality", 2);
         custom.set("dlss-rr.input-scale-percent", 20);
         assertTrue(CausticaConfig.migrateLegacySceneConfig(custom));
@@ -261,6 +263,7 @@ final class CausticaConfigSceneMigrationTest {
     void schemaTwelveConvertsLegacyAbsoluteInputScaleToRatioTenths() {
         CommentedConfig nativeOutput = CommentedConfig.inMemory();
         nativeOutput.set("config-version", 11);
+        nativeOutput.set("reconstruction.backend", "nrd");
         nativeOutput.set("output-scale.percent", 100);
         nativeOutput.set("dlss-rr.input-scale-percent", 50);
         assertTrue(CausticaConfig.migrateLegacySceneConfig(nativeOutput));
@@ -268,6 +271,7 @@ final class CausticaConfigSceneMigrationTest {
 
         CommentedConfig source33 = CommentedConfig.inMemory();
         source33.set("config-version", 11);
+        source33.set("reconstruction.backend", "nrd");
         source33.set("output-scale.percent", 100);
         source33.set("dlss-rr.input-scale-percent", 33);
         assertTrue(CausticaConfig.migrateLegacySceneConfig(source33));
@@ -275,6 +279,7 @@ final class CausticaConfigSceneMigrationTest {
 
         CommentedConfig double200To67 = CommentedConfig.inMemory();
         double200To67.set("config-version", 11);
+        double200To67.set("reconstruction.backend", "nrd");
         double200To67.set("output-scale.percent", 200);
         double200To67.set("dlss-rr.input-scale-percent", 67);
         assertTrue(CausticaConfig.migrateLegacySceneConfig(double200To67));
@@ -282,6 +287,7 @@ final class CausticaConfigSceneMigrationTest {
 
         CommentedConfig double200To133 = CommentedConfig.inMemory();
         double200To133.set("config-version", 11);
+        double200To133.set("reconstruction.backend", "nrd");
         double200To133.set("output-scale.percent", 200);
         double200To133.set("dlss-rr.input-scale-percent", 133);
         assertTrue(CausticaConfig.migrateLegacySceneConfig(double200To133));
@@ -289,6 +295,7 @@ final class CausticaConfigSceneMigrationTest {
 
         CommentedConfig single200To200 = CommentedConfig.inMemory();
         single200To200.set("config-version", 11);
+        single200To200.set("reconstruction.backend", "nrd");
         single200To200.set("output-scale.percent", 10);
         single200To200.set("dlss-rr.input-scale-percent", 200);
         assertTrue(CausticaConfig.migrateLegacySceneConfig(single200To200));
@@ -296,6 +303,7 @@ final class CausticaConfigSceneMigrationTest {
 
         CommentedConfig double200To10 = CommentedConfig.inMemory();
         double200To10.set("config-version", 11);
+        double200To10.set("reconstruction.backend", "nrd");
         double200To10.set("output-scale.percent", 200);
         double200To10.set("dlss-rr.input-scale-percent", 10);
         assertTrue(CausticaConfig.migrateLegacySceneConfig(double200To10));
@@ -303,6 +311,7 @@ final class CausticaConfigSceneMigrationTest {
 
         CommentedConfig missingValues = CommentedConfig.inMemory();
         missingValues.set("config-version", 11);
+        missingValues.set("reconstruction.backend", "nrd");
         missingValues.set("output-scale.percent", 100);
         missingValues.set("dlss-rr.input-scale-percent", "invalid");
         assertTrue(CausticaConfig.migrateLegacySceneConfig(missingValues));
@@ -310,11 +319,13 @@ final class CausticaConfigSceneMigrationTest {
 
         CommentedConfig missingBoth = CommentedConfig.inMemory();
         missingBoth.set("config-version", 11);
+        missingBoth.set("reconstruction.backend", "nrd");
         assertTrue(CausticaConfig.migrateLegacySceneConfig(missingBoth));
         assertEquals(20, ((Number) missingBoth.get("dlss-rr.input-scale-percent")).intValue());
 
         CommentedConfig badInputZero = CommentedConfig.inMemory();
         badInputZero.set("config-version", 11);
+        badInputZero.set("reconstruction.backend", "nrd");
         badInputZero.set("output-scale.percent", 200);
         badInputZero.set("dlss-rr.input-scale-percent", 0);
         assertTrue(CausticaConfig.migrateLegacySceneConfig(badInputZero));

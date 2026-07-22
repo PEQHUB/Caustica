@@ -1,12 +1,14 @@
 package dev.comfyfluffy.caustica.client.ui;
 
-/** Responsive geometry for the settings workstation in Minecraft logical GUI coordinates. */
+/** Responsive geometry in Minecraft logical GUI coordinates. */
 public record SettingsUiMetrics(
+        Mode mode,
         int margin,
         int workspaceLeft,
         int workspaceWidth,
         int railWidth,
         int paneLeft,
+        int paneWidth,
         int contentWidth,
         int headerHeight,
         int footerHeight,
@@ -19,34 +21,71 @@ public record SettingsUiMetrics(
         int targetCellWidth,
         int actionWidth) {
 
-    private static final int MAX_WORKSPACE_WIDTH = 1240;
-    private static final int MAX_RAIL_WIDTH = 220;
-    private static final int MIN_RAIL_WIDTH = 104;
+    public enum Mode {
+        WIDE,
+        STANDARD,
+        COMPACT
+    }
+
+    public static final int SCROLLBAR_WIDTH = 6;
+    public static final int SCROLLBAR_SPACING = 6;
+    public static final int SCROLLBAR_RESERVE = SCROLLBAR_WIDTH + SCROLLBAR_SPACING;
+
+    private static final int WIDE_MIN_WIDTH = 1080;
+    private static final int WIDE_MIN_HEIGHT = 520;
+    private static final int STANDARD_MIN_WIDTH = 760;
+    private static final int STANDARD_MIN_HEIGHT = 400;
+    private static final int MAX_WIDE_WORKSPACE = 1088;
+    private static final int MAX_STANDARD_WORKSPACE = 700;
+    private static final int MAX_COMPACT_WORKSPACE = 540;
+    private static final int WIDE_RAIL = 180;
+    private static final int STANDARD_RAIL = 160;
     private static final int PANE_GAP = 12;
-    private static final int TWO_COLUMN_MIN_CONTENT = 720;
 
     public static SettingsUiMetrics calculate(int viewportWidth, int viewportHeight, int preferredRailWidth) {
-        int margin = viewportWidth < 700 ? 8 : 12;
+        Mode mode = viewportWidth >= WIDE_MIN_WIDTH && viewportHeight >= WIDE_MIN_HEIGHT
+                ? Mode.WIDE
+                : viewportWidth >= STANDARD_MIN_WIDTH && viewportHeight >= STANDARD_MIN_HEIGHT
+                        ? Mode.STANDARD : Mode.COMPACT;
+        int margin = mode == Mode.COMPACT ? 6 : 8;
         int availableWidth = Math.max(1, viewportWidth - margin * 2);
-        int workspaceWidth = Math.min(MAX_WORKSPACE_WIDTH, availableWidth);
+        int workspaceLimit = switch (mode) {
+            case WIDE -> MAX_WIDE_WORKSPACE;
+            case STANDARD -> MAX_STANDARD_WORKSPACE;
+            case COMPACT -> MAX_COMPACT_WORKSPACE;
+        };
+        int workspaceWidth = Math.min(workspaceLimit, availableWidth);
         int workspaceLeft = Math.max(0, (viewportWidth - workspaceWidth) / 2);
 
-        int maximumRail = Math.max(MIN_RAIL_WIDTH, workspaceWidth - PANE_GAP - 180);
-        int railWidth = Math.clamp(preferredRailWidth, MIN_RAIL_WIDTH,
-                Math.min(MAX_RAIL_WIDTH, maximumRail));
-        int paneLeft = workspaceLeft + railWidth + PANE_GAP;
-        int contentWidth = Math.max(1, workspaceWidth - railWidth - PANE_GAP);
+        int railWidth = switch (mode) {
+            case WIDE -> WIDE_RAIL;
+            case STANDARD -> STANDARD_RAIL;
+            case COMPACT -> 0;
+        };
+        int paneGap = mode == Mode.COMPACT ? 0 : PANE_GAP;
+        int paneLeft = workspaceLeft + railWidth + paneGap;
+        int paneWidth = Math.max(SCROLLBAR_RESERVE + 1, workspaceWidth - railWidth - paneGap);
+        int contentWidth = Math.max(1, paneWidth - SCROLLBAR_RESERVE);
 
-        int headerHeight = 40;
-        int footerHeight = 48;
-        int bodyTop = margin + headerHeight + 8;
+        int headerHeight = mode == Mode.COMPACT ? 32 : 36;
+        int footerHeight = mode == Mode.COMPACT ? 30 : 34;
+        int bodyTop = margin + headerHeight + 4;
         int bodyHeight = Math.max(40, viewportHeight - bodyTop - footerHeight - margin);
-        int columns = contentWidth >= TWO_COLUMN_MIN_CONTENT ? 2 : 1;
-        int targetCellWidth = columns == 2 ? (contentWidth - 12) / 2 : contentWidth;
+        int controlHeight = mode == Mode.COMPACT ? 24 : 28;
+        int gridGap = mode == Mode.COMPACT ? 2 : 4;
+        int categoryGap = mode == Mode.COMPACT ? 6 : 10;
+        int columns = mode == Mode.WIDE ? 2 : 1;
+        int targetCellWidth = columns == 2
+                ? Math.max(1, (contentWidth - gridGap) / 2) : contentWidth;
 
-        return new SettingsUiMetrics(margin, workspaceLeft, workspaceWidth, railWidth, paneLeft,
-                contentWidth, headerHeight, footerHeight, bodyTop, bodyHeight, 44, 12, 8,
-                columns, targetCellWidth, Math.min(220, contentWidth));
+        return new SettingsUiMetrics(mode, margin, workspaceLeft, workspaceWidth, railWidth, paneLeft,
+                paneWidth, contentWidth, headerHeight, footerHeight, bodyTop, bodyHeight,
+                controlHeight, gridGap, categoryGap, columns, targetCellWidth,
+                Math.min(132, contentWidth));
+    }
+
+    public boolean compact() {
+        return mode == Mode.COMPACT;
     }
 
     public int workspaceRight() {
@@ -54,7 +93,7 @@ public record SettingsUiMetrics(
     }
 
     public int paneRight() {
-        return paneLeft + contentWidth;
+        return paneLeft + paneWidth;
     }
 
     public int footerTop(int viewportHeight) {

@@ -13,10 +13,11 @@ import dev.comfyfluffy.caustica.client.ui.CausticaWidgets.LabeledControl;
 import dev.comfyfluffy.caustica.client.ui.CausticaWidgets.SectionHeader;
 import dev.comfyfluffy.caustica.client.ui.CausticaWidgets.Slider;
 import dev.comfyfluffy.caustica.client.ui.CausticaWidgets.Toggle;
-import dev.comfyfluffy.caustica.client.ui.AlignedWidgetLayout;
 import dev.comfyfluffy.caustica.client.ui.CategoryLayout;
 import dev.comfyfluffy.caustica.client.ui.CollapsibleLayout;
 import dev.comfyfluffy.caustica.client.ui.SettingsUiMetrics;
+import dev.comfyfluffy.caustica.client.ui.SectionColumnsLayout;
+import dev.comfyfluffy.caustica.client.ui.HeaderToolbarLayout;
 import dev.comfyfluffy.caustica.client.ui.WidgetGridLayout;
 import dev.comfyfluffy.caustica.client.settings.SettingsRuntimeStatus;
 import dev.comfyfluffy.caustica.client.settings.SettingsCatalog;
@@ -36,6 +37,7 @@ import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.nio.file.Files;
 import java.util.function.DoubleFunction;
 import java.util.stream.IntStream;
 import net.minecraft.client.Minecraft;
@@ -43,22 +45,24 @@ import net.minecraft.client.OptionInstance;
 import net.minecraft.client.Options;
 import net.minecraft.client.gui.GuiGraphicsExtractor;
 import net.minecraft.client.gui.components.AbstractScrollArea;
+import net.minecraft.client.gui.components.AbstractContainerWidget;
 import net.minecraft.client.gui.components.AbstractWidget;
 import net.minecraft.client.gui.components.EditBox;
 import net.minecraft.client.gui.components.ScrollableLayout;
+import net.minecraft.client.gui.components.ScrollableLayout.ReserveStrategy;
 import net.minecraft.client.gui.layouts.SpacerElement;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.client.input.MouseButtonEvent;
 import net.minecraft.client.input.KeyEvent;
 import net.minecraft.network.chat.Component;
+import net.minecraft.network.chat.contents.TranslatableContents;
 import org.lwjgl.glfw.GLFW;
 
 /** Caustica's compact, category-based settings workstation. */
 public class CausticaSettingsScreen extends Screen {
-    private static final int MIN_RAIL_WIDTH = 168;
-    private static final int MAX_RAIL_WIDTH = 248;
+    static final int ESSENTIALS_MIN_CELL_WIDTH = 320;
     private static final long TARGET_FLASH_MILLIS = 1800L;
-    private static final List<Integer> DLSS_QUALITY_ORDER = List.of(3, 0, 1, 2, 5);
+    private static final List<Integer> DLSS_QUALITY_ORDER = List.of(5, 4, 2, 1, 0, 3);
     private static final List<Integer> DLSS_RR_PRESETS = List.of(0, 4, 5);
     private static final List<Integer> SHARC_CACHE_EXPONENTS = List.of(
             16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28);
@@ -74,9 +78,16 @@ public class CausticaSettingsScreen extends Screen {
 
     private final Screen previous;
     protected final Options options;
+    private final SettingsUiState uiState;
+    private final boolean legacyStateFallback;
+    private final boolean legacyTreeState;
     private ScrollableLayout bodyScroll;
     private AbstractScrollArea bodyScrollArea;
+    private ScrollableLayout navigationScroll;
+    private AbstractScrollArea navigationScrollArea;
+    private AbstractContainerWidget navigationContainer;
     private CategoryLayout body;
+    private SectionColumnsLayout sectionColumns;
     private final Map<AbstractWidget, Runnable> toneResets = new IdentityHashMap<>();
     private final Map<AbstractWidget, Runnable> controlResets = new IdentityHashMap<>();
     private final Map<Page, List<Runnable>> pageResets = new java.util.EnumMap<>(Page.class);
@@ -84,9 +95,10 @@ public class CausticaSettingsScreen extends Screen {
     private final Map<AbstractWidget, String> usageLabels = new IdentityHashMap<>();
     private final Map<AbstractWidget, Page> usageCategories = new IdentityHashMap<>();
     private final Map<AbstractWidget, String> usageIds = new IdentityHashMap<>();
-    private final Map<String, Page> controlCategories = new java.util.HashMap<>();
+    private final Map<AbstractWidget, String> boundControlIds = new IdentityHashMap<>();
+    private final Map<AbstractWidget, String> anchorIds = new IdentityHashMap<>();
+    private final Map<String, AbstractWidget> anchorWidgets = new java.util.HashMap<>();
     private final List<Dropdown<?>> dropdowns = new ArrayList<>();
-    private final List<QuickHeading> quickHeadings = new ArrayList<>();
     private EditBox searchBox;
     private String searchQuery = "";
     private String searchContext = "";
@@ -101,7 +113,17 @@ public class CausticaSettingsScreen extends Screen {
     private AbstractWidget targetWidget;
     private AbstractWidget flashWidget;
     private CollapsibleLayout activeBundle;
+    private String activeBundleId;
+    private String temporaryExpandedSectionId;
     private AbstractWidget selectedCategoryButton;
+    private ActionButton compactNavigationButton;
+    private boolean navigationOpen;
+    private int navigationLeft;
+    private int navigationTop;
+    private int navigationWidth;
+    private int navigationHeight;
+    private int initializedWidth = -1;
+    private int initializedHeight = -1;
     private long flashUntilMillis;
     private final boolean initiallyFgRequested = CausticaConfig.Rt.Fg.requested();
     private boolean pendingSwapchainRecreate;
@@ -114,9 +136,25 @@ public class CausticaSettingsScreen extends Screen {
         super(Component.translatable("caustica.options.title"));
         this.previous = previous;
         this.options = options;
+        this.uiState = SettingsUiState.load();
+        this.legacyStateFallback = !Files.isRegularFile(uiState.path());
+        this.legacyTreeState = legacyStateFallback && CausticaTreeState.INSTANCE.hasPersistedState();
         String requestedCategory = initialCategory != null
-                ? initialCategory : CausticaMenuUsage.INSTANCE.lastCategory();
+                ? initialCategory : legacyStateFallback
+                        ? CausticaMenuUsage.INSTANCE.lastCategory() : uiState.lastPageId();
         this.category = Page.parse(requestedCategory);
+        if (legacyTreeState) migrateLegacyExpansionState();
+    }
+
+    private void migrateLegacyExpansionState() {
+        for (Group group : Group.values()) {
+            uiState.setGroupExpanded(groupStateId(group),
+                    !CausticaTreeState.INSTANCE.isCollapsed(legacyGroupStateId(group)));
+        }
+        for (SettingsCatalog.Section section : SettingsCatalog.allSections()) {
+            uiState.setSectionExpanded(section.id(),
+                    !CausticaTreeState.INSTANCE.isCollapsed("bundle." + section.id()));
+        }
     }
 
     @Override
@@ -128,21 +166,46 @@ public class CausticaSettingsScreen extends Screen {
         usageLabels.clear();
         usageCategories.clear();
         usageIds.clear();
-        controlCategories.clear();
+        boundControlIds.clear();
+        anchorIds.clear();
+        anchorWidgets.clear();
         dropdowns.clear();
-        quickHeadings.clear();
         bodyScrollArea = null;
+        navigationScrollArea = null;
+        navigationContainer = null;
+        navigationScroll = null;
+        navigationOpen = false;
+        compactNavigationButton = null;
         targetWidget = null;
         flashWidget = null;
         selectedCategoryButton = null;
         activeBundle = null;
-        metrics = SettingsUiMetrics.calculate(width, height, computePreferredRailWidth());
+        activeBundleId = null;
+        sectionColumns = null;
+        metrics = SettingsUiMetrics.calculate(width, height, 0);
+        RtResolutionScale.ensurePresetSelection();
         railWidth = metrics.railWidth();
         contentWidth = metrics.contentWidth();
         gridColumns = metrics.principalColumns();
         int paneLeft = metrics.paneLeft();
 
-        searchBox = new EditBox(font, metrics.workspaceLeft(), metrics.margin() + 5, railWidth, 28,
+        int headerY = metrics.margin() + 4;
+        int searchHeight = Math.min(24, metrics.headerHeight() - 8);
+        int searchLeft = metrics.workspaceLeft();
+        int searchWidth = railWidth;
+        if (metrics.compact()) {
+            int navigationButtonWidth = Math.clamp(metrics.workspaceWidth() / 3, 140, 180);
+            compactNavigationButton = new ActionButton(navigationButtonWidth,
+                    () -> Component.translatable("caustica.options.navigation.pages", category.label()),
+                    () -> setNavigationOpen(true), true)
+                    .tooltip(Component.translatable("caustica.options.navigation.open"));
+            compactNavigationButton.setRectangle(navigationButtonWidth, searchHeight,
+                    metrics.workspaceLeft(), headerY);
+            addRenderableWidget(compactNavigationButton);
+            searchLeft += navigationButtonWidth + 4;
+            searchWidth = Math.max(1, metrics.workspaceRight() - searchLeft);
+        }
+        searchBox = new EditBox(font, searchLeft, headerY, searchWidth, searchHeight,
                 Component.translatable("caustica.options.search"));
         searchBox.setMaxLength(80);
         searchBox.setHint(Component.translatable("caustica.options.search.hint"));
@@ -150,46 +213,11 @@ public class CausticaSettingsScreen extends Screen {
         searchBox.setValue(searchQuery);
         searchBox.setResponder(this::searchChanged);
         addRenderableWidget(searchBox);
-
-        int railY = metrics.bodyTop();
-        Group currentGroup = null;
-        boolean groupCollapsed = false;
-        ActionButton essentials = new ActionButton(railWidth, Page.ESSENTIALS::label,
-                () -> selectCategory(Page.ESSENTIALS), false);
-        essentials.setRectangle(railWidth, 28, metrics.workspaceLeft(), railY);
-        addRenderableWidget(essentials);
-        if (category == Page.ESSENTIALS) selectedCategoryButton = essentials;
-        railY += 30;
-        for (Page value : Page.values()) {
-            if (value == Page.ESSENTIALS) continue;
-            if (value.group() != currentGroup) {
-                currentGroup = value.group();
-                String stateId = "group." + currentGroup.name().toLowerCase(Locale.ROOT);
-                groupCollapsed = CausticaTreeState.INSTANCE.isCollapsed(stateId)
-                        && category.group() != currentGroup;
-                CollapsibleLayout.TreeHeader heading = new CollapsibleLayout.TreeHeader(railWidth,
-                        currentGroup.label(), () -> CausticaTreeState.INSTANCE.isCollapsed(stateId), () -> {
-                            CausticaTreeState.INSTANCE.setCollapsed(stateId,
-                                    !CausticaTreeState.INSTANCE.isCollapsed(stateId));
-                            rememberMenuPosition();
-                            rebuildScreen();
-                        });
-                heading.setRectangle(railWidth, 24, metrics.workspaceLeft(), railY);
-                addRenderableWidget(heading);
-                railY += 22;
-            }
-            if (groupCollapsed) continue;
-            Page target = value;
-            ActionButton button = new ActionButton(railWidth,
-                    target::label, () -> selectCategory(target), false);
-            button.setRectangle(railWidth, 28, metrics.workspaceLeft(), railY);
-            addRenderableWidget(button);
-            if (category == target) selectedCategoryButton = button;
-            railY += 28;
-        }
         body = new CategoryLayout(contentWidth, metrics.categoryGap());
-        addQuickLinks(railY + 2);
+        buildingCategory = category;
+        pageResetAdded = false;
         if (!searchQuery.isBlank()) {
+            pageResetAdded = true;
             addSearchResults();
         } else {
             addCategory(category);
@@ -198,31 +226,144 @@ public class CausticaSettingsScreen extends Screen {
 
         int bodyTop = metrics.bodyTop();
         int bodyHeight = metrics.bodyHeight();
-        bodyScroll = new ScrollableLayout(minecraft, body, bodyHeight);
-        bodyScroll.setScrollbarSpacing(6);
+        bodyScroll = new ScrollableLayout(minecraft, body, bodyHeight, ReserveStrategy.RIGHT);
+        bodyScroll.setScrollbarSpacing(SettingsUiMetrics.SCROLLBAR_SPACING);
         bodyScroll.setMinWidth(contentWidth);
         bodyScroll.setX(paneLeft);
         bodyScroll.setY(bodyTop);
+        bodyScroll.arrangeElements();
         bodyScroll.visitWidgets(widget -> {
             if (widget instanceof AbstractScrollArea scrollArea) bodyScrollArea = scrollArea;
             addRenderableWidget(widget);
         });
 
+        buildNavigation();
+
         ActionButton done = new ActionButton(110, () -> Component.translatable("gui.done"), this::onClose, true);
-        done.setRectangle(120, metrics.controlHeight(), metrics.paneRight() - 120,
+        int doneWidth = Math.min(120, metrics.paneWidth());
+        done.setRectangle(doneWidth, metrics.controlHeight(), metrics.paneRight() - doneWidth,
                 height - metrics.margin() - metrics.controlHeight());
         addRenderableWidget(done);
-        repositionElements();
+        if (navigationScroll != null) navigationScroll.arrangeElements();
         restorePositionOrRevealTarget(bodyTop);
         setInitialFocus(targetWidget != null ? targetWidget : searchBox);
+        initializedWidth = width;
+        initializedHeight = height;
+    }
+
+    private void buildNavigation() {
+        navigationWidth = metrics.compact()
+                ? Math.min(260, Math.max(1, metrics.workspaceWidth() - 16)) : railWidth;
+        navigationLeft = metrics.compact()
+                ? metrics.workspaceLeft() + (metrics.workspaceWidth() - navigationWidth) / 2
+                : metrics.workspaceLeft();
+        navigationTop = metrics.bodyTop();
+        navigationHeight = metrics.bodyHeight();
+        int navigationContentWidth = Math.max(1, navigationWidth - SettingsUiMetrics.SCROLLBAR_RESERVE);
+        CategoryLayout navigation = new CategoryLayout(navigationContentWidth, 2);
+
+        ActionButton essentials = new ActionButton(navigationContentWidth, Page.ESSENTIALS::label,
+                () -> selectCategory(Page.ESSENTIALS), false);
+        essentials.setHeight(26);
+        navigation.addChild(essentials);
+        if (category == Page.ESSENTIALS) selectedCategoryButton = essentials;
+
+        Group currentGroup = null;
+        boolean groupExpanded = true;
+        for (Page value : Page.values()) {
+            if (value == Page.ESSENTIALS) continue;
+            if (value.group() != currentGroup) {
+                currentGroup = value.group();
+                Group group = currentGroup;
+                String stateId = groupStateId(group);
+                boolean legacyExpanded = !CausticaTreeState.INSTANCE.isCollapsed(legacyGroupStateId(group));
+                if (legacyTreeState && !uiState.groupExpansion().containsKey(stateId)) {
+                    uiState.setGroupExpanded(stateId, legacyExpanded);
+                }
+                groupExpanded = groupExpanded(uiState, group, legacyExpanded);
+                CollapsibleLayout.TreeHeader heading = new CollapsibleLayout.TreeHeader(navigationContentWidth,
+                        group.label(), () -> !groupExpanded(uiState, group, legacyExpanded), () -> {
+                            boolean expanded = groupExpanded(uiState, group, legacyExpanded);
+                            uiState.setGroupExpanded(stateId, !expanded);
+                            rememberMenuPosition();
+                            uiState.save();
+                            rebuildScreen();
+                        });
+                navigation.addChild(heading);
+            }
+            if (!groupExpanded) continue;
+            Page target = value;
+            ActionButton button = new ActionButton(navigationContentWidth,
+                    target::label, () -> selectCategory(target), false);
+            button.setHeight(26);
+            navigation.addChild(button);
+            if (category == target) selectedCategoryButton = button;
+        }
+
+        navigationScroll = new ScrollableLayout(minecraft, navigation, navigationHeight, ReserveStrategy.RIGHT);
+        navigationScroll.setScrollbarSpacing(SettingsUiMetrics.SCROLLBAR_SPACING);
+        navigationScroll.setMinWidth(navigationContentWidth);
+        navigationScroll.setX(navigationLeft);
+        navigationScroll.setY(navigationTop);
+        navigationScroll.arrangeElements();
+        navigationScroll.visitWidgets(widget -> {
+            if (widget instanceof AbstractScrollArea scrollArea) {
+                navigationScrollArea = scrollArea;
+                scrollArea.visible = !metrics.compact();
+                scrollArea.active = !metrics.compact();
+            }
+            if (widget instanceof AbstractContainerWidget container) navigationContainer = container;
+            addRenderableWidget(widget);
+        });
+        if (navigationScrollArea != null && selectedCategoryButton != null
+                && (selectedCategoryButton.getY() < navigationTop
+                || selectedCategoryButton.getBottom() > navigationTop + navigationHeight)) {
+            navigationScrollArea.setScrollAmount(selectedCategoryButton.getY() - navigationTop
+                    - Math.max(0, navigationHeight - selectedCategoryButton.getHeight()) / 2.0);
+        }
+    }
+
+    private static String groupStateId(Group group) {
+        return "group." + group.routeId();
+    }
+
+    private static String legacyGroupStateId(Group group) {
+        return "group." + group.name().toLowerCase(Locale.ROOT);
+    }
+
+    static boolean groupExpanded(SettingsUiState state, Group group, boolean defaultExpanded) {
+        return state.groupExpanded(groupStateId(group), defaultExpanded);
     }
 
     private void selectCategory(Page target) {
-        if (category == target && searchQuery.isBlank()) return;
+        if (category == target && searchQuery.isBlank()) {
+            if (navigationOpen) setNavigationOpen(false);
+            return;
+        }
         rememberMenuPosition();
         category = target;
+        uiState.setLastPage(target);
+        uiState.save();
         searchQuery = "";
+        temporaryExpandedSectionId = null;
+        navigationOpen = false;
         rebuildScreen();
+    }
+
+    private void setNavigationOpen(boolean open) {
+        if (!metrics.compact() || navigationScrollArea == null) return;
+        if (open) dropdowns.forEach(Dropdown::close);
+        navigationOpen = open;
+        navigationScrollArea.visible = open;
+        navigationScrollArea.active = open;
+        if (open) {
+            setFocused(navigationScrollArea);
+            if (selectedCategoryButton != null && navigationContainer != null) {
+                navigationContainer.setFocused(selectedCategoryButton);
+            }
+        } else if (compactNavigationButton != null) {
+            setFocused(compactNavigationButton);
+        }
     }
 
     private void addCategory(Page target) {
@@ -254,74 +395,53 @@ public class CausticaSettingsScreen extends Screen {
                         CausticaConfig.Rt.Hdr.ENABLED),
                 SettingsRuntimeStatus.frameGeneration(), SettingsRuntimeStatus.overrideCount()));
 
-        addHeader("essentials.display");
-        List<AbstractWidget> display = new ArrayList<>();
-        display.add(hdrToggle());
-        display.add(hdrTonemapper());
-        display.add(floatSlider(Component.translatable("caustica.options.rt.hdrPaperWhite"),
-                CausticaConfig.Rt.Hdr.PAPER_WHITE_NITS, 80, 1000,
-                value -> String.format(Locale.ROOT, "%.0f nits", value))
-                .activeWhen(CausticaConfig.Rt.Hdr.ENABLED::configuredValue));
-        display.add(floatSlider(Component.translatable("caustica.options.rt.hdrPeak"),
-                CausticaConfig.Rt.Hdr.PEAK_NITS, 80, 10000,
-                value -> String.format(Locale.ROOT, "%.0f nits", value))
-                .activeWhen(CausticaConfig.Rt.Hdr.ENABLED::configuredValue));
-        display.add(floatSlider(Component.translatable("caustica.options.rt.hdrUiBrightness"),
-                CausticaConfig.Rt.Hdr.UI_BRIGHTNESS_NITS, 40, 1000,
-                value -> String.format(Locale.ROOT, "%.0f nits", value))
-                .activeWhen(CausticaConfig.Rt.Hdr.ENABLED::configuredValue));
-        display.add(sdrTonemapper());
-        display.addAll(basicExposureControls());
-        addGrid(display);
-
-        addHeader("essentials.reconstruction");
-        List<AbstractWidget> reconstruction = new ArrayList<>();
-        reconstruction.add(reconstructionBackendControl());
-        reconstruction.add(toggle(Component.translatable("caustica.options.rt.dlssRr"), CausticaConfig.Rt.DlssRr.ENABLED));
-        reconstruction.add(dlssQualityControl());
-        reconstruction.add(dlssPresetControl());
-        reconstruction.add(dlssInputRatioControl());
-        addGrid(reconstruction);
-        addInfo(this::resolutionSummary);
-
-        addHeader("essentials.frameGeneration");
-        addGrid(List.of(fgModeControl(), fgMultiplierControl(), reflexControl(), vsyncControl()));
-        addInfo(SettingsRuntimeStatus::frameGeneration);
-
-        addHeader("essentials.rayTracing");
-        List<AbstractWidget> rendering = new ArrayList<>();
-        rendering.add(toggle(Component.translatable("caustica.options.enabled"), CausticaConfig.Rt.ENABLED));
-        rendering.add(intSlider(Component.translatable("caustica.options.rt.spp"), CausticaConfig.Rt.Composite.SPP,
-                1, 8, value -> String.format(Locale.ROOT, "%.0f spp", value)));
-        rendering.add(intSlider(Component.translatable("caustica.options.rt.maxBounces"),
+        List<AbstractWidget> controls = new ArrayList<>();
+        controls.add(toggle(Component.translatable("caustica.options.enabled"), CausticaConfig.Rt.ENABLED));
+        controls.add(intSlider(Component.translatable("caustica.options.rt.spp"),
+                CausticaConfig.Rt.Composite.SPP, 1, 8,
+                value -> String.format(Locale.ROOT, "%.0f spp", value)));
+        controls.add(intSlider(Component.translatable("caustica.options.rt.maxBounces"),
                 CausticaConfig.Rt.Composite.MAX_BOUNCES, 2, 64,
                 value -> String.format(Locale.ROOT, "%.0f bounces", value)));
-        rendering.add(toggle(Component.translatable("caustica.options.rt.sharc"), CausticaConfig.Rt.Sharc.ENABLED));
-        addGrid(rendering);
-
-        addHeader("essentials.scene");
-        List<AbstractWidget> scene = new ArrayList<>();
-        scene.add(torchIntensityControl());
-        scene.add(toggle(Component.translatable("caustica.options.rt.waterWaves"),
-                CausticaConfig.Rt.Composite.WATER_WAVES));
-        scene.add(toggle(Component.translatable("caustica.options.rt.entities"),
+        controls.add(reconstructionBackendControl());
+        controls.add(toggle(Component.translatable("caustica.options.rt.dlssRr"), CausticaConfig.Rt.DlssRr.ENABLED));
+        controls.add(dlssQualityControl());
+        controls.add(hdrToggle());
+        if (CausticaConfig.Rt.Hdr.ENABLED.configuredValue()) {
+            controls.add(hdrTonemapper());
+            controls.addAll(hdrBrightnessControls());
+        }
+        controls.add(fgModeControl());
+        controls.add(fgMultiplierControl());
+        controls.add(torchIntensityControl());
+        controls.add(toggle(Component.translatable("caustica.options.rt.entities"),
                 CausticaConfig.Rt.Entities.ENABLED));
-        scene.add(toggle(Component.translatable("caustica.options.rt.particles"),
-                CausticaConfig.Rt.Entities.PARTICLES_ENABLED));
-        scene.add(toggle(Component.translatable("caustica.options.rt.firstPerson.enabled"),
-                CausticaConfig.Rt.FirstPerson.ENABLED));
-        addGrid(scene);
+        addEssentialsGrid(controls);
+    }
 
-        addHeader("essentials.details");
-        addGrid(java.util.Arrays.stream(Page.values()).filter(page -> page != Page.ESSENTIALS)
-                .map(page -> (AbstractWidget)new ActionButton(180, page::label, () -> selectCategory(page), false))
-                .toList());
+    private void addEssentialsGrid(List<? extends AbstractWidget> controls) {
+        registerControls(controls);
+        int preferredColumns = switch (metrics.mode()) {
+            case WIDE -> 3;
+            case STANDARD -> 2;
+            case COMPACT -> 1;
+        };
+        int columns = essentialsColumns(contentWidth, metrics.gridGap(), preferredColumns);
+        body.addChild(new WidgetGridLayout(contentWidth, columns, metrics.gridGap(), metrics.gridGap(),
+                metrics.controlHeight(), controls));
+    }
+
+    static int essentialsColumns(int width, int gap, int preferredColumns) {
+        int fittingColumns = Math.max(1, (Math.max(1, width) + Math.max(0, gap))
+                / (ESSENTIALS_MIN_CELL_WIDTH + Math.max(0, gap)));
+        return Math.min(Math.max(1, preferredColumns), fittingColumns);
     }
 
     private void searchChanged(String value) {
         if (value.equals(searchQuery)) return;
         rememberMenuPosition();
         searchQuery = value;
+        temporaryExpandedSectionId = null;
         rebuildScreen();
     }
 
@@ -344,54 +464,57 @@ public class CausticaSettingsScreen extends Screen {
 
     private void revealControl(Control control) {
         rememberMenuPosition();
+        prepareToneControl(control.id());
         category = control.page();
         searchQuery = "";
+        temporaryExpandedSectionId = null;
         pendingTargetId = control.id();
         rebuildScreen();
     }
 
-    private void addQuickLinks(int top) {
-        int available = metrics.footerTop(height) - top;
-        int itemLimit = Math.clamp((available - 32) / 36, 0, 8);
-        if (itemLimit == 0) return;
-
-        List<CausticaMenuUsage.Item> recent = CausticaMenuUsage.INSTANCE.recent(itemLimit);
-        List<CausticaMenuUsage.Item> frequent = CausticaMenuUsage.INSTANCE.frequent(itemLimit, recent);
-        int y = top;
-        y = addQuickGroup(Component.translatable("caustica.options.quick.recent").getString(), recent, y);
-        addQuickGroup(Component.translatable("caustica.options.quick.frequent").getString(), frequent, y);
-    }
-
-    private int addQuickGroup(String heading, List<CausticaMenuUsage.Item> items, int top) {
-        if (items.isEmpty()) return top;
-        quickHeadings.add(new QuickHeading(heading, top));
-        int y = top + 12;
-        for (CausticaMenuUsage.Item item : items) {
-            ActionButton button = new ActionButton(railWidth,
-                    () -> Component.literal(item.label()), () -> revealControl(item), false);
-            button.setRectangle(railWidth, 18, metrics.workspaceLeft(), y);
-            addRenderableWidget(button);
-            y += 18;
+    private void prepareToneControl(String id) {
+        if (id == null || !id.startsWith("tone.")) return;
+        if (id.startsWith("tone.sdr.")) {
+            if (CausticaConfig.Rt.Hdr.ENABLED.configuredValue()) {
+                CausticaConfig.Rt.Hdr.ENABLED.set(false);
+                pendingSwapchainRecreate = true;
+            }
+            String mode = id.substring("tone.sdr.".length(), id.indexOf('.', "tone.sdr.".length()));
+            String configuredMode = switch (mode) {
+                case "pbrNeutral" -> CausticaConfig.Rt.Sdr.TONEMAP_PBR_NEUTRAL;
+                case "uncharted2" -> CausticaConfig.Rt.Sdr.TONEMAP_UNCHARTED2;
+                case "psychov" -> CausticaConfig.Rt.Sdr.TONEMAP_PSYCHOV;
+                default -> mode;
+            };
+            CausticaConfig.Rt.Sdr.TONEMAP_MODE.set(configuredMode);
+        } else if (id.startsWith("tone.psychov23.")) {
+            if (!CausticaConfig.Rt.Hdr.ENABLED.configuredValue()) {
+                CausticaConfig.Rt.Sdr.TONEMAP_MODE.set(CausticaConfig.Rt.Sdr.TONEMAP_PSYCHOV23);
+            } else {
+                CausticaConfig.Rt.Hdr.TONEMAP_MODE.set(CausticaConfig.Rt.Hdr.TONEMAP_PSYCHOV23);
+            }
+        } else if (id.startsWith("tone.psychov.")) {
+            boolean hdrOnly = id.endsWith(".bleaching") || id.endsWith(".clipPoint")
+                    || id.endsWith(".whiteCurve");
+            if (hdrOnly) {
+                if (!CausticaConfig.Rt.Hdr.ENABLED.configuredValue()) {
+                    CausticaConfig.Rt.Hdr.ENABLED.set(true);
+                    pendingSwapchainRecreate = true;
+                }
+                CausticaConfig.Rt.Hdr.TONEMAP_MODE.set(CausticaConfig.Rt.Hdr.TONEMAP_PSYCHOV);
+                return;
+            }
+            boolean activePsycho = CausticaConfig.Rt.Hdr.ENABLED.configuredValue()
+                    ? CausticaConfig.Rt.Hdr.TONEMAP_MODE.configuredValue().startsWith("psychov")
+                    : CausticaConfig.Rt.Sdr.TONEMAP_MODE.configuredValue().startsWith("psychov");
+            if (!activePsycho) {
+                CausticaConfig.Rt.Sdr.TONEMAP_MODE.set(CausticaConfig.Rt.Sdr.TONEMAP_PSYCHOV);
+                if (CausticaConfig.Rt.Hdr.ENABLED.configuredValue()) {
+                    CausticaConfig.Rt.Hdr.ENABLED.set(false);
+                    pendingSwapchainRecreate = true;
+                }
+            }
         }
-        return y + 4;
-    }
-
-    private void revealControl(CausticaMenuUsage.Item item) {
-        Page target = item.category() == null || item.category().isBlank() ? null : Page.parse(item.category());
-        Control catalogControl = SettingsCatalog.byId(item.id());
-        if (catalogControl != null) target = catalogControl.page();
-        if (target == null) target = controlCategories.get(item.id());
-        if (target == null) {
-            rememberMenuPosition();
-            searchQuery = item.label();
-            rebuildScreen();
-            return;
-        }
-        rememberMenuPosition();
-        category = target;
-        searchQuery = "";
-        pendingTargetId = item.id();
-        rebuildScreen();
     }
 
     private void addDisplayHdr() {
@@ -483,7 +606,6 @@ public class CausticaSettingsScreen extends Screen {
                     default -> "default";
                 }), null).tooltip(Component.translatable("caustica.options.rt.dlssPreset.tooltip"))
                 .activeWhen(this::dlssControlsActive));
-        controls.add(dlssInputRatioControl());
         controls.add(toggle(Component.translatable("caustica.options.rt.highQualityTransparency"),
                 CausticaConfig.Rt.Reconstruction.ADVANCED_OPTICAL_TRANSPORT)
                 .tooltip(Component.translatable("caustica.options.rt.highQualityTransparency.tooltip"))
@@ -493,10 +615,10 @@ public class CausticaSettingsScreen extends Screen {
                 .tooltip(Component.translatable("caustica.options.rt.particleTemporalHistory.tooltip"))
                 .activeWhen(this::dlssControlsActive));
         addBundle("reconstruction.backend");
-        addGrid(List.of(controls.get(0), controls.get(7)));
+        addGrid(List.of(controls.get(0), controls.get(6)));
         addBundle("reconstruction.dlss");
-        addGrid(List.of(controls.get(1), controls.get(4), controls.get(5), controls.get(6),
-                controls.get(2), controls.get(3), controls.get(8)));
+        addGrid(List.of(controls.get(1), controls.get(4), controls.get(5),
+                controls.get(2), controls.get(3), controls.get(7)));
         addInfo(this::resolutionSummary);
         }
         if (!denoising) return;
@@ -796,11 +918,11 @@ public class CausticaSettingsScreen extends Screen {
                 .resetOnShift(() -> CausticaConfig.Rt.Composite.POINT_SAMPLE_MAX_SIZE.set(
                         CausticaConfig.Rt.Composite.POINT_SAMPLE_MAX_SIZE.defaultValue())));
         addBundle("geometry.pathTracer");
-        addGrid(controls.subList(0, 4));
+        addGrid(controls.subList(0, 3));
         addBundle("geometry.scene");
-        addGrid(controls.subList(4, 6));
+        addGrid(controls.subList(3, 5));
         addBundle("geometry.surface");
-        addGrid(controls.subList(6, 9));
+        addGrid(controls.subList(5, 8));
     }
 
     private void addSharc() {
@@ -1111,6 +1233,11 @@ public class CausticaSettingsScreen extends Screen {
         for (RtVideoOptions.TonemapControl control : controls) {
             AbstractWidget widget = control.option().createButton(options, 0, 0, 180);
             toneResets.put(widget, control::resetToDefault);
+            Control descriptor = SettingsCatalog.byLabelKey(control.labelKey());
+            if (descriptor == null) {
+                throw new IllegalStateException("Missing tone-control descriptor " + control.labelKey());
+            }
+            boundControlIds.put(widget, descriptor.id());
             widgets.add(widget);
         }
         return widgets;
@@ -1130,54 +1257,104 @@ public class CausticaSettingsScreen extends Screen {
     }
 
     private void addHeader(Component title, Component subtitle) {
+        sectionColumns = null;
         activeBundle = null;
         searchContext = title.getString() + ' ' + subtitle.getString();
-        body.addChild(new SectionHeader(contentWidth, title, subtitle));
         if (!pageResetAdded) {
             pageResetAdded = true;
-            body.addChild(new AlignedWidgetLayout(contentWidth, metrics.actionWidth(), metrics.controlHeight(),
-                    new ActionButton(metrics.actionWidth(), () -> Component.translatable("caustica.options.resetPage"),
-                            () -> resetAll(pageResets.getOrDefault(buildingCategory, List.of())), true)));
+            ActionButton reset = new ActionButton(metrics.actionWidth(),
+                    () -> Component.translatable("caustica.options.resetPage"),
+                    () -> resetAll(pageResets.getOrDefault(buildingCategory, List.of())), false);
+            reset.setHeight(metrics.controlHeight());
+            body.addChild(new HeaderToolbarLayout(contentWidth, metrics.gridGap(),
+                    new SectionHeader(contentWidth, title, subtitle), reset));
+        } else {
+            body.addChild(new SectionHeader(contentWidth, title, subtitle));
         }
     }
 
     private void addBundle(String id) {
-        String key = "caustica.options.bundle." + id;
-        Component title = Component.translatable(key);
-        Component purpose = Component.translatable(key + ".description");
+        SettingsCatalog.Section descriptor = SettingsCatalog.section(buildingCategory, id);
+        if (descriptor == null) {
+            throw new IllegalArgumentException("Unknown settings section " + id + " on "
+                    + buildingCategory.routeId());
+        }
+        Component title = Component.translatable(descriptor.labelKey());
+        Component purpose = Component.translatable(descriptor.descriptionKey());
         searchContext = title.getString() + ' ' + purpose.getString();
-        String stateId = "bundle." + id;
-        CollapsibleLayout bundle = new CollapsibleLayout(contentWidth, title,
-                () -> CausticaTreeState.INSTANCE.isCollapsed(stateId), () -> {
-                    boolean next = !CausticaTreeState.INSTANCE.isCollapsed(stateId);
-                    CausticaTreeState.INSTANCE.setCollapsed(stateId, next);
-                    repositionElements();
+        int sectionWidth = sectionWidth();
+        CollapsibleLayout bundle = new CollapsibleLayout(sectionWidth, title,
+                () -> !sectionExpanded(id), () -> {
+                    SettingsUiState.PageBookmark bookmark = captureBookmark();
+                    boolean persistedExpanded = persistedSectionExpanded(id);
+                    if (persistedExpanded && bodyScrollArea != null) {
+                        AbstractWidget header = anchorWidgets.get(id);
+                        if (header != null) {
+                            bookmark = SettingsUiState.PageBookmark.capture(id, header.getY(),
+                                    metrics.bodyTop(), metrics.bodyHeight(), bodyScrollArea.scrollAmount(),
+                                    bodyScrollArea.maxScrollAmount());
+                        }
+                    }
+                    if (id.equals(temporaryExpandedSectionId) && !persistedExpanded) {
+                        temporaryExpandedSectionId = null;
+                    } else {
+                        temporaryExpandedSectionId = null;
+                        uiState.setSectionExpanded(id, !persistedExpanded);
+                    }
+                    reflowPage(bookmark);
+                    rememberMenuPosition();
+                    uiState.save();
                 });
-        body.addChild(bundle);
+        if (metrics.mode() == SettingsUiMetrics.Mode.WIDE) {
+            if (sectionColumns == null) {
+                sectionColumns = new SectionColumnsLayout(contentWidth, metrics.gridGap(),
+                        metrics.categoryGap(), sectionSplit(buildingCategory));
+                body.addChild(sectionColumns);
+            }
+            sectionColumns.addSection(bundle);
+        } else {
+            body.addChild(bundle);
+        }
+        anchorIds.put(bundle.header(), id);
+        anchorWidgets.put(id, bundle.header());
         activeBundle = bundle;
+        activeBundleId = id;
+    }
+
+    private boolean persistedSectionExpanded(String id) {
+        boolean defaultExpanded = defaultSectionExpanded(id);
+        if (legacyTreeState) {
+            defaultExpanded = !CausticaTreeState.INSTANCE.isCollapsed("bundle." + id);
+            if (!uiState.sectionExpansion().containsKey(id)) {
+                uiState.setSectionExpanded(id, defaultExpanded);
+            }
+        }
+        return uiState.sectionExpanded(id, defaultExpanded);
+    }
+
+    private boolean sectionExpanded(String id) {
+        return id.equals(temporaryExpandedSectionId) || persistedSectionExpanded(id);
+    }
+
+    private static boolean defaultSectionExpanded(String id) {
+        SettingsCatalog.Section section = SettingsCatalog.sectionById(id);
+        return section == null || section.defaultExpanded();
     }
 
     private void addGrid(List<? extends AbstractWidget> controls) {
         if (controls.isEmpty()) {
             activeBundle = null;
+            activeBundleId = null;
             return;
         }
         registerControls(controls);
         List<Runnable> resets = controls.stream().map(controlResets::get).filter(java.util.Objects::nonNull).toList();
         WidgetGridLayout grid = createGrid(controls);
         if (activeBundle != null) {
-            if (resets.isEmpty()) {
-                activeBundle.setContent(grid);
-            } else {
-                CategoryLayout section = new CategoryLayout(contentWidth, metrics.gridGap());
-                section.addChild(grid);
-                section.addChild(new AlignedWidgetLayout(contentWidth, metrics.actionWidth(), metrics.controlHeight(),
-                        new ActionButton(metrics.actionWidth(),
-                                () -> Component.translatable("caustica.options.resetSection"),
-                                () -> resetAll(resets), true)));
-                activeBundle.setContent(section);
-            }
+            activeBundle.setContent(grid);
+            if (!resets.isEmpty()) activeBundle.setResetAction(() -> resetAll(resets));
             activeBundle = null;
+            activeBundleId = null;
         } else {
             body.addChild(grid);
         }
@@ -1186,40 +1363,41 @@ public class CausticaSettingsScreen extends Screen {
     private void addGridDirect(List<? extends AbstractWidget> controls) {
         if (controls.isEmpty()) {
             activeBundle = null;
+            activeBundleId = null;
             return;
         }
         WidgetGridLayout grid = createGrid(controls);
         if (activeBundle != null) {
             activeBundle.setContent(grid);
             activeBundle = null;
+            activeBundleId = null;
         } else {
             body.addChild(grid);
         }
     }
 
     private WidgetGridLayout createGrid(List<? extends AbstractWidget> controls) {
-        return new WidgetGridLayout(contentWidth, columnsFor(controls), metrics.gridGap(), metrics.gridGap(),
+        int width = activeBundle == null ? contentWidth : sectionWidth();
+        int columns = activeBundle == null ? columnsFor(controls) : 1;
+        return new WidgetGridLayout(width, columns, metrics.gridGap(), metrics.gridGap(),
                 metrics.controlHeight(), controls);
     }
 
-    private int columnsFor(List<? extends AbstractWidget> controls) {
-        int requiredWidth = Math.min(320, metrics.targetCellWidth());
-        for (AbstractWidget control : controls) {
-            int padding = control instanceof Dropdown<?> ? 34 : 18;
-            requiredWidth = Math.max(requiredWidth, font.width(control.getMessage()) + padding);
-        }
-        requiredWidth = Math.min(contentWidth, requiredWidth);
-        return Math.clamp((contentWidth + metrics.gridGap()) / (requiredWidth + metrics.gridGap()), 1, gridColumns);
+    private int sectionWidth() {
+        return metrics.mode() == SettingsUiMetrics.Mode.WIDE ? metrics.targetCellWidth() : contentWidth;
     }
 
-    private int computePreferredRailWidth() {
-        int widest = font.width("Search...");
-        for (Page value : Page.values()) widest = Math.max(widest, font.width(value.label()));
-        List<CausticaMenuUsage.Item> recent = CausticaMenuUsage.INSTANCE.recent(8);
-        List<CausticaMenuUsage.Item> frequent = CausticaMenuUsage.INSTANCE.frequent(8, recent);
-        for (CausticaMenuUsage.Item item : recent) widest = Math.max(widest, font.width(item.label()));
-        for (CausticaMenuUsage.Item item : frequent) widest = Math.max(widest, font.width(item.label()));
-        return Math.clamp(widest + 32, MIN_RAIL_WIDTH, MAX_RAIL_WIDTH);
+    private static int sectionSplit(Page page) {
+        return switch (page) {
+            case RECONSTRUCTION, MATERIALS -> 1;
+            case LIGHTING, SKY_ATMOSPHERE, GEOMETRY_SCENE, SHARC, FIRST_PERSON, DIAGNOSTICS -> 2;
+            case DENOISING, EXPOSURE_TONEMAP -> 3;
+            default -> 1;
+        };
+    }
+
+    private int columnsFor(List<? extends AbstractWidget> controls) {
+        return gridColumns;
     }
 
     static <T> List<T> ordered(List<T> items, int... order) {
@@ -1238,24 +1416,64 @@ public class CausticaSettingsScreen extends Screen {
 
     private void registerControls(List<? extends AbstractWidget> controls) {
         for (AbstractWidget control : controls) {
-            boolean trackable = control instanceof LabeledControl || toneResets.containsKey(control);
+            boolean trackable = control instanceof LabeledControl || toneResets.containsKey(control)
+                    || boundControlIds.containsKey(control);
             String label = trackable ? controlLabel(control) : null;
-            Control catalogControl = trackable ? SettingsCatalog.byLocalizedLabel(label) : null;
-            String id = catalogControl != null ? catalogControl.id()
-                    : trackable ? CausticaMenuUsage.normalize(label) : null;
+            String labelKey = trackable ? controlLabelKey(control) : null;
+            String boundId = boundControlIds.get(control);
+            Control catalogControl = boundId == null ? SettingsCatalog.byLabelKey(labelKey)
+                    : SettingsCatalog.byId(boundId);
+            String id = catalogControl == null ? boundId : catalogControl.id();
+            if (id == null && trackable) id = stableControlId(labelKey, buildingCategory);
             if (control instanceof Dropdown<?> dropdown) dropdowns.add(dropdown);
             if (!trackable) continue;
             usageLabels.put(control, label);
             usageIds.put(control, id);
             Page owner = catalogControl != null ? catalogControl.page() : buildingCategory;
             usageCategories.put(control, owner);
-            controlCategories.putIfAbsent(id, owner);
+            anchorIds.put(control, id);
+            anchorWidgets.putIfAbsent(id, control);
             Runnable reset = controlResets.get(control);
             if (reset != null) pageResets.computeIfAbsent(buildingCategory, ignored -> new ArrayList<>()).add(reset);
             if (pendingTargetId != null && pendingTargetId.equals(id) && buildingCategory == category) {
                 targetWidget = control;
+                temporaryExpandedSectionId = activeBundleId;
             }
         }
+    }
+
+    private static String controlLabelKey(AbstractWidget control) {
+        Component component = control instanceof LabeledControl labeled
+                ? labeled.causticaLabel() : control.getMessage();
+        return translationKey(component);
+    }
+
+    private static String translationKey(Component component) {
+        if (component == null) return null;
+        if (component.getContents() instanceof TranslatableContents translated) {
+            if (translated.getKey().startsWith("caustica.")) return translated.getKey();
+            for (Object argument : translated.getArgs()) {
+                if (argument instanceof Component child) {
+                    String nested = translationKey(child);
+                    if (nested != null) return nested;
+                }
+            }
+        }
+        for (Component sibling : component.getSiblings()) {
+            String nested = translationKey(sibling);
+            if (nested != null) return nested;
+        }
+        return null;
+    }
+
+    private static String stableControlId(String labelKey, Page page) {
+        if (labelKey == null || labelKey.isBlank()) {
+            throw new IllegalStateException("Trackable settings control has no stable translation key on "
+                    + page.routeId());
+        }
+        String token = labelKey.startsWith("caustica.options.")
+                ? labelKey.substring("caustica.options.".length()) : labelKey;
+        return page.routeId() + "." + token;
     }
 
     private static String controlLabel(AbstractWidget control) {
@@ -1268,6 +1486,7 @@ public class CausticaSettingsScreen extends Screen {
     }
 
     private void addInfo(java.util.function.Supplier<Component> text) {
+        sectionColumns = null;
         activeBundle = null;
         body.addChild(new InfoStrip(contentWidth, text));
     }
@@ -1277,11 +1496,26 @@ public class CausticaSettingsScreen extends Screen {
                 CausticaConfig.Rt.Hdr.ENABLED::configuredValue, enabled -> {
                     CausticaConfig.Rt.Hdr.ENABLED.set(enabled);
                     pendingSwapchainRecreate = true;
+                    if (category == Page.ESSENTIALS) rebuild();
                 }).tooltip(Component.translatable("caustica.options.rt.hdr.tooltip"))
                 .resetOnShift(() -> {
                     CausticaConfig.Rt.Hdr.ENABLED.set(CausticaConfig.Rt.Hdr.ENABLED.defaultValue());
                     pendingSwapchainRecreate = true;
+                    if (category == Page.ESSENTIALS) rebuild();
                 });
+    }
+
+    private List<AbstractWidget> hdrBrightnessControls() {
+        return List.of(
+                floatSlider(Component.translatable("caustica.options.rt.hdrPaperWhite"),
+                        CausticaConfig.Rt.Hdr.PAPER_WHITE_NITS, 80, 1000,
+                        value -> String.format(Locale.ROOT, "%.0f nits", value)),
+                floatSlider(Component.translatable("caustica.options.rt.hdrPeak"),
+                        CausticaConfig.Rt.Hdr.PEAK_NITS, 80, 10000,
+                        value -> String.format(Locale.ROOT, "%.0f nits", value)),
+                floatSlider(Component.translatable("caustica.options.rt.hdrUiBrightness"),
+                        CausticaConfig.Rt.Hdr.UI_BRIGHTNESS_NITS, 40, 1000,
+                        value -> String.format(Locale.ROOT, "%.0f nits", value)));
     }
 
     private Dropdown<String> hdrTonemapper() {
@@ -1325,10 +1559,9 @@ public class CausticaSettingsScreen extends Screen {
 
     private Dropdown<Integer> dlssQualityControl() {
         return new Dropdown<>(metrics.targetCellWidth(), Component.translatable("caustica.options.rt.dlssQuality"),
-                List.of(3, 0, 1, 2, 5, RtResolutionScale.CUSTOM_QUALITY), RtResolutionScale::displayedQuality,
-                quality -> {
-                    if (quality != RtResolutionScale.CUSTOM_QUALITY) selectDlssQuality(quality);
-                }, CausticaSettingsScreen::dlssQualityLabel, null).activeWhen(this::dlssControlsActive);
+                DLSS_QUALITY_ORDER, RtResolutionScale::displayedQuality,
+                CausticaSettingsScreen::selectDlssQuality,
+                CausticaSettingsScreen::dlssQualityLabel, null).activeWhen(this::dlssControlsActive);
     }
 
     private Dropdown<Integer> dlssPresetControl() {
@@ -1339,22 +1572,6 @@ public class CausticaSettingsScreen extends Screen {
                     case 5 -> "e";
                     default -> "default";
                 }), null).activeWhen(this::dlssControlsActive);
-    }
-
-    private Slider dlssInputRatioControl() {
-        int minimum = RtResolutionScale.MIN_INPUT_RATIO_TENTHS;
-        int maximum = RtResolutionScale.MAX_INPUT_RATIO_TENTHS;
-        return new Slider(metrics.targetCellWidth(), Component.translatable("caustica.options.rt.dlssInputRatio"),
-                CausticaConfig.Rt.DlssRr.INPUT_RATIO_TENTHS::configuredValue, value -> {
-                    CausticaConfig.Rt.DlssRr.INPUT_RATIO_TENTHS.set(
-                            RtResolutionScale.clampInputTenths((int)Math.round(value)));
-                    RtComposite.INSTANCE.requestResolutionScaleCommit();
-                }, unit -> minimum + unit * (maximum - minimum),
-                value -> (value - minimum) / (maximum - minimum), value -> {
-                    double ratio = value / 10.0;
-                    return String.format(Locale.ROOT, "%.0f%% input · %.1fx upscale", 100.0 / ratio, ratio);
-                }).snapTo(List.of(10, 15, 17, 20, 30), 1).activeWhen(this::dlssControlsActive)
-                .tooltip(Component.translatable("caustica.options.rt.dlssInputRatio.tooltip"));
     }
 
     private Component resolutionSummary() {
@@ -1396,10 +1613,12 @@ public class CausticaSettingsScreen extends Screen {
     }
 
     private ActionButton vsyncControl() {
-        return new ActionButton(metrics.targetCellWidth(), () -> SettingsRuntimeStatus.vsync(options), () -> {
+        ActionButton button = new ActionButton(metrics.targetCellWidth(), () -> SettingsRuntimeStatus.vsync(options), () -> {
             options.enableVsync().set(!options.enableVsync().get());
             pendingSwapchainRecreate = true;
         }, false).tooltip(Component.translatable("caustica.options.rt.fg.vsync.tooltip"));
+        boundControlIds.put(button, Control.FG_VSYNC.id());
+        return button;
     }
 
     private Slider torchIntensityControl() {
@@ -1433,7 +1652,6 @@ public class CausticaSettingsScreen extends Screen {
 
     private static Component dlssQualityLabel(int quality) {
         Component name = Component.translatable("caustica.options.rt.dlssQuality." + quality);
-        if (quality == RtResolutionScale.CUSTOM_QUALITY) return name;
         return name.copy().append(String.format(Locale.ROOT, " (%.2fx)",
                 RtResolutionScale.presetUpscaleRatio(quality)));
     }
@@ -1590,8 +1808,28 @@ public class CausticaSettingsScreen extends Screen {
 
     private void rememberMenuPosition() {
         if (bodyScrollArea != null && searchQuery.isBlank()) {
-            CausticaMenuUsage.INSTANCE.setMenuPosition(category.routeId(), bodyScrollArea.scrollAmount());
+            uiState.setLastPage(category);
+            SettingsUiState.PageBookmark bookmark = captureBookmark();
+            if (bookmark != null) uiState.setPageBookmark(category, bookmark);
         }
+    }
+
+    private SettingsUiState.PageBookmark captureBookmark() {
+        if (bodyScrollArea == null || metrics == null) return null;
+        int viewportTop = metrics.bodyTop();
+        int viewportBottom = viewportTop + metrics.bodyHeight();
+        Map.Entry<AbstractWidget, String> anchor = anchorIds.entrySet().stream()
+                .filter(entry -> entry.getKey().visible)
+                .filter(entry -> entry.getKey().getBottom() > viewportTop
+                        && entry.getKey().getY() < viewportBottom)
+                .min(java.util.Comparator.<Map.Entry<AbstractWidget, String>>comparingInt(
+                                entry -> entry.getKey().getY())
+                        .thenComparingInt(entry -> entry.getKey().getX()))
+                .orElse(null);
+        String anchorId = anchor == null ? "" : anchor.getValue();
+        double anchorTop = anchor == null ? viewportTop : anchor.getKey().getY();
+        return SettingsUiState.PageBookmark.capture(anchorId, anchorTop, viewportTop,
+                metrics.bodyHeight(), bodyScrollArea.scrollAmount(), bodyScrollArea.maxScrollAmount());
     }
 
     private void restorePositionOrRevealTarget(int bodyTop) {
@@ -1603,12 +1841,61 @@ public class CausticaSettingsScreen extends Screen {
             flashUntilMillis = System.currentTimeMillis() + TARGET_FLASH_MILLIS;
             pendingTargetId = null;
         } else if (searchQuery.isBlank()) {
-            bodyScrollArea.setScrollAmount(CausticaMenuUsage.INSTANCE.scrollPosition(category.routeId()));
+            SettingsUiState.PageBookmark bookmark = uiState.pageBookmark(category);
+            if (bookmark != null) {
+                restoreBookmark(bookmark);
+            } else {
+                bodyScrollArea.setScrollAmount(CausticaMenuUsage.INSTANCE.scrollPosition(category));
+                SettingsUiState.PageBookmark migrated = captureBookmark();
+                if (migrated != null) uiState.setPageBookmark(category, migrated);
+            }
         }
     }
 
+    private void restoreBookmark(SettingsUiState.PageBookmark bookmark) {
+        if (bodyScrollArea == null || bookmark == null) return;
+        AbstractWidget anchor = anchorWidgets.get(bookmark.anchorId());
+        double scroll = anchor == null
+                ? bookmark.fallbackScroll(bodyScrollArea.maxScrollAmount())
+                : bookmark.restoredScroll(anchor.getY() + bodyScrollArea.scrollAmount(),
+                        metrics.bodyTop(), metrics.bodyHeight(),
+                        bodyScrollArea.maxScrollAmount());
+        bodyScrollArea.setScrollAmount(scroll);
+    }
+
+    private void reflowPage(SettingsUiState.PageBookmark bookmark) {
+        if (bodyScroll == null) return;
+        bodyScroll.arrangeElements();
+        restoreBookmark(bookmark);
+    }
+
+    @Override
     protected void repositionElements() {
+        if (initializedWidth != width || initializedHeight != height) {
+            rememberMenuPosition();
+            super.repositionElements();
+            return;
+        }
+        saved = false;
         if (bodyScroll != null) bodyScroll.arrangeElements();
+        if (navigationScroll != null) navigationScroll.arrangeElements();
+    }
+
+    @Override
+    public void added() {
+        saved = false;
+        navigationOpen = false;
+        if (navigationScrollArea != null && metrics != null && metrics.compact()) {
+            navigationScrollArea.visible = false;
+            navigationScrollArea.active = false;
+        }
+        super.added();
+    }
+
+    @Override
+    public void extractBackground(GuiGraphicsExtractor g, int mouseX, int mouseY, float partialTick) {
+        if (minecraft.level == null) g.fill(0, 0, width, height, 0xE0101010);
+        minecraft.gui.hud.extractDeferredSubtitles();
     }
 
     @Override
@@ -1617,31 +1904,47 @@ public class CausticaSettingsScreen extends Screen {
         int paneRight = metrics.paneRight();
         int railLeft = metrics.workspaceLeft();
         int railBottom = metrics.footerTop(height);
-        g.fill(railLeft + railWidth + 5, metrics.margin(), railLeft + railWidth + 6,
-                railBottom, 0x70FFFFFF);
+        g.fill(metrics.workspaceLeft(), metrics.margin(), metrics.workspaceRight(),
+                height - metrics.margin(), CausticaWidgets.PANEL);
+        if (!metrics.compact()) {
+            g.fill(railLeft + railWidth + 5, metrics.margin(), railLeft + railWidth + 6,
+                    railBottom, 0x70FFFFFF);
+        }
         g.fill(railLeft, metrics.margin() + metrics.headerHeight(), paneRight,
                 metrics.margin() + metrics.headerHeight() + 1, 0x50FFFFFF);
-        g.text(font, searchQuery.isBlank() ? category.label() : Component.translatable("caustica.options.search.results"),
-                paneLeft + 2, metrics.margin() + 7, CausticaWidgets.ACCENT);
-        for (QuickHeading heading : quickHeadings) {
-            g.text(font, Component.literal(heading.label()), railLeft + 2, heading.y(), CausticaWidgets.MUTED);
-            int lineLeft = railLeft + 8 + font.width(heading.label());
-            int lineRight = railLeft + railWidth - 4;
-            if (lineLeft < lineRight) g.fill(lineLeft, heading.y() + 4, lineRight, heading.y() + 5, 0x40777777);
+        if (!metrics.compact()) {
+            g.text(font, searchQuery.isBlank() ? category.label()
+                            : Component.translatable("caustica.options.search.results"),
+                    paneLeft + 2, metrics.margin() + 7, CausticaWidgets.ACCENT);
         }
         g.fill(paneLeft, metrics.footerTop(height), paneRight,
                 metrics.footerTop(height) + 1, 0x50FFFFFF);
         g.text(font, Component.translatable("caustica.options.info.shiftReset"),
                 paneLeft + 2, metrics.footerTop(height) + 8, CausticaWidgets.MUTED);
-        extractTargetFlash(g);
+        boolean drawModalNavigation = metrics.compact() && navigationOpen && navigationScrollArea != null;
+        if (drawModalNavigation) navigationScrollArea.visible = false;
         super.extractRenderState(g, mouseX, mouseY, partialTick);
-        if (selectedCategoryButton != null) {
+        if (drawModalNavigation) {
+            navigationScrollArea.visible = true;
+            g.fill(0, metrics.bodyTop(), width, metrics.footerTop(height), 0x78000000);
+            g.fill(navigationLeft - 4, navigationTop - 4,
+                    navigationLeft + navigationWidth + 4, navigationTop + navigationHeight + 4,
+                    0xE0181818);
+            navigationScrollArea.extractRenderState(g, mouseX, mouseY, partialTick);
+        }
+        extractTargetFlash(g);
+        if (selectedCategoryButton != null
+                && (!metrics.compact() || navigationOpen)
+                && selectedCategoryButton.getBottom() > navigationTop
+                && selectedCategoryButton.getY() < navigationTop + navigationHeight) {
             g.fill(selectedCategoryButton.getX(), selectedCategoryButton.getY(),
                     selectedCategoryButton.getX() + 2, selectedCategoryButton.getBottom(),
                     CausticaWidgets.ACCENT);
         }
-        for (Dropdown<?> dropdown : dropdowns) {
-            dropdown.extractOverlay(g, mouseX, mouseY, height);
+        if (!navigationOpen) {
+            for (Dropdown<?> dropdown : dropdowns) {
+                dropdown.extractOverlay(g, mouseX, mouseY, height);
+            }
         }
     }
 
@@ -1666,6 +1969,14 @@ public class CausticaSettingsScreen extends Screen {
 
     @Override
     public boolean mouseClicked(MouseButtonEvent input, boolean doubleClick) {
+        if (navigationOpen && navigationScrollArea != null) {
+            if (insideNavigation(input.x(), input.y())) {
+                navigationScrollArea.mouseClicked(input, doubleClick);
+            } else {
+                setNavigationOpen(false);
+            }
+            return true;
+        }
         Dropdown<?> open = null;
         for (Dropdown<?> dropdown : dropdowns) {
             if (!dropdown.isOpen()) continue;
@@ -1677,7 +1988,7 @@ public class CausticaSettingsScreen extends Screen {
             else dropdown.close();
         }
         if (open != null && !open.isMouseOver(input.x(), input.y())) open.close();
-        if (input.hasShiftDown()) {
+        if (input.hasShiftDown() && insideBody(input.x(), input.y())) {
             for (Map.Entry<AbstractWidget, Runnable> entry : toneResets.entrySet()) {
                 AbstractWidget widget = entry.getKey();
                 if (widget.visible && widget.active && widget.isMouseOver(input.x(), input.y())) {
@@ -1690,6 +2001,7 @@ public class CausticaSettingsScreen extends Screen {
         }
         AbstractWidget used = usageLabels.keySet().stream()
                 .filter(widget -> !(widget instanceof Dropdown<?>))
+                .filter(widget -> insideBody(input.x(), input.y()))
                 .filter(widget -> widget.visible && widget.active && widget.isMouseOver(input.x(), input.y()))
                 .findFirst().orElse(null);
         boolean handled = super.mouseClicked(input, doubleClick);
@@ -1699,14 +2011,51 @@ public class CausticaSettingsScreen extends Screen {
 
     @Override
     public boolean mouseScrolled(double mouseX, double mouseY, double horizontal, double vertical) {
+        if (navigationOpen && navigationScrollArea != null) {
+            if (insideNavigation(mouseX, mouseY) && vertical != 0.0) {
+                navigationScrollArea.setScrollAmount(navigationScrollArea.scrollAmount()
+                        - vertical * (metrics.controlHeight() + metrics.gridGap()));
+            }
+            return true;
+        }
         for (Dropdown<?> dropdown : dropdowns) {
             if (dropdown.scrollOverlay(mouseX, mouseY, vertical, height)) return true;
         }
-        return super.mouseScrolled(mouseX, mouseY, horizontal, vertical);
+        if (!metrics.compact() && navigationScrollArea != null && insideNavigation(mouseX, mouseY)
+                && vertical != 0.0) {
+            navigationScrollArea.setScrollAmount(navigationScrollArea.scrollAmount()
+                    - vertical * (metrics.controlHeight() + metrics.gridGap()));
+            return true;
+        }
+        if (bodyScrollArea != null && insideBody(mouseX, mouseY) && vertical != 0.0) {
+            dropdowns.forEach(Dropdown::close);
+            bodyScrollArea.setScrollAmount(bodyScrollArea.scrollAmount()
+                    - vertical * (metrics.controlHeight() + metrics.gridGap()));
+            return true;
+        }
+        return false;
+    }
+
+    private boolean insideBody(double x, double y) {
+        return metrics != null && x >= metrics.paneLeft() && x < metrics.paneRight()
+                && y >= metrics.bodyTop() && y < metrics.bodyTop() + metrics.bodyHeight();
+    }
+
+    private boolean insideNavigation(double x, double y) {
+        return x >= navigationLeft && x < navigationLeft + navigationWidth
+                && y >= navigationTop && y < navigationTop + navigationHeight;
     }
 
     @Override
     public boolean keyPressed(KeyEvent input) {
+        if (navigationOpen && input.key() == GLFW.GLFW_KEY_ESCAPE) {
+            setNavigationOpen(false);
+            return true;
+        }
+        if (navigationOpen && navigationContainer != null) {
+            navigationContainer.keyPressed(input);
+            return true;
+        }
         for (Dropdown<?> dropdown : dropdowns) {
             if (dropdown.keyPressed(input.key())) return true;
         }
@@ -1751,6 +2100,7 @@ public class CausticaSettingsScreen extends Screen {
         saved = true;
         CausticaMenuUsage.INSTANCE.save();
         CausticaTreeState.INSTANCE.save();
+        uiState.save();
         CausticaConfig.save();
         options.save();
         if (pendingSwapchainRecreate || initiallyFgRequested != CausticaConfig.Rt.Fg.requested()) {
@@ -1780,6 +2130,4 @@ public class CausticaSettingsScreen extends Screen {
         if (label != null) CausticaMenuUsage.INSTANCE.record(usageIds.get(widget), label, owner);
     }
 
-    private record QuickHeading(String label, int y) {
-    }
 }
