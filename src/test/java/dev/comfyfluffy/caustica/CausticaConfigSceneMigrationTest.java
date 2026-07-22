@@ -373,14 +373,14 @@ final class CausticaConfigSceneMigrationTest {
     }
 
     @Test
-    void schema14UnifiesCelestialLightBouncesIntoMaxBounces() {
+    void schema14RemovesRetiredCelestialLightBounces() {
         CommentedConfig defaults = CommentedConfig.inMemory();
         defaults.set("config-version", 13);
         defaults.set("composite.max-bounces", 8.0);
         defaults.set("composite.celestial-light-bounces", 4.0);
         assertTrue(CausticaConfig.migrateLegacySceneConfig(defaults));
         assertEquals(CausticaConfig.CONFIG_SCHEMA_VERSION, ((Number) defaults.get("config-version")).intValue());
-        assertEquals(64.0, ((Number) defaults.get("composite.max-bounces")).doubleValue());
+        assertEquals(8.0, ((Number) defaults.get("composite.max-bounces")).doubleValue());
         assertFalse(defaults.contains("composite.celestial-light-bounces"));
 
         CommentedConfig custom = CommentedConfig.inMemory();
@@ -391,6 +391,53 @@ final class CausticaConfigSceneMigrationTest {
         assertEquals(CausticaConfig.CONFIG_SCHEMA_VERSION, ((Number) custom.get("config-version")).intValue());
         assertEquals(16.0, ((Number) custom.get("composite.max-bounces")).doubleValue());
         assertFalse(custom.contains("composite.celestial-light-bounces"));
+    }
+
+    @Test
+    void schemaFourteenGeneratedDefaultsAreCorrected() {
+        CommentedConfig config = CommentedConfig.inMemory();
+        config.set("config-version", 14);
+        config.set("composite.max-bounces", 64);
+        config.set("lights.ris-candidates", 8);
+
+        assertTrue(CausticaConfig.migrateLegacySceneConfig(config));
+        assertEquals(8, ((Number) config.get("composite.max-bounces")).intValue());
+        assertEquals(0, ((Number) config.get("lights.ris-candidates")).intValue());
+        assertEquals(15, ((Number) config.get("config-version")).intValue());
+    }
+
+    @Test
+    void schemaFourteenCustomValuesSurvive() {
+        CommentedConfig config = CommentedConfig.inMemory();
+        config.set("config-version", 14);
+        config.set("composite.max-bounces", 24);
+        config.set("lights.ris-candidates", 4);
+
+        assertTrue(CausticaConfig.migrateLegacySceneConfig(config));
+        assertEquals(24, ((Number) config.get("composite.max-bounces")).intValue());
+        assertEquals(4, ((Number) config.get("lights.ris-candidates")).intValue());
+    }
+
+    @Test
+    void directSchemaThirteenCustomSixtyFourSurvives() {
+        CommentedConfig config = CommentedConfig.inMemory();
+        config.set("config-version", 13);
+        config.set("composite.max-bounces", 64);
+        config.set("lights.ris-candidates", 8);
+
+        assertTrue(CausticaConfig.migrateLegacySceneConfig(config));
+        assertEquals(64, ((Number) config.get("composite.max-bounces")).intValue());
+        assertEquals(8, ((Number) config.get("lights.ris-candidates")).intValue());
+    }
+
+    @Test
+    void directSchemaThirteenDefaultEightStaysEight() {
+        CommentedConfig config = CommentedConfig.inMemory();
+        config.set("config-version", 13);
+        config.set("composite.max-bounces", 8);
+
+        assertTrue(CausticaConfig.migrateLegacySceneConfig(config));
+        assertEquals(8, ((Number) config.get("composite.max-bounces")).intValue());
     }
 
     @Test

@@ -32,7 +32,7 @@ import org.slf4j.LoggerFactory;
 public final class CausticaConfig {
     private static final Logger LOGGER = LoggerFactory.getLogger("Caustica");
     private static final List<RuntimeSetting<?>> SETTINGS = new CopyOnWriteArrayList<>();
-    static final int CONFIG_SCHEMA_VERSION = 14;
+    static final int CONFIG_SCHEMA_VERSION = 15;
 
     private static final Path CONFIG_PATH = resolveConfigPath();
     private static final CommentedFileConfig FILE = loadAndMigrateFile(CONFIG_PATH);
@@ -373,13 +373,21 @@ public final class CausticaConfig {
         if (version < 14) {
             applySchema14Defaults(config);
         }
+        if (version == 14) {
+            applySchema15CompatibilityDefaults(config);
+        }
         config.set("config-version", CONFIG_SCHEMA_VERSION);
         return true;
     }
 
     private static void applySchema14Defaults(CommentedConfig config) {
-        migrateExactNumber(config, "composite.max-bounces", 8.0, 64.0);
         config.remove("composite.celestial-light-bounces");
+    }
+
+    private static void applySchema15CompatibilityDefaults(CommentedConfig config) {
+        // Only schema-14 files could have received the faulty generated defaults in the prior release.
+        migrateExactNumber(config, "composite.max-bounces", 64.0, 8.0);
+        migrateExactNumber(config, "lights.ris-candidates", 8.0, 0.0);
     }
 
     private static boolean isNrdBackend(CommentedConfig config) {
