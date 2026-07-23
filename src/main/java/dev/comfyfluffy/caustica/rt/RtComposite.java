@@ -143,6 +143,14 @@ public final class RtComposite {
         requestedSharcEncoding.set(Objects.requireNonNull(encoding, "encoding"));
     }
 
+    /** The encoding currently driving the live pipeline, or the requested encoding if SHaRC is not active. */
+    public SharcRadianceEncoding activeSharcRadianceEncoding() {
+        if (sharcCache != null) {
+            return activeSharcEncoding;
+        }
+        return requestedSharcEncoding.get();
+    }
+
     private static SharcRadianceEncoding configuredSharcEncoding() {
         SharcRadianceEncoding[] values = SharcRadianceEncoding.values();
         int index = Math.max(0, Math.min(values.length - 1,

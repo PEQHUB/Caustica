@@ -26,8 +26,8 @@ final class SettingsCatalogTest {
             assertSame(control, SettingsCatalog.byId(control.id()));
             assertSame(control, SettingsCatalog.byLabelKey(control.labelKey()));
         }
-        assertEquals(205, ids.size());
-        assertEquals(205, SettingsCatalog.Control.values().length);
+        assertEquals(206, ids.size());
+        assertEquals(206, SettingsCatalog.Control.values().length);
     }
 
     @Test
@@ -125,9 +125,9 @@ final class SettingsCatalogTest {
                 .filter(control -> control.id().startsWith("tone."))
                 .toList();
         assertEquals(39, dynamic.size());
-        assertEquals(166, SettingsCatalog.allControls().size() - dynamic.size());
+        assertEquals(167, SettingsCatalog.allControls().size() - dynamic.size());
         // Five output controls are deliberately placed on both Display/HDR and Exposure.
-        assertEquals(171, SettingsCatalog.allControls().size() - dynamic.size() + 5);
+        assertEquals(172, SettingsCatalog.allControls().size() - dynamic.size() + 5);
 
         Set<String> dynamicLabels = dynamic.stream().map(SettingsCatalog.ControlDescriptor::labelKey)
                 .collect(Collectors.toSet());
@@ -183,7 +183,7 @@ final class SettingsCatalogTest {
                 Map.entry(SettingsCatalog.Page.LIGHTING, 5L),
                 Map.entry(SettingsCatalog.Page.SKY_ATMOSPHERE, 37L),
                 Map.entry(SettingsCatalog.Page.GEOMETRY_SCENE, 8L),
-                Map.entry(SettingsCatalog.Page.SHARC, 14L),
+                Map.entry(SettingsCatalog.Page.SHARC, 15L),
                 Map.entry(SettingsCatalog.Page.MATERIALS, 8L),
                 Map.entry(SettingsCatalog.Page.EXPOSURE_TONEMAP, 54L),
                 Map.entry(SettingsCatalog.Page.FIRST_PERSON, 6L),

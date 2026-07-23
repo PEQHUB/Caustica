@@ -530,7 +530,7 @@ public final class SettingsCatalog {
                 "point sample textures", "nearest filtering"));
 
         add(controls, Page.SHARC, "sharc.foundation", Tier.EXPERT, ChangeEffect.SHARC_RESET,
-                "sharc", "caustica.options.rt.", "sharcMemory", "sharcSceneScale", "sharcRadianceScale");
+                "sharc", "caustica.options.rt.", "sharcMemory", "sharcEncoding", "sharcSceneScale", "sharcRadianceScale");
         add(controls, Page.SHARC, "sharc.cadence", Tier.EXPERT, ChangeEffect.SHARC_RESET,
                 "sharc", "caustica.options.rt.",
                 "sharcAccumulationFrames", "sharcStaleFrames", "sharcUpdateTileSize",

@@ -30,6 +30,7 @@ import dev.comfyfluffy.caustica.rt.RtComposite;
 import dev.comfyfluffy.caustica.rt.RtHdr;
 import dev.comfyfluffy.caustica.rt.RtResolutionScale;
 import dev.comfyfluffy.caustica.rt.RtSharcSupport;
+import dev.comfyfluffy.caustica.rt.SharcRadianceEncoding;
 import dev.comfyfluffy.caustica.rt.pipeline.RtReconstruction;
 import dev.comfyfluffy.caustica.rt.pipeline.RtDlssRr;
 import dev.comfyfluffy.caustica.rt.terrain.RtTerrain;
@@ -900,6 +901,20 @@ public class CausticaSettingsScreen extends Screen {
                 .tooltip(Component.translatable("caustica.options.rt.sharcMemory.tooltip"))
                 .resetOnShift(() -> CausticaConfig.Rt.Sharc.CACHE_EXPONENT.set(
                         CausticaConfig.Rt.Sharc.CACHE_EXPONENT.defaultValue())));
+        controls.add(new Dropdown<>(180, Component.translatable("caustica.options.rt.sharcEncoding"),
+                List.of(SharcRadianceEncoding.RGB, SharcRadianceEncoding.DIRECTIONAL_SH),
+                CausticaSettingsScreen::configuredSharcRadianceEncoding,
+                value -> {
+                    CausticaConfig.Rt.Sharc.RADIANCE_ENCODING.set(value.ordinal());
+                    RtComposite.INSTANCE.requestSharcEncoding(value);
+                },
+                value -> Component.translatable("caustica.options.rt.sharcEncoding." + value.name()),
+                null)
+                .tooltip(Component.translatable("caustica.options.rt.sharcEncoding.tooltip"))
+                .resetOnShift(() -> {
+                    CausticaConfig.Rt.Sharc.RADIANCE_ENCODING.set(SharcRadianceEncoding.RGB.ordinal());
+                    RtComposite.INSTANCE.requestSharcEncoding(SharcRadianceEncoding.RGB);
+                }));
         controls.add(sharcFloatSlider("caustica.options.rt.sharcSceneScale",
                 CausticaConfig.Rt.Sharc.SCENE_SCALE, 1.0, 100.0, 0.25,
                 value -> String.format(Locale.ROOT, "%.2f", value)));
@@ -942,13 +957,13 @@ public class CausticaSettingsScreen extends Screen {
                 CausticaConfig.Rt.Sharc.DETAILED_STATS)
                 .tooltip(Component.translatable("caustica.options.rt.sharcDetailedStats.tooltip")));
         addBundle("sharc.foundation");
-        addGrid(controls.subList(0, 4));
+        addGrid(controls.subList(0, 5));
         addBundle("sharc.cadence");
-        addGrid(controls.subList(4, 9));
+        addGrid(controls.subList(5, 10));
         addBundle("sharc.transport");
-        addGrid(controls.subList(9, 13));
+        addGrid(controls.subList(10, 14));
         addBundle("sharc.telemetry");
-        addGrid(controls.subList(13, 14));
+        addGrid(controls.subList(14, 15));
 
         addInfo(this::sharcStatusText);
         addGrid(List.of(
@@ -1721,9 +1736,18 @@ public class CausticaSettingsScreen extends Screen {
         return Component.translatable("caustica.options.info.sharcStatus", state);
     }
 
+    private static SharcRadianceEncoding configuredSharcRadianceEncoding() {
+        SharcRadianceEncoding[] values = SharcRadianceEncoding.values();
+        int configured = CausticaConfig.Rt.Sharc.RADIANCE_ENCODING.configuredValue();
+        int safeIndex = Math.max(0, Math.min(values.length - 1, configured));
+        return values[safeIndex];
+    }
+
     private void restoreSharcParityDefaults() {
         CausticaConfig.Rt.Sharc.ENABLED.set(true);
         CausticaConfig.Rt.Sharc.CACHE_EXPONENT.set(CausticaConfig.Rt.Sharc.CACHE_EXPONENT.defaultValue());
+        CausticaConfig.Rt.Sharc.RADIANCE_ENCODING.set(SharcRadianceEncoding.RGB.ordinal());
+        RtComposite.INSTANCE.requestSharcEncoding(SharcRadianceEncoding.RGB);
         CausticaConfig.Rt.Sharc.SCENE_SCALE.set(CausticaConfig.Rt.Sharc.SCENE_SCALE.defaultValue());
         CausticaConfig.Rt.Sharc.RADIANCE_SCALE.set(CausticaConfig.Rt.Sharc.RADIANCE_SCALE.defaultValue());
         CausticaConfig.Rt.Sharc.ACCUMULATION_FRAMES.set(CausticaConfig.Rt.Sharc.ACCUMULATION_FRAMES.defaultValue());
