@@ -17,7 +17,12 @@ $javaHome = 'C:\Program Files\Eclipse Adoptium\jdk-25.0.1.8-hotspot'
 $slangc = 'C:\Users\Administrator\Documents\Caustica-deps\slang-2026.13\bin\slangc.exe'
 $vulkanSdk = 'C:\VulkanSDK\1.4.341.1'
 $streamlineSdk = 'C:\Users\Administrator\Documents\Caustica-deps'
-$sharcSdk = Join-Path $repo '.deps\sharc-1.6.5.0'
+$defaultSharcSdk = Join-Path $repo '.deps\sharc-1.8.0.0'
+$sharcSdk = if ([string]::IsNullOrWhiteSpace($env:SHARC_SDK)) {
+    $defaultSharcSdk
+} else {
+    $env:SHARC_SDK
+}
 $gradle = Join-Path $repo 'gradlew.bat'
 $builtJar = Join-Path $repo 'build\libs\caustica-0.1.0.jar'
 $deployedJar = Join-Path $Instance 'mods\caustica-0.1.0.jar'
@@ -73,10 +78,13 @@ $artifactMode = $Mode -in @('Jar', 'Deploy', 'Full')
 $includeSharc = $WithSharc -or ($artifactMode -and -not $WithoutSharc)
 
 if ($includeSharc) {
-    if (-not (Test-Path -LiteralPath (Join-Path $sharcSdk 'include\HashGridCommon.h') -PathType Leaf)) {
-        & (Join-Path $PSScriptRoot 'fetch-sharc.ps1') -Destination $sharcSdk
-        if ($LASTEXITCODE -ne 0) { throw 'Pinned SHaRC fetch failed.' }
+    $requiredSharcHeader = Join-Path $sharcSdk 'include\SharcCommon.h'
+    if (-not (Test-Path -LiteralPath $requiredSharcHeader -PathType Leaf)) {
+        $fetchScript = Join-Path $PSScriptRoot 'fetch-sharc.ps1'
+        & $fetchScript -Destination $sharcSdk
+        if ($LASTEXITCODE -ne 0) { throw 'Pinned SHaRC 1.8 fetch failed.' }
     }
+    $sharcSdk = (Resolve-Path -LiteralPath $sharcSdk).Path
     $env:SHARC_SDK = $sharcSdk
 } else {
     Remove-Item Env:SHARC_SDK -ErrorAction SilentlyContinue
@@ -110,6 +118,16 @@ Write-Host "Pinned SHaRC:     $(if ($includeSharc) { $sharcSdk } else { 'off (ex
 Write-Host "Gradle tasks:     $($tasks -join ' ')"
 Write-Host "Build timeout:    $TimeoutSeconds seconds"
 
+if ($artifactMode) {
+    $staleArtifacts = @(
+        (Join-Path $repo 'build\libs\caustica-0.1.0.jar'),
+        (Join-Path $repo 'build\libs\caustica-0.1.0-dev.jar')
+    )
+    foreach ($staleArtifact in $staleArtifacts) {
+        Remove-Item -LiteralPath $staleArtifact -Force -ErrorAction SilentlyContinue
+    }
+}
+
 if ($Mode -eq 'Deploy') {
     Remove-Item -LiteralPath "$deployedJar.tmp" -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath "$deployedJar.bak" -Force -ErrorAction SilentlyContinue
@@ -121,6 +139,7 @@ if ($Mode -eq 'Deploy') {
 
 Push-Location $repo
 try {
+    $buildStartedUtc = [DateTime]::UtcNow
     $processArguments = @($gradleArguments + @('--console=plain', '--no-daemon')) |
         ForEach-Object { '"' + $_.Replace('"', '\"') + '"' }
     $commandLine = (Split-Path -Leaf $gradle) + ' ' + ($processArguments -join ' ')
@@ -146,6 +165,14 @@ try {
     $timer.Stop()
     Write-Host "Gradle finished in $([Math]::Round($timer.Elapsed.TotalSeconds, 1))s with exit code $($process.ExitCode)"
     if ($process.ExitCode -ne 0) { throw "Gradle failed with exit code $($process.ExitCode)" }
+
+    if ($artifactMode) {
+        Require-File $builtJar 'Remapped production Caustica JAR'
+        $artifactInfo = Get-Item -LiteralPath $builtJar
+        if ($artifactInfo.LastWriteTimeUtc -lt $buildStartedUtc) {
+            throw "Production JAR was not created by the current build: $($artifactInfo.FullName)"
+        }
+    }
 
     if ($Mode -in @('Jar', 'Deploy', 'Full')) {
         Require-File $builtJar 'Built Caustica JAR'
