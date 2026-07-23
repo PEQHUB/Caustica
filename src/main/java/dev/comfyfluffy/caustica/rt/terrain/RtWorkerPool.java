@@ -2,7 +2,6 @@ package dev.comfyfluffy.caustica.rt.terrain;
 
 import dev.comfyfluffy.caustica.CausticaConfig;
 import dev.comfyfluffy.caustica.CausticaMod;
-import dev.comfyfluffy.caustica.rt.TerrainJobOrder;
 
 import java.util.concurrent.PriorityBlockingQueue;
 import java.util.concurrent.ThreadFactory;
@@ -23,74 +22,156 @@ import java.util.concurrent.atomic.AtomicLong;
  * never block JVM exit.
  */
 public final class RtWorkerPool {
-    public static final RtWorkerPool INSTANCE = new RtWorkerPool();
-
     private ThreadPoolExecutor exec;
+    private boolean shuttingDown;
+
     private final AtomicLong nextSequence = new AtomicLong();
 
-    private RtWorkerPool() {}
+    /**
+     * Package-private so lifecycle behavior can be tested without mutating
+     * the process-wide singleton.
+     */
+    RtWorkerPool() {}
 
     private static int resolveThreads() {
         return CausticaConfig.Rt.WORKER_THREADS.value();
     }
 
-    private synchronized ThreadPoolExecutor executor() {
+    /**
+     * The caller must hold this object's monitor.
+     */
+    private ThreadPoolExecutor executorLocked() {
+        if (!Thread.holdsLock(this)) {
+            throw new AssertionError("RtWorkerPool lock is not held");
+        }
+
+        if (shuttingDown) {
+            throw new IllegalStateException("RT worker pool is shutting down");
+        }
+
         if (exec == null) {
             int threads = resolveThreads();
+
             ThreadFactory factory = new ThreadFactory() {
                 private final AtomicInteger n = new AtomicInteger();
+
                 @Override
-                public Thread newThread(Runnable r) {
-                    Thread t = new Thread(r, "rt-worker-" + n.incrementAndGet());
-                    t.setDaemon(true);
-                    t.setPriority(Thread.NORM_PRIORITY - 1);
-                    return t;
+                public Thread newThread(Runnable runnable) {
+                    Thread thread =
+                        new Thread(runnable, "rt-worker-" + n.incrementAndGet());
+
+                    thread.setDaemon(true);
+                    thread.setPriority(Thread.NORM_PRIORITY - 1);
+                    return thread;
                 }
             };
-            ThreadPoolExecutor e = new ThreadPoolExecutor(threads, threads, 30, TimeUnit.SECONDS,
-                    new PriorityBlockingQueue<>(), factory);
-            e.allowCoreThreadTimeOut(true);
-            exec = e;
-            CausticaMod.LOGGER.info("RT worker pool started with {} thread(s)", threads);
+
+            ThreadPoolExecutor created = new ThreadPoolExecutor(
+                threads,
+                threads,
+                30L,
+                TimeUnit.SECONDS,
+                new PriorityBlockingQueue<>(),
+                factory
+            );
+
+            created.allowCoreThreadTimeOut(true);
+            exec = created;
+
+            CausticaMod.LOGGER.info(
+                "RT worker pool started with {} thread(s)",
+                threads
+            );
         }
+
         return exec;
     }
 
-    /** Submit worker-owned RT preparation; completion is delivered by the task itself. */
+    /** Submit worker-owned RT preparation; completion is delivered by the task. */
     public void submit(Runnable job) {
         submit(false, job);
     }
 
     /** Submit terrain work with bounded interactive priority. */
     public void submit(boolean interactive, Runnable job) {
-        executor().execute(new WorkerTask(interactive, nextSequence.incrementAndGet(), job));
+        if (job == null) {
+            throw new NullPointerException("job");
+        }
+
+        synchronized (this) {
+            /*
+             * Calling execute while holding the same lock used by shutdown closes
+             * the executor-selection/shutdown race. Once this returns, the task
+             * has either been accepted or an exception has been delivered to the
+             * caller.
+             */
+            executorLocked().execute(
+                new WorkerTask(
+                    interactive,
+                    nextSequence.incrementAndGet(),
+                    job
+                )
+            );
+        }
     }
 
-    /** Stop all workers after joining queued jobs. Safe to call when never started. */
-    public synchronized void shutdown() {
-        if (exec != null) {
-            ThreadPoolExecutor stopping = exec;
-            stopping.shutdown();
-            boolean interrupted = false;
+    synchronized boolean isShuttingDown() {
+        return shuttingDown;
+    }
+
+    /**
+     * Stop all workers after joining every accepted job.
+     * Safe to call when never started and safe for concurrent callers.
+     */
+    public void shutdown() {
+        final ThreadPoolExecutor stopping;
+
+        synchronized (this) {
+            if (exec == null) {
+                return;
+            }
+
+            stopping = exec;
+
+            if (!shuttingDown) {
+                /*
+                 * No submitter can enter while this monitor is held.
+                 */
+                stopping.shutdown();
+                shuttingDown = true;
+            }
+        }
+
+        boolean interrupted = false;
+
+        while (!stopping.isTerminated()) {
             try {
-                while (!stopping.awaitTermination(Long.MAX_VALUE, TimeUnit.NANOSECONDS)) {
-                    // Unbounded wait is intentional: accepted terrain tasks own terminal callbacks.
-                }
-            } catch (InterruptedException e) {
+                stopping.awaitTermination(
+                    Long.MAX_VALUE,
+                    TimeUnit.NANOSECONDS
+                );
+            } catch (InterruptedException ignored) {
+                /*
+                 * Accepted terrain jobs own terminal callbacks, so teardown must
+                 * still drain them. Restore interruption after the drain.
+                 */
                 interrupted = true;
-                while (!stopping.isTerminated()) {
-                    try {
-                        stopping.awaitTermination(Long.MAX_VALUE, TimeUnit.NANOSECONDS);
-                    } catch (InterruptedException ignored) {
-                        interrupted = true;
-                    }
-                }
             }
-            exec = null;
-            if (interrupted) {
-                Thread.currentThread().interrupt();
-                throw new IllegalStateException("Interrupted while stopping RT worker pool");
+        }
+
+        synchronized (this) {
+            if (exec == stopping) {
+                exec = null;
+                shuttingDown = false;
+                notifyAll();
             }
+        }
+
+        if (interrupted) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException(
+                "Interrupted while stopping RT worker pool"
+            );
         }
     }
 
