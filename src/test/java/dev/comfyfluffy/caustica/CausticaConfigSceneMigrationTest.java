@@ -344,7 +344,7 @@ final class CausticaConfigSceneMigrationTest {
         assertEquals(CausticaConfig.CONFIG_SCHEMA_VERSION, ((Number) nonNrd.get("config-version")).intValue());
         assertEquals("dlss-rr", nonNrd.get("reconstruction.backend"));
         assertEquals(true, nonNrd.get("dlss-rr.enabled"));
-        assertEquals("D", nonNrd.get("dlss-rr.preset"));
+        assertEquals(3, ((Number) nonNrd.get("dlss-rr.preset")).intValue());
         assertEquals(20, ((Number) nonNrd.get("dlss-rr.input-scale-percent")).intValue());
 
         CommentedConfig defaultsAdded = CommentedConfig.inMemory();
@@ -354,7 +354,7 @@ final class CausticaConfigSceneMigrationTest {
         assertEquals(CausticaConfig.CONFIG_SCHEMA_VERSION, ((Number) defaultsAdded.get("config-version")).intValue());
         assertEquals("dlss-rr", defaultsAdded.get("reconstruction.backend"));
         assertEquals(true, defaultsAdded.get("dlss-rr.enabled"));
-        assertEquals("D", defaultsAdded.get("dlss-rr.preset"));
+        assertEquals(3, ((Number) defaultsAdded.get("dlss-rr.preset")).intValue());
         assertEquals(20, ((Number) defaultsAdded.get("dlss-rr.input-scale-percent")).intValue());
     }
 
@@ -403,7 +403,7 @@ final class CausticaConfigSceneMigrationTest {
         assertTrue(CausticaConfig.migrateLegacySceneConfig(config));
         assertEquals(8, ((Number) config.get("composite.max-bounces")).intValue());
         assertEquals(0, ((Number) config.get("lights.ris-candidates")).intValue());
-        assertEquals(15, ((Number) config.get("config-version")).intValue());
+        assertEquals(16, ((Number) config.get("config-version")).intValue());
     }
 
     @Test
@@ -457,5 +457,27 @@ final class CausticaConfigSceneMigrationTest {
         assertEquals("caustica", custom.get("hdr.tonemap-mode"));
         assertEquals(3, ((Number) custom.get("dlss-rr.quality")).intValue());
         assertEquals(26, ((Number) custom.get("sharc.cache-exponent")).intValue());
+    }
+
+    @Test
+    void schemaSixteenConvertsLegacyStringPresetToInteger() {
+        CommentedConfig config = CommentedConfig.inMemory();
+        config.set("config-version", 15);
+        config.set("dlss-rr.preset", "D");
+        assertTrue(CausticaConfig.migrateLegacySceneConfig(config));
+        assertEquals(16, ((Number) config.get("config-version")).intValue());
+        assertEquals(3, ((Number) config.get("dlss-rr.preset")).intValue());
+
+        CommentedConfig alreadyInteger = CommentedConfig.inMemory();
+        alreadyInteger.set("config-version", 15);
+        alreadyInteger.set("dlss-rr.preset", 5);
+        assertTrue(CausticaConfig.migrateLegacySceneConfig(alreadyInteger));
+        assertEquals(5, ((Number) alreadyInteger.get("dlss-rr.preset")).intValue());
+
+        CommentedConfig otherLetter = CommentedConfig.inMemory();
+        otherLetter.set("config-version", 15);
+        otherLetter.set("dlss-rr.preset", "A");
+        assertTrue(CausticaConfig.migrateLegacySceneConfig(otherLetter));
+        assertEquals("A", otherLetter.get("dlss-rr.preset"));
     }
 }

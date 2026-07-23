@@ -32,7 +32,7 @@ import org.slf4j.LoggerFactory;
 public final class CausticaConfig {
     private static final Logger LOGGER = LoggerFactory.getLogger("Caustica");
     private static final List<RuntimeSetting<?>> SETTINGS = new CopyOnWriteArrayList<>();
-    static final int CONFIG_SCHEMA_VERSION = 15;
+    static final int CONFIG_SCHEMA_VERSION = 16;
 
     private static final Path CONFIG_PATH = resolveConfigPath();
     private static final CommentedFileConfig FILE = loadAndMigrateFile(CONFIG_PATH);
@@ -384,6 +384,9 @@ public final class CausticaConfig {
         if (version == 14) {
             applySchema15CompatibilityDefaults(config);
         }
+        if (version <= 15) {
+            migrateLegacyStringPreset(config, "D", 3);
+        }
         config.set("config-version", CONFIG_SCHEMA_VERSION);
         return true;
     }
@@ -398,6 +401,13 @@ public final class CausticaConfig {
         migrateExactNumber(config, "lights.ris-candidates", 8.0, 0.0);
     }
 
+    private static void migrateLegacyStringPreset(CommentedConfig config, String letter, int integer) {
+        Object value = config.get("dlss-rr.preset");
+        if (letter.equals(value)) {
+            config.set("dlss-rr.preset", integer);
+        }
+    }
+
     private static boolean isNrdBackend(CommentedConfig config) {
         Object rawBackend = config.get("reconstruction.backend");
         return rawBackend instanceof String value && "nrd".equalsIgnoreCase(value.trim());
@@ -407,7 +417,7 @@ public final class CausticaConfig {
         if (!isNrdBackend(config)) {
             config.set("reconstruction.backend", "dlss-rr");
             config.set("dlss-rr.enabled", true);
-            config.set("dlss-rr.preset", "D");
+            config.set("dlss-rr.preset", 3);
             config.set("dlss-rr.input-scale-percent", 20);
         }
     }
