@@ -34,8 +34,11 @@ import static dev.comfyfluffy.caustica.rt.RtContext.check;
 /** Compute pass that maps the display-res HDR RT image into an LDR image compatible with the main target. */
 public final class RtDisplayPipeline {
     private static final String SHADER_DIR = "/caustica/rt/";
-    /** Keep this below Vulkan's 128-byte minimum push-constant guarantee. */
-    private static final int PUSH_BYTES = 124;
+    /**
+     * Vulkan implementations guarantee at least 128 bytes of push constants.
+     * The final float carries the optional under-lava camera animation time.
+     */
+    private static final int PUSH_BYTES = 128;
 
     private final RtContext ctx;
     private final long descriptorSetLayout;
@@ -150,10 +153,16 @@ public final class RtDisplayPipeline {
     }
 
     /**
-     * Run the display mapping. The selected SDR output is always written (binding 0). When {@code hdrEnabled}, the
-     * PQ-encoded HDR image (binding 3) is also written using the selected HDR display mapper.
+     * Run the display mapping.
+     *
+     * <p>The selected SDR output is always written. When {@code hdrEnabled},
+     * the PQ-encoded HDR image (binding 3) is also written using the selected HDR display mapper.
+     *
+     * @param cameraLavaTimeSeconds continuous animation time while the camera
+     *                              is submerged in lava; a negative value
+     *                              disables the effect
      */
-    public void dispatch(VkCommandBuffer cmd, int width, int height, boolean hdrEnabled) {
+    public void dispatch(VkCommandBuffer cmd, int width, int height, boolean hdrEnabled, float cameraLavaTimeSeconds) {
         try (MemoryStack stack = MemoryStack.stackPush(); RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "display compute")) {
             VK10.vkCmdBindPipeline(cmd, VK10.VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
             VK10.vkCmdBindDescriptorSets(cmd, VK10.VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayout, 0, stack.longs(descriptorSet), null);
@@ -184,6 +193,7 @@ public final class RtDisplayPipeline {
             push.putFloat(112, CausticaConfig.Rt.PsychoV23.GAMUT_COMPRESSION.value());
             push.putFloat(116, CausticaConfig.Rt.Sdr.PSYCHOV23_PEAK.value());
             push.putInt(120, ditherFrameIndex++);
+            push.putFloat(124, cameraLavaTimeSeconds);
             VK10.vkCmdPushConstants(cmd, pipelineLayout, VK10.VK_SHADER_STAGE_COMPUTE_BIT, 0, push);
             VK10.vkCmdDispatch(cmd, (width + 15) / 16, (height + 15) / 16, 1);
         }

@@ -532,6 +532,8 @@ public final class RtComposite {
     private float frozenWaterWaveTime = Float.NaN;
     private boolean sceneFreezeActive;
     private boolean frozenCameraCaptured;
+    private boolean cameraLavaStateKnown;
+    private boolean lastCameraInLava;
 
     // Motion-vector reprojection state: the previous frame's camera-relative view-projection and
     // camera position, snapshotted for consumers each frame before the rolling state advances.
@@ -661,6 +663,7 @@ public final class RtComposite {
         lastSkyParameterSignature = Integer.MIN_VALUE;
         hasCapturedProjection = false;
         previousWaterWaveTimeValid = false;
+        cameraLavaStateKnown = false;
         exposure.resetAutoHistory();
         // RR/FG resets are routine (FOV transitions, reload notifications, debug changes). Once an
         // offline session owns a frozen camera and scene, those unrelated temporal resets must not erase
@@ -2243,6 +2246,7 @@ public final class RtComposite {
             // flags: PBR BRDF (bit 1, always on) + camera-in-water (so the path tracer starts in the water
             // medium when the eye is submerged, fixing the air→water first-segment orientation).
             int flags = 0b10;
+            boolean cameraInLava = false;
             var level = Minecraft.getInstance().level;
             if (level != null) {
                 cameraBlockPos.set(Mth.floor(camX), Mth.floor(camY), Mth.floor(camZ));
@@ -2250,14 +2254,27 @@ public final class RtComposite {
                 // test wrongly flags the eye submerged anywhere in a water column's top block, even well
                 // above its actual surface (shallow/flowing water, or standing with your head just over a
                 // source block).
-                FluidState fs = level.getFluidState(cameraBlockPos);
-                if (fs.is(FluidTags.WATER) && camY < cameraBlockPos.getY() + fs.getHeight(level, cameraBlockPos)) {
+                FluidState fluidState = level.getFluidState(cameraBlockPos);
+                double fluidSurfaceY =
+                        cameraBlockPos.getY()
+                                + fluidState.getHeight(level, cameraBlockPos);
+                boolean eyeBelowFluidSurface = camY < fluidSurfaceY;
+                if (eyeBelowFluidSurface && fluidState.is(FluidTags.WATER)) {
                     flags |= 0b01;
                 }
+                cameraInLava =
+                        eyeBelowFluidSurface
+                                && fluidState.is(FluidTags.LAVA);
+
                 if (Level.OVERWORLD.equals(level.dimension())) {
                     flags |= FRAME_FLAG_EARTH_ATMOSPHERE;
                 }
             }
+            if (cameraLavaStateKnown && cameraInLava != lastCameraInLava) {
+                fgReset = true;
+            }
+            cameraLavaStateKnown = true;
+            lastCameraInLava = cameraInLava;
             if (waterWaves()) {
                 flags |= 0b10000; // W1: animated water wave normals
             }
@@ -2309,6 +2326,12 @@ public final class RtComposite {
             float previousWaveTime = previousWaterWaveTimeValid ? previousWaterWaveTime : waterWaveTime;
             previousWaterWaveTime = waterWaveTime;
             previousWaterWaveTimeValid = true;
+            float cameraLavaTimeSeconds =
+                    cameraInLava
+                        && !offlineGroundTruth
+                        && worldDebugView == 0
+                            ? waterWaveTime
+                            : -1.0f;
             Float4 waterTint = linearBt2020FromRgb(wtr, wtg, wtb);
             Float4 waterParams = new Float4(waterTint.x(), waterTint.y(), waterTint.z(), waterWaveTime);
             // W1 wave-domain anchor: the terrain rebase origin reduced mod 4096 (kept small for shader
@@ -2774,7 +2797,13 @@ public final class RtComposite {
 
                 try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "map RT to display");
                      RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.displayMap")) {
-                    displayPipeline.dispatch(cmd, outputW, outputH, RtHdr.effective());
+                    displayPipeline.dispatch(
+                            cmd,
+                            outputW,
+                            outputH,
+                            RtHdr.effective(),
+                            cameraLavaTimeSeconds
+                    );
                 }
                 VulkanCommandEncoder.memoryBarrier(cmd, stack);
                 dispatchOutputScale(cmd, stack, RtHdr.effective());

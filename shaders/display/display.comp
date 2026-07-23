@@ -41,6 +41,7 @@ layout(push_constant) uniform Push {
     float hdrPsychoV23GamutCompression; // 0..1 adaptive gamut compression
     float sdrPsychoV23Peak;
     uint frameIndex;
+    float cameraLavaTimeSeconds; // Negative disables the under-lava treatment.
 } pc;
 
 // Eight-phase triangular output dither drawn from the renderer's spatially permuted 64x64 Owen-Sobol
@@ -160,6 +161,67 @@ const mat3 BT2020_TO_BT709 = mat3(
     -0.5876411,  1.1328999, -0.1005789,
     -0.0728499, -0.0083494,  1.1187297
 );
+
+// Camera-space treatment used only while the eye is below the lava surface.
+//
+// This is intentionally a dense emissive absorption layer rather than a
+// transparent orange screen tint. Red scene detail remains faintly visible,
+// while green and blue are absorbed almost completely. The slow, broad pattern
+// makes the medium feel molten without introducing high-frequency shimmer.
+vec3 applyCameraLavaImmersion(
+    vec3 scene2020,
+    ivec2 pixel,
+    ivec2 outputSize,
+    float timeSeconds
+) {
+    vec2 uv = (vec2(pixel) + 0.5) / vec2(outputSize);
+    vec2 p = uv * 2.0 - 1.0;
+
+    float aspect =
+        float(outputSize.x)
+            / max(float(outputSize.y), 1.0);
+    p.x *= aspect;
+
+    // Large, slow-moving structures. Keep these low frequency so the result
+    // remains comfortable and does not resemble post-process film grain.
+    float flowA =
+        sin(dot(p, vec2(3.1, 4.7)) + timeSeconds * 0.85);
+    float flowB =
+        sin(dot(p, vec2(-5.3, 2.9)) - timeSeconds * 0.62);
+
+    float flow = 0.5 + 0.25 * (flowA + flowB);
+    float edge = smoothstep(0.45, 1.35, length(p));
+
+    // Slightly denser around the edges and inside the darker flowing bands.
+    float density =
+        0.92
+        + (flow - 0.5) * 0.20
+        + edge * 0.18;
+
+    // Dense wavelength-selective absorption:
+    // preserve a little red visibility, almost no green, and essentially no blue.
+    vec3 transmittance =
+        exp(-vec3(1.65, 4.25, 8.25) * density);
+
+    float pulse =
+        0.96
+        + 0.04 * sin(
+            timeSeconds * 1.75
+            + flow * 6.28318530718
+        );
+
+    // Define the artistic target in the familiar BT.709 basis, then convert
+    // into the renderer's scene-linear BT.2020 working space.
+    vec3 lavaGlow709 = vec3(1.10, 0.12, 0.006);
+    vec3 lavaGlow2020 =
+        (BT709_TO_BT2020 * lavaGlow709) * pulse;
+
+    return max(
+        scene2020 * transmittance
+            + lavaGlow2020 * (vec3(1.0) - transmittance),
+        vec3(0.0)
+    );
+}
 
 vec3 sampleBloom(ivec2 pixel, ivec2 outputSize) {
     ivec2 bloomSize = imageSize(bloomImage);
@@ -1107,6 +1169,17 @@ void main() {
     // DLSS-D reconstructs calibrated scene-linear BT.2020 directly. Camera exposure belongs here,
     // after reconstruction, and never changes the denoiser's temporal radiance contract.
     vec3 scene2020 = max(rt.rgb, vec3(0.0)) + max(sampleBloom(pix, size), vec3(0.0)) * 0.08;
+    if (
+        pc.cameraLavaTimeSeconds >= 0.0
+        && pc.debugView == 0
+    ) {
+        scene2020 = applyCameraLavaImmersion(
+            scene2020,
+            pix,
+            size,
+            pc.cameraLavaTimeSeconds
+        );
+    }
     vec3 scene709 = gamutMapBt2020ToBt709(scene2020);
     vec3 selectedLdr = tonemapSdr(scene709, exposure);
     vec3 ldr = selectedLdr;
