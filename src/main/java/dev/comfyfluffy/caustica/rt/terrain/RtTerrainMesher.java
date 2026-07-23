@@ -50,6 +50,7 @@ import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.BaseTorchBlock;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.IceBlock;
+import net.minecraft.world.level.block.RedStoneWireBlock;
 import net.minecraft.world.level.block.RenderShape;
 import net.minecraft.world.level.block.StainedGlassBlock;
 import net.minecraft.world.level.block.StainedGlassPaneBlock;
@@ -456,6 +457,16 @@ final class RtTerrainMesher {
             q.nx = nx; q.ny = ny; q.nz = nz;
 
             ChunkSectionLayer layer = quad.chunkLayer();
+
+            // Minecraft 26.2 reports redstone wire as TRANSLUCENT, but its texture uses
+            // binary alpha coverage and must run through the cutout any-hit shader.
+            // Leaving it translucent turns the complete quad into transmissive glass.
+            if (layer == ChunkSectionLayer.TRANSLUCENT
+                    && state != null
+                    && state.getBlock() instanceof RedStoneWireBlock) {
+                layer = ChunkSectionLayer.CUTOUT;
+            }
+
             q.cutout = layer != ChunkSectionLayer.SOLID;
             q.translucent = layer == ChunkSectionLayer.TRANSLUCENT;
             q.opticalClass = q.translucent ? opticalClass(state) : 0;
