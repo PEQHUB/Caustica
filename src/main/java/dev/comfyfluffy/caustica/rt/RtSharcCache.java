@@ -16,10 +16,10 @@ import static org.lwjgl.vulkan.VK10.*;
 public final class RtSharcCache {
     public static final int MIN_EXPONENT = 16;
     /**
-     * 2^28 entries consume exactly 10 GiB (8-byte hash + 16-byte accumulation +
-     * 16-byte resolved data per entry). 2^29 would jump to 20 GiB, which is not
-     * a safe opt-in ceiling even on a 32 GiB RTX 5090 once the rest of the
-     * renderer and driver allocations are included.
+     * 2^28 entries consume 10 GiB in RGB mode (40 bytes/entry) or 16 GiB in
+     * DIRECTIONAL_SH mode (64 bytes/entry). 2^29 would jump to 20/32 GiB,
+     * which is not a safe opt-in ceiling even on a 32 GiB RTX 5090 once the
+     * rest of the renderer and driver allocations are included.
      */
     public static final int MAX_EXPONENT = 28;
     private static final int RING = 6;
@@ -33,6 +33,7 @@ public final class RtSharcCache {
     private final long[] statsGeneration = new long[RING];
     private final int exponent;
     private final int capacity;
+    private final SharcRadianceEncoding encoding;
     private int slot = -1;
     private boolean pendingClear = true;
     private String lastResetReason = "enabled";
@@ -42,7 +43,8 @@ public final class RtSharcCache {
     private boolean destroyed;
 
     private RtSharcCache(RtBuffer hashEntries, RtBuffer accumulation, RtBuffer resolved,
-                         RtBuffer[] frames, RtBuffer[] stats, int exponent, int capacity) {
+                         RtBuffer[] frames, RtBuffer[] stats, int exponent, int capacity,
+                         SharcRadianceEncoding encoding) {
         this.hashEntries = hashEntries;
         this.accumulation = accumulation;
         this.resolved = resolved;
@@ -50,9 +52,10 @@ public final class RtSharcCache {
         System.arraycopy(stats, 0, this.stats, 0, RING);
         this.exponent = exponent;
         this.capacity = capacity;
+        this.encoding = encoding;
     }
 
-    public static RtSharcCache create(RtContext ctx, int requestedExponent) {
+    public static RtSharcCache create(RtContext ctx, int requestedExponent, SharcRadianceEncoding encoding) {
         int exponent = Math.clamp(requestedExponent, MIN_EXPONENT, MAX_EXPONENT);
         int capacity = 1 << exponent;
         int deviceUsage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
@@ -63,8 +66,10 @@ public final class RtSharcCache {
         RtBuffer[] statsRing = new RtBuffer[RING];
         try {
             hash = ctx.createBuffer((long) capacity * 8L, deviceUsage, false, "SHaRC hash entries");
-            accum = ctx.createBuffer((long) capacity * 16L, deviceUsage, false, "SHaRC accumulation");
-            resolved = ctx.createBuffer((long) capacity * 16L, deviceUsage, false, "SHaRC resolved");
+            accum = ctx.createBuffer((long) capacity * encoding.accumulationStride(), deviceUsage, false,
+                    "SHaRC accumulation (" + encoding.name() + ")");
+            resolved = ctx.createBuffer((long) capacity * encoding.resolvedStride(), deviceUsage, false,
+                    "SHaRC resolved (" + encoding.name() + ")");
             for (int i = 0; i < RING; i++) {
                 frameRing[i] = ctx.createBuffer(SharcFrameData.BYTE_SIZE, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                         true, "SHaRC frame " + i);
@@ -73,7 +78,7 @@ public final class RtSharcCache {
                 MemoryUtil.memSet(statsRing[i].mapped, 0, STATS_BYTES);
                 statsRing[i].flush(0, STATS_BYTES);
             }
-            return new RtSharcCache(hash, accum, resolved, frameRing, statsRing, exponent, capacity);
+            return new RtSharcCache(hash, accum, resolved, frameRing, statsRing, exponent, capacity, encoding);
         } catch (Throwable t) {
             if (hash != null) hash.destroy();
             if (accum != null) accum.destroy();
@@ -86,6 +91,7 @@ public final class RtSharcCache {
 
     public int exponent() { return exponent; }
     public int capacity() { return capacity; }
+    public SharcRadianceEncoding encoding() { return encoding; }
     public long bytes() { return hashEntries.size + accumulation.size + resolved.size + RING * (SharcFrameData.BYTE_SIZE + STATS_BYTES); }
     public String lastResetReason() { return lastResetReason; }
     public long resetCount() { return resetCount; }

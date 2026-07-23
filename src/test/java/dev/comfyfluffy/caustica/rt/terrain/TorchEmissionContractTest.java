@@ -35,7 +35,7 @@ final class TorchEmissionContractTest {
         assertTrue(raygen.contains("L += throughput * albedo * emission * emissiveRadiance;"));
         assertTrue(raygen.contains("float3 materialEmissive = albedo * emission * emissiveRadiance;"));
         assertTrue(raygen.contains("cacheableDirectLighting + liveDirectLighting + materialEmissive"));
-        assertTrue(raygen.contains("causticaSharcHit(hitPos, albedo, materialEmissive)"));
+        assertTrue(raygen.contains("causticaMakeSharcHit("));
         assertFalse(raygen.contains("sampleTerrainEmitter"));
     }
 

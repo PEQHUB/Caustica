@@ -39,6 +39,9 @@
 #ifndef CAUSTICA_SHARC_PRIMARY_DIFFUSE
 #define CAUSTICA_SHARC_PRIMARY_DIFFUSE 0
 #endif
+#ifndef SHARC_ENABLE_SH_ENCODING
+#define SHARC_ENABLE_SH_ENCODING 0
+#endif
 #ifndef CAUSTICA_OFFLINE
 #define CAUSTICA_OFFLINE 0
 #endif
@@ -162,21 +165,11 @@ void sharcStatMax(uint index, uint value) {
 #endif
 }
 
-SharcHitData causticaSharcHit(float3 position, float3 albedo, float3 emissive) {
-    SharcHitData hit;
-    hit.positionWorld = position;
-    hit.normalWorld = payload.geometricNormal;
-    // SHaRC stores incident lighting demodulated by the ordinary material response. The rank-1
-    // approximation is deliberately restricted to closed-form same-material multi-scatter terms below;
-    // crossing material boundaries would require a non-commuting matrix-valued cache throughput.
-    hit.materialDemodulation = max(albedo, float3(1.0e-3));
-    hit.emissive = emissive;
-    return hit;
-}
+
 
 float causticaSharcVoxelSize(float3 position) {
-    uint level = HashGridGetLevel(position, sharcParameters.gridParameters);
-    return HashGridGetVoxelSize(level, sharcParameters.gridParameters);
+    uint level = HashGridGetLevel(position, sharcParameters.hashGridParameters);
+    return HashGridGetVoxelSize(level, sharcParameters.hashGridParameters);
 }
 #endif
 
@@ -186,7 +179,8 @@ static Payload payload;
 static float4 shadowVis; // rgb = transmittance; a = nearest water-crossing t (-1 = none)
 
 #if CAUSTICA_SHARC_QUERY
-bool causticaTrySharcQuery(int bounce, float3 hitPos, float3 albedo, float3 materialEmissive,
+bool causticaTrySharcQuery(int bounce, float3 hitPos, float3 outgoingDirectionToPreviousVertex,
+        float3 albedo, float3 materialEmissive,
         bool pathEligible, bool previousLobeDiffuse, float previousGlossyAlpha,
         bool primaryDiffuseEligible,
         out float3 cachedRadiance) {
@@ -242,10 +236,11 @@ bool causticaTrySharcQuery(int bounce, float3 hitPos, float3 albedo, float3 mate
     if (pc.debugView == 9u) gv_sharcDebug = float3(1.0, 0.1, 0.05);
     if (pc.debugView == 12u) {
         gv_sharcHashDebug = HashGridDebugColoredHash(
-                hitPos, payload.geometricNormal, sharcParameters.gridParameters);
+                hitPos, payload.geometricNormal, sharcParameters.hashGridParameters);
     }
 #endif
-    SharcHitData queryHit = causticaSharcHit(hitPos, albedo, materialEmissive);
+    SharcHitData queryHit = causticaMakeSharcHit(hitPos, payload.geometricNormal,
+            albedo, materialEmissive, outgoingDirectionToPreviousVertex);
     if (!SharcGetCachedRadiance(sharcParameters, queryHit, cachedRadiance, false)) {
 #if CAUSTICA_SHARC_DIAGNOSTICS
         if (statsEnabled) sharcStatAdd(SHARC_STAT_QUERY_MISSES, 1u);
@@ -2561,6 +2556,9 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
 #endif
             ++exactMirrorDepth;
             showCelestial = true;
+#if CAUSTICA_SHARC_UPDATE && SHARC_ENABLE_SH_ENCODING
+            SharcSetRadianceDirectionWeight(sharcState, 1.0);
+#endif
             if (scatteringDepth >= rrStart) {
                 float q = clamp(max(throughput.r, max(throughput.g, throughput.b)), 0.02, 1.0);
                 if (rndf(sampler) > q) break;
@@ -2585,7 +2583,7 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
 #if !CAUSTICA_SHARC_LIVE_SECONDARY_DIRECT
         if ((sharcFrame.queryFlags & 2u) == 0u) {
             float3 cachedRadiance;
-            if (causticaTrySharcQuery(scatteringDepth, hitPos, sharcAlbedo, materialEmissive,
+            if (causticaTrySharcQuery(scatteringDepth, hitPos, -rd, sharcAlbedo, materialEmissive,
                     sharcPathEligible, sharcPreviousLobeDiffuse, sharcPreviousGlossyAlpha,
                     false,
                     cachedRadiance)) {
@@ -2769,7 +2767,7 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
             // SSS and authored emission remain live, and misses fall through to the baseline continuation.
             bool primaryDiffuseEligible = metal <= 0.1 && perceptualRough >= 0.5
                     && luminance(diffAlb) > 1.0e-4;
-            if (causticaTrySharcQuery(scatteringDepth, hitPos, sharcAlbedo, materialEmissive,
+            if (causticaTrySharcQuery(scatteringDepth, hitPos, -rd, sharcAlbedo, materialEmissive,
                     sharcPathEligible, sharcPreviousLobeDiffuse, sharcPreviousGlossyAlpha,
                     primaryDiffuseEligible,
                     cachedRadiance)) {
@@ -2794,7 +2792,8 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
             sharcStatAdd(SHARC_STAT_UPDATE_MISSES, 1u);
             break;
         }
-        SharcHitData updateHit = causticaSharcHit(hitPos, sharcAlbedo, materialEmissive);
+        SharcHitData updateHit = causticaMakeSharcHit(hitPos, payload.geometricNormal,
+                sharcAlbedo, materialEmissive, -rd);
         bool continueUpdate = causticaSharcUpdateHit(sharcParameters, sharcState, updateHit,
                 cacheableDirectLighting, cacheableDirectLighting + liveDirectLighting);
 #if CAUSTICA_SHARC_DIAGNOSTICS
@@ -2805,17 +2804,17 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
             sharcStatAdd(SHARC_STAT_NUMERIC_RISKS, 1u);
         }
         sharcStatAdd(SHARC_STAT_UPDATE_HITS, 1u);
-        HashGridIndex insertedIndex = HashMapFindEntry(sharcParameters.hashMapData,
-                updateHit.positionWorld, updateHit.normalWorld, sharcParameters.gridParameters);
+        HashGridKey insertedKey;
+        HashGridIndex insertedIndex = HashGridFindEntry(sharcParameters.hashGridData,
+                updateHit.positionWorld, updateHit.normalWorld,
+                sharcParameters.hashGridParameters, insertedKey);
         if (insertedIndex == HASH_GRID_INVALID_CACHE_INDEX) {
             sharcStatAdd(SHARC_STAT_INSERT_FAILURES, 1u);
         } else {
             sharcStatAdd(SHARC_STAT_INSERTIONS, 1u);
-            HashGridKey insertedKey = HashGridComputeSpatialHash(
-                    updateHit.positionWorld, updateHit.normalWorld, sharcParameters.gridParameters);
-            uint baseSlot = HashGridGetBaseSlot(insertedKey, sharcParameters.hashMapData.capacity);
-            uint probeDistance = (insertedIndex + sharcParameters.hashMapData.capacity - baseSlot)
-                    % sharcParameters.hashMapData.capacity;
+            uint capacity = sharcParameters.hashGridData.capacity;
+            uint baseSlot = HashGridGetBaseSlot(insertedKey, capacity);
+            uint probeDistance = (insertedIndex + capacity - baseSlot) % capacity;
             sharcStatAdd(SHARC_STAT_COLLISIONS, probeDistance);
         }
 #endif
@@ -2886,7 +2885,12 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
                 }
 #endif
 #if CAUSTICA_SHARC_UPDATE
+#if SHARC_ENABLE_SH_ENCODING
+                SharcSetRadianceDirectionWeight(sharcState,
+                        causticaSharcDirectionalityWeight(false, false, perceptualRough));
+#else
                 causticaSharcDiscardCurrentVertex(sharcState);
+#endif
 #endif
 #if CAUSTICA_SHARC_QUERY
                 sharcPreviousLobeDiffuse = false;
@@ -2927,6 +2931,9 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
 #if CAUSTICA_SHARC_QUERY
                 sharcPreviousLobeDiffuse = true;
                 sharcPreviousGlossyAlpha = 0.0;
+#endif
+#if CAUSTICA_SHARC_UPDATE && SHARC_ENABLE_SH_ENCODING
+                SharcSetRadianceDirectionWeight(sharcState, 0.0);
 #endif
                 float diffusePdf;
                 float3 l = sampleEon(n, v, perceptualRough, sampler, diffusePdf);
@@ -3034,8 +3041,7 @@ void main() {
             sharcFrame.capacity,
             sharcFrame.cameraPosition,
             sharcFrame.sceneScale,
-            sharcFrame.radianceScale,
-            (sharcFrame.flags & 1u) != 0u);
+            sharcFrame.radianceScale);
     sharcStats = SharcRWPtr<uint>(sharcFrame.statsAddr);
 #endif
 #if CAUSTICA_SHARC_UPDATE
@@ -3538,7 +3544,7 @@ void main() {
             float depth = gv_sharcTerminationDepth / max(float(pc.maxBounces), 1.0);
             dbg = float3(depth, 1.0 - depth, 0.15);
         } else if (pc.debugView == 11u) {
-            dbg = HashGridDebugOccupancy(uint2(pix), uint2(size), sharcParameters.hashMapData);
+            dbg = HashGridDebugOccupancy(uint2(pix), uint2(size), sharcParameters.hashGridData);
         } else if (pc.debugView == 12u) {
             dbg = gv_sharcHashDebug;
         } else if (pc.debugView == 13u) {

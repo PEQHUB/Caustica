@@ -10,6 +10,7 @@ import dev.comfyfluffy.caustica.client.ui.CausticaWidgets.Slider;
 import dev.comfyfluffy.caustica.client.ui.CausticaWidgets.Toggle;
 import dev.comfyfluffy.caustica.rt.RtComposite;
 import dev.comfyfluffy.caustica.rt.RtSharcSupport;
+import dev.comfyfluffy.caustica.rt.SharcRadianceEncoding;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -32,6 +33,8 @@ public final class RtSharcOptionsScreen extends Screen {
     private static final int MAX_CONTENT_WIDTH = 920;
     private static final List<Integer> CACHE_EXPONENTS = List.of(
             16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28);
+    private static final List<SharcRadianceEncoding> ENCODINGS = List.of(
+            SharcRadianceEncoding.RGB, SharcRadianceEncoding.DIRECTIONAL_SH);
     private static final List<Integer> DEBUG_VIEWS = List.of(
             0, 1, 2, 3, 4, 5, 6, 7,
             CausticaConfig.Rt.Composite.DEBUG_VIEW_TONEMAP_COMPARISON, 9, 10, 11, 12, 13, 14, 15, 16);
@@ -66,6 +69,28 @@ public final class RtSharcOptionsScreen extends Screen {
                         CausticaConfig.Rt.Sharc.CACHE_EXPONENT.defaultValue()));
         dropdowns.add(memory);
         addControl(memory);
+
+        Dropdown<SharcRadianceEncoding> encoding = new Dropdown<>(180,
+                Component.translatable("caustica.options.rt.sharcEncoding"), ENCODINGS,
+                () -> SharcRadianceEncoding.values()[
+                        Math.max(0, Math.min(1, CausticaConfig.Rt.Sharc.RADIANCE_ENCODING.value()))],
+                value -> {
+                    CausticaConfig.Rt.Sharc.RADIANCE_ENCODING.set(value.ordinal());
+                    RtComposite.INSTANCE.requestSharcEncoding(value);
+                },
+                value -> Component.translatable("caustica.options.rt.sharcEncoding." + value.name()),
+                () -> {
+                    RtComposite.INSTANCE.requestSharcReset("radiance encoding changed");
+                    rebuild();
+                })
+                .tooltip(Component.translatable("caustica.options.rt.sharcEncoding.tooltip"))
+                .resetOnShift(() -> {
+                    CausticaConfig.Rt.Sharc.RADIANCE_ENCODING.set(0);
+                    RtComposite.INSTANCE.requestSharcEncoding(SharcRadianceEncoding.RGB);
+                    rebuild();
+                });
+        dropdowns.add(encoding);
+        addControl(encoding);
 
         addControl(floatSlider("caustica.options.rt.sharcSceneScale", CausticaConfig.Rt.Sharc.SCENE_SCALE,
                 1.0, 100.0, 0.25, value -> String.format(Locale.ROOT, "%.2f", value)));
@@ -183,6 +208,8 @@ public final class RtSharcOptionsScreen extends Screen {
                 CausticaConfig.Rt.Sharc.LIVE_SECONDARY_DIRECT.defaultValue());
         CausticaConfig.Rt.Sharc.PRIMARY_DIFFUSE_REUSE.set(false);
         CausticaConfig.Rt.Sharc.DETAILED_STATS.set(false);
+        CausticaConfig.Rt.Sharc.RADIANCE_ENCODING.set(0);
+        RtComposite.INSTANCE.requestSharcEncoding(SharcRadianceEncoding.RGB);
         CausticaConfig.Rt.Composite.DEBUG_VIEW.set(0);
         CausticaConfig.Rt.FrameStats.ENABLED.set(false);
         RtComposite.INSTANCE.requestSharcReset("visual-parity defaults restored");

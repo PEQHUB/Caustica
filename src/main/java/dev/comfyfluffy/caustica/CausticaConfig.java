@@ -97,6 +97,7 @@ public final class CausticaConfig {
             Rt.Fg.OUTPUT_TARGET_FPS, Rt.Fg.QUEUE_PARALLELISM,
             Rt.Reflex.ENABLED, Rt.Exposure.MODE, Rt.FrameStats.ENABLED,
             Rt.Sharc.ENABLED, Rt.Sharc.PRIMARY_DIFFUSE_REUSE, Rt.Sharc.CACHE_EXPONENT, Rt.Sharc.UPDATE_TILE_SIZE,
+            Rt.Sharc.RADIANCE_ENCODING,
             Rt.Sdr.TONEMAP_MODE, Rt.Hdr.ENABLED, Rt.Hdr.TONEMAP_MODE, Rt.PsychoV23.COMPRESSION,
             Rt.Composite.POINT_SAMPLE_MAX_SIZE,
             Rt.Materials.FOLIAGE_BACKLIGHTING, Rt.Materials.SOIL_ROUGHNESS,
@@ -1112,6 +1113,8 @@ public final class CausticaConfig {
                     bool("caustica.rt.sharcPrimaryDiffuseReuse", "sharc.primary-diffuse-reuse", false);
             public static final BooleanSetting DETAILED_STATS =
                     bool("caustica.rt.sharcDetailedStats", "sharc.detailed-stats", false);
+            public static final IntSetting RADIANCE_ENCODING =
+                    clampedInt("caustica.rt.sharcRadianceEncoding", "sharc.radiance-encoding", 0, 0, 1);
 
             private Sharc() {}
         }

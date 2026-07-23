@@ -142,8 +142,8 @@ if (!actualSlangVersion.readLines().any { it.trim() == requiredSlangVersion }) {
 
 // NVIDIA SHaRC is an external, separately licensed shader SDK. Its source is never copied into the
 // LGPL source tree; only validated SPIR-V object code and the NVIDIA license enter a runtime JAR.
-def sharcVersion = "1.6.5.0"
-def sharcCommit = "0b9f58bbc8c41736042d4da964830a247e424a00"
+def sharcVersion = "1.8.0.0"
+def sharcCommit = "e19ccacd511f42a3df6f850052d508c13c9e9737"
 def configuredSharcSdk = (findProperty("sharcSdk") ?: System.getenv("SHARC_SDK") ?: "").toString()
 def sharcOptOut = providers.gradleProperty("withoutSharc")
 		.map { it.toBoolean() }.getOrElse(false)
@@ -151,15 +151,32 @@ if (sharcOptOut && !configuredSharcSdk.isBlank()) {
 	throw new GradleException("Choose either a SHARC_SDK/sharcSdk input or -PwithoutSharc=true, not both")
 }
 def sharcHeaderHashes = [
-	"include/HashGridCommon.h": "980D4CE2FE53273D55FE1DD771B155F89BB28C86D19947427F318D8661F082A4",
-	"include/SharcCommon.h": "0F61B11E89E0EA80292194DDE6B33478D6E45DD2D9971A77F5658045A9F6BDC3",
-	"include/SharcGlsl.h": "C1802A975BC47196709892C89E35C7212BDBB41568A3AC60F37460AAE52F9469",
-	"include/SharcTypes.h": "0B9D8AC0A4A8C8B303F6BDD338652CA251E5E5152B47CB55972DDD5904B4CC08",
-	"License.md": "8FF8A1723EE41B2647B5B5CD5EF961C7F58FA617803D6DE3EA68F954F85FF419"
+	"include/HashGridCommon.h": "5A6D67186A88E61F0D47518F5986021F309F2897CCB482AB9E011A7A08749E7F",
+	"include/HashGridTypes.h": "34012BCFFFF0F2545C108A7C9DCB223298A70EBC2C377A86FBDDFD1ECD76D614",
+	"include/SharcCommon.h": "D4B6E2765828A4B1C71BBF40609B2DBE72B4AEC8FF4D80CCDA21A83AB634ECC4",
+	"include/SharcGlslHelpers.h": "FDDD45196880F5A58F9614B27D79BEA5C86A9FA89CA1808A5B1E041E9BBF6620",
+	"include/SharcTypes.h": "CDE3F200E4E84F029968DFFD9EEDE5228F2AE0B0BBC166D2BABB1AA88DC044B3",
+	"License.md": "5575AD921BFE6027DC830887FF51CEB4097E31C2D538B6932CD4BBDF5C1899A9"
 ]
 def validateSharcSdk = {
 	if (configuredSharcSdk.isBlank()) return
 	def root = file(configuredSharcSdk)
+	def commonHeader = new File(root, "include/SharcCommon.h")
+	if (!commonHeader.isFile()) {
+		throw new GradleException("SHARC_SDK is missing include/SharcCommon.h")
+	}
+	def commonText = commonHeader.getText("UTF-8")
+	def expectedMacros = [
+		"#define SHARC_VERSION_MAJOR                     1",
+		"#define SHARC_VERSION_MINOR                     8",
+		"#define SHARC_VERSION_BUILD                     0",
+		"#define SHARC_VERSION_REVISION                  0"
+	]
+	def missingMacros = expectedMacros.findAll { !commonText.contains(it) }
+	if (!missingMacros.empty) {
+		throw new GradleException("SHARC_SDK is not the required v${sharcVersion}; "
+				+ "missing version macros: ${missingMacros.join(', ')}")
+	}
 	def digest = java.security.MessageDigest.getInstance("SHA-256")
 	def invalid = sharcHeaderHashes.findAll { relative, expected ->
 		def candidate = new File(root, relative)
@@ -397,6 +414,77 @@ abstract class CompileShaders extends DefaultTask {
 			}
 			compileOneSlang(new File(sharc, "sharc_resolve.comp.slang"),
 					new File(scratchDir, "sharc_resolve.comp.spv"), sharcInclude)
+			// --- SH encoding variants (SHARC_ENABLE_SH_ENCODING=1) ---
+			def shEncodingDefines = ["-DSHARC_ENABLE_SH_ENCODING=1"]
+			def shEncodingVariantDefines = variantDefines + shEncodingDefines
+			def shEncodingQueryDefines = queryDefines + shEncodingDefines
+			def shEncodingDiffuseQueryDefines = diffuseQueryDefines + shEncodingDefines
+			def shEncodingPrimaryQueryDefines = primaryQueryDefines + shEncodingDefines
+			def shEncodingUpdateDefines = updateDefines + shEncodingDefines
+			def shEncodingDiagnosticQueryDefines = diagnosticQueryDefines + shEncodingDefines
+			def shEncodingPrimaryDiagnosticQueryDefines = primaryDiagnosticQueryDefines + shEncodingDefines
+			def shEncodingDiagnosticUpdateDefines = diagnosticUpdateDefines + shEncodingDefines
+			// Query SH variants
+			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_sh.rgen.spv"),
+					shEncodingQueryDefines + sharcInclude + ["-capability", "spvShaderInvocationReorderEXT"])
+			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_sh_base.rgen.spv"),
+					shEncodingQueryDefines + sharcInclude + ["-DCAUSTICA_PORTABLE_TRACE=1"])
+			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_sh_nv.rgen.spv"),
+					shEncodingQueryDefines + sharcInclude + ["-capability", "spvShaderInvocationReorderNV"])
+			// Diffuse query SH variants
+			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_diffuse_sh.rgen.spv"),
+					shEncodingDiffuseQueryDefines + sharcInclude + ["-capability", "spvShaderInvocationReorderEXT"])
+			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_diffuse_sh_base.rgen.spv"),
+					shEncodingDiffuseQueryDefines + sharcInclude + ["-DCAUSTICA_PORTABLE_TRACE=1"])
+			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_diffuse_sh_nv.rgen.spv"),
+					shEncodingDiffuseQueryDefines + sharcInclude + ["-capability", "spvShaderInvocationReorderNV"])
+			// Primary query SH variants
+			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_primary_sh.rgen.spv"),
+					shEncodingPrimaryQueryDefines + sharcInclude + ["-capability", "spvShaderInvocationReorderEXT"])
+			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_primary_sh_base.rgen.spv"),
+					shEncodingPrimaryQueryDefines + sharcInclude + ["-DCAUSTICA_PORTABLE_TRACE=1"])
+			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_primary_sh_nv.rgen.spv"),
+					shEncodingPrimaryQueryDefines + sharcInclude + ["-capability", "spvShaderInvocationReorderNV"])
+			// Update SH variants
+			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_update_sh.rgen.spv"),
+					shEncodingUpdateDefines + sharcInclude + ["-capability", "spvShaderInvocationReorderEXT"])
+			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_update_sh_base.rgen.spv"),
+					shEncodingUpdateDefines + sharcInclude + ["-DCAUSTICA_PORTABLE_TRACE=1"])
+			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_update_sh_nv.rgen.spv"),
+					shEncodingUpdateDefines + sharcInclude + ["-capability", "spvShaderInvocationReorderNV"])
+			// Diagnostic query SH variants
+			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_diagnostic_sh.rgen.spv"),
+					shEncodingDiagnosticQueryDefines + sharcInclude + ["-capability", "spvShaderInvocationReorderEXT"])
+			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_diagnostic_sh_base.rgen.spv"),
+					shEncodingDiagnosticQueryDefines + sharcInclude + ["-DCAUSTICA_PORTABLE_TRACE=1"])
+			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_diagnostic_sh_nv.rgen.spv"),
+					shEncodingDiagnosticQueryDefines + sharcInclude + ["-capability", "spvShaderInvocationReorderNV"])
+			// Primary diagnostic SH variants
+			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_primary_diagnostic_sh.rgen.spv"),
+					shEncodingPrimaryDiagnosticQueryDefines + sharcInclude + ["-capability", "spvShaderInvocationReorderEXT"])
+			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_primary_diagnostic_sh_base.rgen.spv"),
+					shEncodingPrimaryDiagnosticQueryDefines + sharcInclude + ["-DCAUSTICA_PORTABLE_TRACE=1"])
+			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_primary_diagnostic_sh_nv.rgen.spv"),
+					shEncodingPrimaryDiagnosticQueryDefines + sharcInclude + ["-capability", "spvShaderInvocationReorderNV"])
+			// Update diagnostic SH variants
+			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_update_diagnostic_sh.rgen.spv"),
+					shEncodingDiagnosticUpdateDefines + sharcInclude + ["-capability", "spvShaderInvocationReorderEXT"])
+			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_update_diagnostic_sh_base.rgen.spv"),
+					shEncodingDiagnosticUpdateDefines + sharcInclude + ["-DCAUSTICA_PORTABLE_TRACE=1"])
+			compileOneSlang(new File(world, "world.rgen.slang"), new File(scratchDir, "world_sharc_update_diagnostic_sh_nv.rgen.spv"),
+					shEncodingDiagnosticUpdateDefines + sharcInclude + ["-capability", "spvShaderInvocationReorderNV"])
+			// Shared SHaRC helper shaders with SH encoding (rchit, rahit, rmiss, guide share layout-dependent types)
+			[
+					"world.rchit.slang": "world_sharc_sh.rchit.spv",
+					"world.rahit.slang": "world_sharc_sh.rahit.spv",
+					"world.rmiss.slang": "world_sharc_sh.rmiss.spv",
+					"world_guide.rmiss.slang": "world_sharc_sh_guide.rmiss.spv"
+			].each { sourceName, outputName ->
+				compileOneSlang(new File(world, sourceName), new File(scratchDir, outputName),
+						shEncodingVariantDefines + sharcInclude)
+			}
+			compileOneSlang(new File(sharc, "sharc_resolve.comp.slang"),
+					new File(scratchDir, "sharc_resolve_sh.comp.spv"), sharcInclude + shEncodingDefines)
 			// Prove the exact BDA + native 64-bit atomic contract independently of the runtime shaders.
 			compileOneSlang(new File(sharc, "sharc_atomic_probe.comp.slang"),
 					new File(temporaryDir, "sharc_atomic_probe.comp.spv"), sharcInclude)
@@ -418,6 +506,27 @@ abstract class CompileShaders extends DefaultTask {
 				def raygen = new File(scratchDir, name)
 				if (!raygen.isFile() || raygen.length() > 200_000L) {
 					throw new GradleException("SHaRC primary-query raygen complexity budget exceeded: ${name} is "
+							+ "${raygen.isFile() ? raygen.length() : 'missing'} bytes (limit 200000)")
+				}
+			}
+			["world_sharc_sh.rgen.spv", "world_sharc_sh_nv.rgen.spv"].each { name ->
+				def raygen = new File(scratchDir, name)
+				if (!raygen.isFile() || raygen.length() > 200_000L) {
+					throw new GradleException("SHaRC SH query raygen complexity budget exceeded: ${name} is "
+							+ "${raygen.isFile() ? raygen.length() : 'missing'} bytes (limit 200000)")
+				}
+			}
+			["world_sharc_diffuse_sh.rgen.spv", "world_sharc_diffuse_sh_nv.rgen.spv"].each { name ->
+				def raygen = new File(scratchDir, name)
+				if (!raygen.isFile() || raygen.length() > 200_000L) {
+					throw new GradleException("SHaRC SH diffuse-query raygen complexity budget exceeded: ${name} is "
+							+ "${raygen.isFile() ? raygen.length() : 'missing'} bytes (limit 200000)")
+				}
+			}
+			["world_sharc_primary_sh.rgen.spv", "world_sharc_primary_sh_nv.rgen.spv"].each { name ->
+				def raygen = new File(scratchDir, name)
+				if (!raygen.isFile() || raygen.length() > 200_000L) {
+					throw new GradleException("SHaRC SH primary-query raygen complexity budget exceeded: ${name} is "
 							+ "${raygen.isFile() ? raygen.length() : 'missing'} bytes (limit 200000)")
 				}
 			}
@@ -985,36 +1094,56 @@ def verifyProductionArtifact = tasks.register("verifyProductionArtifact") {
 		if (providers.environmentVariable("NRD_LINUX_X64").isPresent()) {
 			required.add("caustica/natives/linux-x64/libnrdbridge.so")
 		}
+		def expectedSharcRuntimeResources = new LinkedHashSet<String>()
 		if (!configuredSharcSdk.isBlank()) {
-				required.addAll([
-				"caustica/rt/world_sharc_base.rgen.spv",
-				"caustica/rt/world_sharc.rgen.spv",
-				"caustica/rt/world_sharc_nv.rgen.spv",
-				"caustica/rt/world_sharc_diffuse.rgen.spv",
-				"caustica/rt/world_sharc_diffuse_nv.rgen.spv",
-				"caustica/rt/world_sharc_diffuse_base.rgen.spv",
-				"caustica/rt/world_sharc_primary.rgen.spv",
-				"caustica/rt/world_sharc_primary_nv.rgen.spv",
-				"caustica/rt/world_sharc_primary_base.rgen.spv",
-				"caustica/rt/world_sharc_update.rgen.spv",
-				"caustica/rt/world_sharc_update_nv.rgen.spv",
-				"caustica/rt/world_sharc_update_base.rgen.spv",
-				"caustica/rt/world_sharc_diagnostic.rgen.spv",
-				"caustica/rt/world_sharc_diagnostic_nv.rgen.spv",
-				"caustica/rt/world_sharc_diagnostic_base.rgen.spv",
-				"caustica/rt/world_sharc_primary_diagnostic.rgen.spv",
-				"caustica/rt/world_sharc_primary_diagnostic_nv.rgen.spv",
-				"caustica/rt/world_sharc_primary_diagnostic_base.rgen.spv",
-				"caustica/rt/world_sharc_update_diagnostic.rgen.spv",
-				"caustica/rt/world_sharc_update_diagnostic_nv.rgen.spv",
-				"caustica/rt/world_sharc_update_diagnostic_base.rgen.spv",
+			def sharcRaygenFamilies = [
+				"world_sharc",
+				"world_sharc_diffuse",
+				"world_sharc_primary",
+				"world_sharc_update",
+				"world_sharc_diagnostic",
+				"world_sharc_primary_diagnostic",
+				"world_sharc_update_diagnostic"
+			]
+			def sharcBackends = ["", "_base", "_nv"]
+			def sharcEncodings = ["", "_sh"]
+			def generatedSharcResources = []
+			sharcRaygenFamilies.each { family ->
+				sharcEncodings.each { encoding ->
+					sharcBackends.each { backend ->
+						generatedSharcResources.add("caustica/rt/${family}${encoding}${backend}.rgen.spv")
+					}
+				}
+			}
+			generatedSharcResources.addAll([
+				// RGB hit, miss, and resolve family
 				"caustica/rt/world_sharc.rchit.spv",
 				"caustica/rt/world_sharc.rahit.spv",
 				"caustica/rt/world_sharc.rmiss.spv",
 				"caustica/rt/world_sharc_guide.rmiss.spv",
 				"caustica/rt/sharc_resolve.comp.spv",
-				"META-INF/licenses/nvidia/NVIDIA-SHARC-SDK.txt"
+				// Directional-SH hit, miss, and resolve family
+				"caustica/rt/world_sharc_sh.rchit.spv",
+				"caustica/rt/world_sharc_sh.rahit.spv",
+				"caustica/rt/world_sharc_sh.rmiss.spv",
+				"caustica/rt/world_sharc_sh_guide.rmiss.spv",
+				"caustica/rt/sharc_resolve_sh.comp.spv"
 			])
+			expectedSharcRuntimeResources.addAll(generatedSharcResources)
+			// 7 families x 2 encodings x 3 backends = 42 ray-generation modules
+			// 2 encodings x (rchit + rahit + primary miss + guide miss + resolve) = 10 support modules
+			// Total = 52 runtime modules
+			if (generatedSharcResources.size() != 52) {
+				throw new GradleException("Generated SHARC runtime manifest has "
+					+ generatedSharcResources.size() + " entries; expected 52")
+			}
+			if (expectedSharcRuntimeResources.size() != 52) {
+				throw new GradleException("Generated SHARC runtime manifest contains "
+					+ "duplicate names: expected 52 unique entries, got "
+					+ expectedSharcRuntimeResources.size())
+			}
+			required.addAll(expectedSharcRuntimeResources)
+			required.add("META-INF/licenses/nvidia/NVIDIA-SHARC-SDK.txt")
 		}
 		def runtimeZip = new java.util.zip.ZipFile(runtimeJar)
 		try {
@@ -1047,6 +1176,28 @@ def verifyProductionArtifact = tasks.register("verifyProductionArtifact") {
 					|| sharcProperties.getProperty("version") != sharcVersion
 					|| sharcProperties.getProperty("commit") != sharcCommit) {
 				throw new GradleException("Production JAR SHaRC capability marker is inconsistent")
+			}
+			if (!configuredSharcSdk.isBlank()) {
+				def actualSharcRuntimeResources = names.findAll { name ->
+					name.endsWith(".spv") && (
+						name.startsWith("caustica/rt/world_sharc")
+						|| name.startsWith("caustica/rt/sharc_")
+					)
+				} as Set<String>
+				def missingSharcResources = expectedSharcRuntimeResources.findAll {
+					!actualSharcRuntimeResources.contains(it)
+				}
+				def unexpectedSharcResources = actualSharcRuntimeResources.findAll {
+					!expectedSharcRuntimeResources.contains(it)
+				}
+				if (!missingSharcResources.empty || !unexpectedSharcResources.empty) {
+					throw new GradleException("Production JAR SHARC resource mismatch. Missing: "
+						+ missingSharcResources.join(", ") + "; unexpected: "
+						+ unexpectedSharcResources.join(", "))
+				}
+				if (names.contains("caustica/rt/sharc_atomic_probe.comp.spv")) {
+					throw new GradleException("Build-only SHARC atomic probe was packaged into the production JAR")
+				}
 			}
 		} finally {
 			runtimeZip.close()

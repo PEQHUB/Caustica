@@ -9,9 +9,11 @@ import dev.comfyfluffy.caustica.CausticaMod;
 import dev.comfyfluffy.caustica.rt.pipeline.RtDlssRr;
 import dev.comfyfluffy.caustica.rt.pipeline.RtNrd;
 import dev.comfyfluffy.caustica.rt.pipeline.RtReconstruction;
+import java.util.Objects;
 import org.lwjgl.system.MemoryStack;
 import org.lwjgl.vulkan.VKCapabilitiesDevice;
 import org.lwjgl.vulkan.VK10;
+import org.lwjgl.vulkan.VK11;
 import org.lwjgl.vulkan.VK12;
 import org.lwjgl.vulkan.VkDevice;
 import org.lwjgl.vulkan.VkPhysicalDeviceAccelerationStructureFeaturesKHR;
@@ -25,6 +27,7 @@ import org.lwjgl.vulkan.VkPhysicalDeviceRayTracingInvocationReorderFeaturesEXT;
 import org.lwjgl.vulkan.VkPhysicalDeviceRayTracingInvocationReorderFeaturesNV;
 import org.lwjgl.vulkan.VkPhysicalDeviceFeatures;
 import org.lwjgl.vulkan.VkPhysicalDeviceFeatures2;
+import org.lwjgl.vulkan.VkPhysicalDeviceVulkan11Features;
 import org.lwjgl.vulkan.VkPhysicalDeviceVulkan12Features;
 import org.lwjgl.vulkan.VkPhysicalDeviceOpacityMicromapFeaturesEXT;
 import org.lwjgl.vulkan.VkPhysicalDeviceOpacityMicromapPropertiesEXT;
@@ -147,6 +150,9 @@ public final class RtDeviceBringup {
     private static final VulkanPNextStruct OMM_FEATURES_STRUCT = new VulkanPNextStruct(
             VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_OPACITY_MICROMAP_FEATURES_EXT,
             VkPhysicalDeviceOpacityMicromapFeaturesEXT.SIZEOF);
+    private static final VulkanPNextStruct VULKAN_11_FEATURES_STRUCT = new VulkanPNextStruct(
+            VK12.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
+            VkPhysicalDeviceVulkan11Features.SIZEOF);
     private static final VulkanFeature BUFFER_DEVICE_ADDRESS_FEATURE = new VulkanFeature(
             VulkanBackend.VK12_FEATURES_STRUCT, "bufferDeviceAddress", VkPhysicalDeviceVulkan12Features.BUFFERDEVICEADDRESS);
     private static final VulkanFeature RUNTIME_DESCRIPTOR_ARRAY_FEATURE = new VulkanFeature(
@@ -181,6 +187,15 @@ public final class RtDeviceBringup {
             OMM_FEATURES_STRUCT, "micromap", VkPhysicalDeviceOpacityMicromapFeaturesEXT.MICROMAP);
     private static final VulkanFeature WIDE_LINES_FEATURE = new VulkanFeature(
             VulkanBackend.VK10_FEATURES_STRUCT, "wideLines", VkPhysicalDeviceFeatures.WIDELINES);
+    private static final VulkanFeature SHARC_BUFFER_INT64_ATOMICS_FEATURE = new VulkanFeature(
+            VulkanBackend.VK12_FEATURES_STRUCT, "shaderBufferInt64Atomics",
+            VkPhysicalDeviceVulkan12Features.SHADERBUFFERINT64ATOMICS);
+    private static final VulkanFeature SHARC_SHADER_FLOAT16_FEATURE = new VulkanFeature(
+            VulkanBackend.VK12_FEATURES_STRUCT, "shaderFloat16",
+            VkPhysicalDeviceVulkan12Features.SHADERFLOAT16);
+    private static final VulkanFeature SHARC_STORAGE_BUFFER_16_FEATURE = new VulkanFeature(
+            VULKAN_11_FEATURES_STRUCT, "storageBuffer16BitAccess",
+            VkPhysicalDeviceVulkan11Features.STORAGEBUFFER16BITACCESS);
     private static final List<VulkanFeature> REQUIRED_RT_FEATURES = List.of(
             BUFFER_DEVICE_ADDRESS_FEATURE, RUNTIME_DESCRIPTOR_ARRAY_FEATURE, SAMPLED_IMAGE_NON_UNIFORM_FEATURE,
             DESCRIPTOR_PARTIALLY_BOUND_FEATURE, SAMPLED_IMAGE_UPDATE_AFTER_BIND_FEATURE, SHADER_INT64_FEATURE,
@@ -299,6 +314,64 @@ public final class RtDeviceBringup {
     public static String sharcDiagnosticUpdateRaygenShader() {
         return backendShader("world_sharc_update_diagnostic.rgen.spv",
                 "world_sharc_update_diagnostic_nv.rgen.spv", "world_sharc_update_diagnostic_base.rgen.spv");
+    }
+
+    public static String sharcQueryRaygenShader(SharcRadianceEncoding encoding) {
+        return withEncoding(sharcQueryRaygenShader(), encoding);
+    }
+
+    public static String sharcDiffuseQueryRaygenShader(SharcRadianceEncoding encoding) {
+        return withEncoding(sharcDiffuseQueryRaygenShader(), encoding);
+    }
+
+    public static String sharcPrimaryQueryRaygenShader(SharcRadianceEncoding encoding) {
+        return withEncoding(sharcPrimaryQueryRaygenShader(), encoding);
+    }
+
+    public static String sharcUpdateRaygenShader(SharcRadianceEncoding encoding) {
+        return withEncoding(sharcUpdateRaygenShader(), encoding);
+    }
+
+    public static String sharcDiagnosticQueryRaygenShader(SharcRadianceEncoding encoding) {
+        return withEncoding(sharcDiagnosticQueryRaygenShader(), encoding);
+    }
+
+    public static String sharcPrimaryDiagnosticQueryRaygenShader(SharcRadianceEncoding encoding) {
+        return withEncoding(sharcPrimaryDiagnosticQueryRaygenShader(), encoding);
+    }
+
+    public static String sharcDiagnosticUpdateRaygenShader(SharcRadianceEncoding encoding) {
+        return withEncoding(sharcDiagnosticUpdateRaygenShader(), encoding);
+    }
+
+    /**
+     * Inserts the encoding suffix before the stage in a SHaRC shader filename.
+     * {@code "world_sharc.rgen.spv"} with {@code DIRECTIONAL_SH} becomes {@code "world_sharc_sh.rgen.spv"}.
+     * {@code "world_sharc_nv.rgen.spv"} becomes {@code "world_sharc_sh_nv.rgen.spv"}.
+     * {@code "world_sharc_base.rgen.spv"} becomes {@code "world_sharc_sh_base.rgen.spv"}.
+     */
+    public static String withEncoding(String shader, SharcRadianceEncoding encoding) {
+        Objects.requireNonNull(shader, "shader");
+        Objects.requireNonNull(encoding, "encoding");
+        String suffix = encoding.shaderSuffix();
+        if (suffix.isEmpty()) return shader;
+
+        final String stageSuffix = ".rgen.spv";
+        if (!shader.endsWith(stageSuffix)) {
+            throw new IllegalArgumentException(
+                    "Expected a raygen shader ending in " + stageSuffix + ": " + shader);
+        }
+        String stem = shader.substring(0, shader.length() - stageSuffix.length());
+        String backendSuffix;
+        if (stem.endsWith("_nv")) {
+            backendSuffix = "_nv";
+        } else if (stem.endsWith("_base")) {
+            backendSuffix = "_base";
+        } else {
+            backendSuffix = "";
+        }
+        int insertionPoint = stem.length() - backendSuffix.length();
+        return stem.substring(0, insertionPoint) + suffix + stem.substring(insertionPoint) + stageSuffix;
     }
 
     /** Standard TraceRay fallback needs a real shadow closest-hit; hit-object variants skip it entirely. */
@@ -461,6 +534,26 @@ public final class RtDeviceBringup {
         }
     }
 
+    private static boolean supportsShaderFloat16(VulkanPhysicalDevice physicalDevice) {
+        try (MemoryStack stack = MemoryStack.stackPush()) {
+            VkPhysicalDeviceVulkan12Features features = VkPhysicalDeviceVulkan12Features.calloc(stack).sType$Default();
+            VkPhysicalDeviceFeatures2 features2 = VkPhysicalDeviceFeatures2.calloc(stack).sType$Default()
+                    .pNext(features.address());
+            VK12.vkGetPhysicalDeviceFeatures2(physicalDevice.vkPhysicalDevice(), features2);
+            return features.shaderFloat16();
+        }
+    }
+
+    private static boolean supportsStorageBuffer16BitAccess(VulkanPhysicalDevice physicalDevice) {
+        try (MemoryStack stack = MemoryStack.stackPush()) {
+            VkPhysicalDeviceVulkan11Features features = VkPhysicalDeviceVulkan11Features.calloc(stack).sType$Default();
+            VkPhysicalDeviceFeatures2 features2 = VkPhysicalDeviceFeatures2.calloc(stack).sType$Default()
+                    .pNext(features.address());
+            VK11.vkGetPhysicalDeviceFeatures2(physicalDevice.vkPhysicalDevice(), features2);
+            return features.storageBuffer16BitAccess();
+        }
+    }
+
     private static FeatureSupport queryFeatureSupport(VulkanPhysicalDevice physicalDevice) {
         try (MemoryStack stack = MemoryStack.stackPush()) {
             VkPhysicalDeviceFeatures2 available = VkPhysicalDeviceFeatures2.calloc(stack).sType$Default();
@@ -521,12 +614,7 @@ public final class RtDeviceBringup {
         }
     }
 
-    /** Add the RT VulkanFeatures to arg2 after the matching extension names have been requested. */
-    @SuppressWarnings("unchecked")
-    public static void addFeatures(Args args, VulkanPhysicalDevice physicalDevice) {
-        if (!enabledByProperty()) {
-            return;
-        }
+    private static void resetRequestedDeviceState(VulkanPhysicalDevice physicalDevice) {
         rtRequested = false;
         serBackend = SerBackend.NONE;
         ommEnabled = false;
@@ -537,6 +625,21 @@ public final class RtDeviceBringup {
         wideLinesEnabled = false;
         sharcInt64AtomicsEnabled = false;
         maxLineWidth = 1.0f;
+        overlayMsaaSamples = VK10.VK_SAMPLE_COUNT_1_BIT;
+        traceRaysIndirectSupported = false;
+        maxRayDispatchInvocationCount = 0;
+        maxOpacity4StateSubdivisionLevel = 0;
+        RtSharcSupport.setDeviceFeaturesEnabled(false, false);
+    }
+
+    /** Add the RT VulkanFeatures to arg2 after the matching extension names have been requested. */
+    @SuppressWarnings("unchecked")
+    public static void addFeatures(Args args, VulkanPhysicalDevice physicalDevice) {
+        resetRequestedDeviceState(physicalDevice);
+
+        if (!enabledByProperty()) {
+            return;
+        }
         String missing = firstUnsupported(physicalDevice);
         if (missing != null) {
             if (!loggedUnavailable) {
@@ -561,10 +664,18 @@ public final class RtDeviceBringup {
         SerBackend selectedSerBackend = support.serBackend;
         // Optional SHaRC native atomic path. The separately packaged shaders require this exact feature;
         // if absent, they remain unavailable and the baseline pipeline is used.
-        sharcInt64AtomicsEnabled = RtSharcSupport.packaged() && supportsShaderBufferInt64Atomics(physicalDevice);
-        if (sharcInt64AtomicsEnabled) {
-            features.add(new VulkanFeature(VulkanBackend.VK12_FEATURES_STRUCT, "shaderBufferInt64Atomics",
-                    VkPhysicalDeviceVulkan12Features.SHADERBUFFERINT64ATOMICS));
+        boolean sharcPackaged = RtSharcSupport.packaged();
+        boolean sharcInt64Requested = sharcPackaged && supportsShaderBufferInt64Atomics(physicalDevice);
+        boolean sharcFloat16Requested = sharcPackaged && supportsShaderFloat16(physicalDevice);
+        boolean sharcStorage16Requested = sharcPackaged && supportsStorageBuffer16BitAccess(physicalDevice);
+        if (sharcInt64Requested) {
+            features.add(SHARC_BUFFER_INT64_ATOMICS_FEATURE);
+        }
+        if (sharcFloat16Requested) {
+            features.add(SHARC_SHADER_FLOAT16_FEATURE);
+        }
+        if (sharcStorage16Requested) {
+            features.add(SHARC_STORAGE_BUFFER_16_FEATURE);
         }
         if (selectedSerBackend != SerBackend.NONE) {
             features.add(selectedSerBackend == SerBackend.NV ? SER_NV_FEATURE : SER_EXT_FEATURE);
@@ -607,6 +718,8 @@ public final class RtDeviceBringup {
 
         rtRequested = true;
         serBackend = selectedSerBackend;
+        sharcInt64AtomicsEnabled = sharcInt64Requested;
+        RtSharcSupport.setDeviceFeaturesEnabled(sharcFloat16Requested, sharcStorage16Requested);
         CausticaMod.LOGGER.info(
                 "RT compatibility: device='{}' profile={} traceBackend={} ser={} ommSupported={} "
                         + "ommConfigured={} ommPolicy={} ommEnabled={} ommReason={} driverRaw=0x{}",
@@ -618,6 +731,8 @@ public final class RtDeviceBringup {
                 "Ray tracing: enabling {}{}{} + features [bufferDeviceAddress, accelerationStructure, rayTracingPipeline, rayQuery, optionalInvocationReorder({}), liveReorder=off, offlineReorder={}"
                         + (wideLinesEnabled ? ", wideLines(max=" + maxLineWidth + ")" : "")
                         + (sharcInt64AtomicsEnabled ? ", shaderBufferInt64Atomics(SHaRC)" : "")
+                        + (RtSharcSupport.shaderFloat16Enabled() ? ", shaderFloat16(SHaRC)" : "")
+                        + (RtSharcSupport.storageBuffer16BitAccessEnabled() ? ", storageBuffer16BitAccess(SHaRC)" : "")
                         + (ommEnabled ? ", opacityMicromap" : "") + "] + overlayMsaa=" + overlayMsaaSamples + "x on [{}]",
                 RT_EXTENSIONS, serBackend.extensionName == null ? "" : " + " + serBackend.extensionName,
                 ommEnabled ? " + " + OPTIONAL_RT_EXTENSIONS : "", serBackend.label,
