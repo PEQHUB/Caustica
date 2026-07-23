@@ -2,6 +2,7 @@ package dev.comfyfluffy.caustica.rt.terrain;
 
 import dev.comfyfluffy.caustica.CausticaConfig;
 import dev.comfyfluffy.caustica.CausticaMod;
+import dev.comfyfluffy.caustica.rt.TerrainJobOrder;
 
 import java.util.concurrent.PriorityBlockingQueue;
 import java.util.concurrent.ThreadFactory;
@@ -22,6 +23,8 @@ import java.util.concurrent.atomic.AtomicLong;
  * never block JVM exit.
  */
 public final class RtWorkerPool {
+    public static final RtWorkerPool INSTANCE = new RtWorkerPool();
+
     private ThreadPoolExecutor exec;
     private boolean shuttingDown;
 
