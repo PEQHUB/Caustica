@@ -112,7 +112,7 @@ public final class RtGpuExecutor {
 
     /** Mark a completed build visible to terrain publication; the next graphics terrain use waits on it. */
     public void markPublished(Build build) {
-        pendingPublishWaitValue.accumulateAndGet(build.value, Math::max);
+        pendingPublishWaitValue.accumulateAndGet(build.value(), Math::max);
     }
 
     /** Attach the required compute-build wait immediately before the RT command buffer is enqueued. */

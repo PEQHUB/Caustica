@@ -422,6 +422,19 @@ final class SharcIntegrationContractTest {
                 "Responsive lighting must be explicitly disabled for initial 1.8 migration");
     }
 
+    @Test
+    void productionManifestCountsOnlySharcResources() throws Exception {
+        String build = read("build.gradle");
+        assertTrue(build.contains("expectedSharcRuntimeResources"),
+                "Production verification should use a dedicated SHARC resource set");
+        assertFalse(build.contains("def sharcCount = required.count"),
+                "Do not count SHARC modules in the global production resource list");
+        assertTrue(build.contains("expectedSharcRuntimeResources.size() != 52"));
+        assertTrue(build.contains("unexpectedSharcResources"));
+        assertTrue(build.contains("sharc_atomic_probe.comp.spv"),
+                "The verifier should explicitly reject the build-only probe from the JAR");
+    }
+
     private static String read(String path) throws Exception {
         return Files.readString(Path.of(path));
     }

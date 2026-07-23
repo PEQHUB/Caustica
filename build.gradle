@@ -1094,72 +1094,56 @@ def verifyProductionArtifact = tasks.register("verifyProductionArtifact") {
 		if (providers.environmentVariable("NRD_LINUX_X64").isPresent()) {
 			required.add("caustica/natives/linux-x64/libnrdbridge.so")
 		}
+		def expectedSharcRuntimeResources = new LinkedHashSet<String>()
 		if (!configuredSharcSdk.isBlank()) {
-				required.addAll([
-				// RGB raygen families (7 families × 3 backends = 21)
-				"caustica/rt/world_sharc_base.rgen.spv",
-				"caustica/rt/world_sharc.rgen.spv",
-				"caustica/rt/world_sharc_nv.rgen.spv",
-				"caustica/rt/world_sharc_diffuse.rgen.spv",
-				"caustica/rt/world_sharc_diffuse_nv.rgen.spv",
-				"caustica/rt/world_sharc_diffuse_base.rgen.spv",
-				"caustica/rt/world_sharc_primary.rgen.spv",
-				"caustica/rt/world_sharc_primary_nv.rgen.spv",
-				"caustica/rt/world_sharc_primary_base.rgen.spv",
-				"caustica/rt/world_sharc_update.rgen.spv",
-				"caustica/rt/world_sharc_update_nv.rgen.spv",
-				"caustica/rt/world_sharc_update_base.rgen.spv",
-				"caustica/rt/world_sharc_diagnostic.rgen.spv",
-				"caustica/rt/world_sharc_diagnostic_nv.rgen.spv",
-				"caustica/rt/world_sharc_diagnostic_base.rgen.spv",
-				"caustica/rt/world_sharc_primary_diagnostic.rgen.spv",
-				"caustica/rt/world_sharc_primary_diagnostic_nv.rgen.spv",
-				"caustica/rt/world_sharc_primary_diagnostic_base.rgen.spv",
-				"caustica/rt/world_sharc_update_diagnostic.rgen.spv",
-				"caustica/rt/world_sharc_update_diagnostic_nv.rgen.spv",
-				"caustica/rt/world_sharc_update_diagnostic_base.rgen.spv",
-				// RGB helper family
+			def sharcRaygenFamilies = [
+				"world_sharc",
+				"world_sharc_diffuse",
+				"world_sharc_primary",
+				"world_sharc_update",
+				"world_sharc_diagnostic",
+				"world_sharc_primary_diagnostic",
+				"world_sharc_update_diagnostic"
+			]
+			def sharcBackends = ["", "_base", "_nv"]
+			def sharcEncodings = ["", "_sh"]
+			def generatedSharcResources = []
+			sharcRaygenFamilies.each { family ->
+				sharcEncodings.each { encoding ->
+					sharcBackends.each { backend ->
+						generatedSharcResources.add("caustica/rt/${family}${encoding}${backend}.rgen.spv")
+					}
+				}
+			}
+			generatedSharcResources.addAll([
+				// RGB hit, miss, and resolve family
 				"caustica/rt/world_sharc.rchit.spv",
 				"caustica/rt/world_sharc.rahit.spv",
 				"caustica/rt/world_sharc.rmiss.spv",
 				"caustica/rt/world_sharc_guide.rmiss.spv",
 				"caustica/rt/sharc_resolve.comp.spv",
-				// Directional-SH raygen families (7 families × 3 backends = 21)
-				"caustica/rt/world_sharc_sh.rgen.spv",
-				"caustica/rt/world_sharc_sh_base.rgen.spv",
-				"caustica/rt/world_sharc_sh_nv.rgen.spv",
-				"caustica/rt/world_sharc_diffuse_sh.rgen.spv",
-				"caustica/rt/world_sharc_diffuse_sh_base.rgen.spv",
-				"caustica/rt/world_sharc_diffuse_sh_nv.rgen.spv",
-				"caustica/rt/world_sharc_primary_sh.rgen.spv",
-				"caustica/rt/world_sharc_primary_sh_base.rgen.spv",
-				"caustica/rt/world_sharc_primary_sh_nv.rgen.spv",
-				"caustica/rt/world_sharc_update_sh.rgen.spv",
-				"caustica/rt/world_sharc_update_sh_base.rgen.spv",
-				"caustica/rt/world_sharc_update_sh_nv.rgen.spv",
-				"caustica/rt/world_sharc_diagnostic_sh.rgen.spv",
-				"caustica/rt/world_sharc_diagnostic_sh_base.rgen.spv",
-				"caustica/rt/world_sharc_diagnostic_sh_nv.rgen.spv",
-				"caustica/rt/world_sharc_primary_diagnostic_sh.rgen.spv",
-				"caustica/rt/world_sharc_primary_diagnostic_sh_base.rgen.spv",
-				"caustica/rt/world_sharc_primary_diagnostic_sh_nv.rgen.spv",
-				"caustica/rt/world_sharc_update_diagnostic_sh.rgen.spv",
-				"caustica/rt/world_sharc_update_diagnostic_sh_base.rgen.spv",
-				"caustica/rt/world_sharc_update_diagnostic_sh_nv.rgen.spv",
-				// Directional-SH helper family
+				// Directional-SH hit, miss, and resolve family
 				"caustica/rt/world_sharc_sh.rchit.spv",
 				"caustica/rt/world_sharc_sh.rahit.spv",
 				"caustica/rt/world_sharc_sh.rmiss.spv",
 				"caustica/rt/world_sharc_sh_guide.rmiss.spv",
-				"caustica/rt/sharc_resolve_sh.comp.spv",
-				// License
-				"META-INF/licenses/nvidia/NVIDIA-SHARC-SDK.txt"
+				"caustica/rt/sharc_resolve_sh.comp.spv"
 			])
-			// 42 raygens + 8 hit/miss helpers + 2 resolves = 52 runtime SHARC SPIR-V modules
-			def sharcCount = required.count { it.startsWith("caustica/rt/") && it.endsWith(".spv") }
-			if (sharcCount != 52) {
-				throw new GradleException("Unexpected SHARC runtime resource count: ${sharcCount} (expected 52)")
+			expectedSharcRuntimeResources.addAll(generatedSharcResources)
+			// 7 families x 2 encodings x 3 backends = 42 ray-generation modules
+			// 2 encodings x (rchit + rahit + primary miss + guide miss + resolve) = 10 support modules
+			// Total = 52 runtime modules
+			if (generatedSharcResources.size() != 52) {
+				throw new GradleException("Generated SHARC runtime manifest has "
+					+ generatedSharcResources.size() + " entries; expected 52")
 			}
+			if (expectedSharcRuntimeResources.size() != 52) {
+				throw new GradleException("Generated SHARC runtime manifest contains "
+					+ "duplicate names: expected 52 unique entries, got "
+					+ expectedSharcRuntimeResources.size())
+			}
+			required.addAll(expectedSharcRuntimeResources)
+			required.add("META-INF/licenses/nvidia/NVIDIA-SHARC-SDK.txt")
 		}
 		def runtimeZip = new java.util.zip.ZipFile(runtimeJar)
 		try {
@@ -1192,6 +1176,28 @@ def verifyProductionArtifact = tasks.register("verifyProductionArtifact") {
 					|| sharcProperties.getProperty("version") != sharcVersion
 					|| sharcProperties.getProperty("commit") != sharcCommit) {
 				throw new GradleException("Production JAR SHaRC capability marker is inconsistent")
+			}
+			if (!configuredSharcSdk.isBlank()) {
+				def actualSharcRuntimeResources = names.findAll { name ->
+					name.endsWith(".spv") && (
+						name.startsWith("caustica/rt/world_sharc")
+						|| name.startsWith("caustica/rt/sharc_")
+					)
+				} as Set<String>
+				def missingSharcResources = expectedSharcRuntimeResources.findAll {
+					!actualSharcRuntimeResources.contains(it)
+				}
+				def unexpectedSharcResources = actualSharcRuntimeResources.findAll {
+					!expectedSharcRuntimeResources.contains(it)
+				}
+				if (!missingSharcResources.empty || !unexpectedSharcResources.empty) {
+					throw new GradleException("Production JAR SHARC resource mismatch. Missing: "
+						+ missingSharcResources.join(", ") + "; unexpected: "
+						+ unexpectedSharcResources.join(", "))
+				}
+				if (names.contains("caustica/rt/sharc_atomic_probe.comp.spv")) {
+					throw new GradleException("Build-only SHARC atomic probe was packaged into the production JAR")
+				}
 			}
 		} finally {
 			runtimeZip.close()

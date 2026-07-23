@@ -537,19 +537,28 @@ public final class RtDeviceBringup {
         }
     }
 
-    /** Add the RT VulkanFeatures to arg2 after the matching extension names have been requested. */
-    @SuppressWarnings("unchecked")
-    public static void addFeatures(Args args, VulkanPhysicalDevice physicalDevice) {
-        if (!enabledByProperty()) {
-            return;
-        }
+    private static void resetRequestedDeviceState() {
         rtRequested = false;
         serBackend = SerBackend.NONE;
         ommEnabled = false;
         wideLinesEnabled = false;
         sharcInt64AtomicsEnabled = false;
         maxLineWidth = 1.0f;
+        overlayMsaaSamples = VK10.VK_SAMPLE_COUNT_1_BIT;
+        traceRaysIndirectSupported = false;
+        maxRayDispatchInvocationCount = 0;
+        maxOpacity4StateSubdivisionLevel = 0;
         RtSharcSupport.setDeviceFeaturesEnabled(false, false);
+    }
+
+    /** Add the RT VulkanFeatures to arg2 after the matching extension names have been requested. */
+    @SuppressWarnings("unchecked")
+    public static void addFeatures(Args args, VulkanPhysicalDevice physicalDevice) {
+        resetRequestedDeviceState();
+
+        if (!enabledByProperty()) {
+            return;
+        }
         String missing = firstUnsupported(physicalDevice);
         if (missing != null) {
             if (!loggedUnavailable) {
