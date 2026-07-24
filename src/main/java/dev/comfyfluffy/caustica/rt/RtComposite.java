@@ -252,6 +252,7 @@ public final class RtComposite {
     private static final int FRAME_FLAG_NRD = 1 << 12;
     private static final int FRAME_FLAG_NRD_SH = 1 << 13;
     private static final int FRAME_FLAG_DIRECT_SKY_STARS = 1 << 14;
+    private static final int FRAME_FLAG_DIMENSION_ATMOSPHERE = 1 << 15;
     private static final double TEMPORAL_TELEPORT_DISTANCE_SQ = 64.0 * 64.0;
     private static final long TEMPORAL_GAP_NANOS = 500_000_000L;
     // Frames a retired per-frame TLAS must outlive before it's freed (> frames-in-flight); matches
@@ -497,6 +498,7 @@ public final class RtComposite {
     private float lastSunAngularRadius = Float.NaN;
     private float lastMoonAngularRadius = Float.NaN;
     private int lastSkyParameterSignature = Integer.MIN_VALUE;
+    private int lastRenderedSkyParameterSignature = Integer.MIN_VALUE;
     private volatile float publishedSunAngle, publishedMoonAngle, publishedDayFactor, publishedTwilightFactor;
     private volatile float publishedAmbientEv, publishedSunX, publishedSunY, publishedSunZ;
     private volatile float publishedMoonX, publishedMoonY, publishedMoonZ;
@@ -635,6 +637,7 @@ public final class RtComposite {
         lastSunAngularRadius = Float.NaN;
         lastMoonAngularRadius = Float.NaN;
         lastSkyParameterSignature = Integer.MIN_VALUE;
+        lastRenderedSkyParameterSignature = Integer.MIN_VALUE;
         hasCapturedProjection = false;
         previousWaterWaveTimeValid = false;
         exposure.resetAutoHistory();
@@ -2212,9 +2215,7 @@ public final class RtComposite {
                 if (fs.is(FluidTags.WATER) && camY < cameraBlockPos.getY() + fs.getHeight(level, cameraBlockPos)) {
                     flags |= 0b01;
                 }
-                if (Level.OVERWORLD.equals(level.dimension())) {
-                    flags |= FRAME_FLAG_EARTH_ATMOSPHERE;
-                }
+                flags |= atmosphereFrameFlags(level);
             }
             if (waterWaves()) {
                 flags |= 0b10000; // W1: animated water wave normals
@@ -2866,7 +2867,28 @@ public final class RtComposite {
         float sunX = sunDirection[0], sunY = sunDirection[1], sunZ = sunDirection[2];
         float moonX = moonDirection[0], moonY = moonDirection[1], moonZ = moonDirection[2];
         float moonPhase = moonPhaseIndex;
-        boolean earthAtmosphere = mc.level != null && Level.OVERWORLD.equals(mc.level.dimension());
+
+        Level level = Minecraft.getInstance().level;
+        AtmosphereDimension frameDimension = AtmosphereDimension.resolve(level);
+
+        boolean simpleDimensionAtmosphere =
+                frameDimension != null
+                && frameDimension.isSimpleGradient();
+
+        /*
+         * Preserve the local Earth predicate. On public Alpha this is the vanilla
+         * Overworld check. The simple dimension branch must never also be Earth.
+         */
+        boolean earthAtmosphere =
+                !simpleDimensionAtmosphere
+                && level != null
+                && Level.OVERWORLD.equals(level.dimension());
+
+        SimpleDimensionAtmosphere simpleAtmosphere =
+                simpleDimensionAtmosphere
+                        ? simpleDimensionAtmosphere(frameDimension)
+                        : null;
+
         // Weather remains a vanilla presentation/gameplay effect (particles, sounds, wet weather state).
         // Do not use its global fade as RT radiance: at full rain it reaches zero and erases both celestial
         // discs and every transported sky light, including in biomes where precipitation is not visible.
@@ -2876,10 +2898,18 @@ public final class RtComposite {
         float dayFactor = astronomy.dayFactor();
         float twilightFactor = astronomy.twilightFactor();
         float solarEnvelope = astronomy.solarEnvelope();
-        float ambientEv = CausticaConfig.Rt.Composite.AMBIENT_LIGHT_EV.value();
-        float sunlightEv = CausticaConfig.Rt.Composite.SUNLIGHT_INTENSITY_EV.value();
-        float moonlightEv = CausticaConfig.Rt.Composite.MOONLIGHT_INTENSITY_EV.value();
-        float airglowEv = CausticaConfig.Rt.Composite.NIGHT_AIRGLOW_EV.value();
+        float ambientEv = simpleDimensionAtmosphere
+                ? 0.0f
+                : CausticaConfig.Rt.Composite.AMBIENT_LIGHT_EV.value();
+        float sunlightEv = simpleDimensionAtmosphere
+                ? 0.0f
+                : CausticaConfig.Rt.Composite.SUNLIGHT_INTENSITY_EV.value();
+        float moonlightEv = simpleDimensionAtmosphere
+                ? 0.0f
+                : CausticaConfig.Rt.Composite.MOONLIGHT_INTENSITY_EV.value();
+        float airglowEv = simpleDimensionAtmosphere
+                ? 0.0f
+                : CausticaConfig.Rt.Composite.NIGHT_AIRGLOW_EV.value();
         // Presentation sizes are deliberately independent of the finite direct-light sources. Large,
         // readable celestial sprites must not soften shadows or change transported scene illumination.
         float sunAngularRadius = CausticaConfig.Rt.Composite.SUN_ANGULAR_RADIUS.value();
@@ -2900,10 +2930,13 @@ public final class RtComposite {
                 CausticaConfig.Rt.Composite.SKY_TINT_G.value(),
                 CausticaConfig.Rt.Composite.SKY_TINT_B.value());
         int skyParameterSignature = skyParameterSignature();
+        int renderedSkyParameterSignature = simpleDimensionAtmosphere
+                ? dimensionAwareSkyParameterSignature(frameDimension)
+                : skyParameterSignature;
         float sunLightAngularRadius = (float)Math.toRadians(0.2666);
         float moonLightAngularRadius = (float)Math.toRadians(0.2727);
         handleSkyDiscontinuity(sunX, sunY, sunZ, ambientEv, sunlightEv, moonlightEv, airglowEv,
-                sunAngularRadius, moonAngularRadius, skyParameterSignature);
+                sunAngularRadius, moonAngularRadius, skyParameterSignature, renderedSkyParameterSignature);
         Float4 environmentSky = linearBt2020FromPackedRgb(packedSky);
 
         float[] sunTrans = new float[3];
@@ -2941,7 +2974,7 @@ public final class RtComposite {
             moonHorizonVisibility = 0.0f;
             moonEffectiveIlluminanceLux = 0.0f;
         }
-        float ambientMultiplier = (float)Math.pow(2.0, ambientEv);
+        float ambientMultiplier = evMultiplier(ambientEv);
         publishedSunAngle = astronomy.solarHourAngle(); publishedMoonAngle = astronomy.lunarHourAngle();
         publishedDayFactor = dayFactor; publishedTwilightFactor = twilightFactor; publishedAmbientEv = ambientEv;
         publishedSunX = sunX; publishedSunY = sunY; publishedSunZ = sunZ;
@@ -2954,7 +2987,41 @@ public final class RtComposite {
         float sunDiscScale = (float)Math.pow(2.0, CausticaConfig.Rt.Composite.SUN_DISC_BRIGHTNESS_EV.value());
         float moonDiscScale = (float)Math.pow(2.0, CausticaConfig.Rt.Composite.MOON_DISC_BRIGHTNESS_EV.value());
         float starScale = (float)Math.pow(2.0, CausticaConfig.Rt.Composite.STAR_BRIGHTNESS_EV.value());
-        return new SkyPush(
+
+        float effectiveSkyBrightness = simpleDimensionAtmosphere
+                ? evMultiplier(simpleAtmosphere.brightnessEv())
+                : atmosphere.brightnessScale();
+        float effectiveSkySaturation = simpleDimensionAtmosphere
+                ? simpleAtmosphere.saturation()
+                : atmosphere.saturation();
+        Float4 effectiveAirglowHorizon = simpleDimensionAtmosphere
+                ? new Float4(
+                        simpleAtmosphere.horizonR(),
+                        simpleAtmosphere.horizonG(),
+                        simpleAtmosphere.horizonB(),
+                        simpleAtmosphere.gradientPower()
+                )
+                : new Float4(
+                        CausticaConfig.Rt.Composite.AIRGLOW_HORIZON_R.value(),
+                        CausticaConfig.Rt.Composite.AIRGLOW_HORIZON_G.value(),
+                        CausticaConfig.Rt.Composite.AIRGLOW_HORIZON_B.value(),
+                        0.0f
+                );
+        Float4 effectiveAirglowZenith = simpleDimensionAtmosphere
+                ? new Float4(
+                        simpleAtmosphere.zenithR(),
+                        simpleAtmosphere.zenithG(),
+                        simpleAtmosphere.zenithB(),
+                        0.0f
+                )
+                : new Float4(
+                        CausticaConfig.Rt.Composite.AIRGLOW_ZENITH_R.value(),
+                        CausticaConfig.Rt.Composite.AIRGLOW_ZENITH_G.value(),
+                        CausticaConfig.Rt.Composite.AIRGLOW_ZENITH_B.value(),
+                        0.0f
+                );
+
+        SkyPush push = new SkyPush(
                 new Float4(sunX, sunY, sunZ, rainBrightness),
                 new Float4(lx, ly, lz, lightRadius),
                 new Float4(rr, rg, rb, starBrightness),
@@ -2967,7 +3034,7 @@ public final class RtComposite {
                 new Float4(atmosphere.rayleigh(), atmosphere.aerosolScatter(),
                         atmosphere.aerosolAbsorption(), atmosphere.ozone()),
                 new Float4(atmosphere.aerosolHeightKm(), atmosphere.aerosolAnisotropy(),
-                        atmosphere.brightnessScale(), atmosphere.saturation()),
+                        effectiveSkyBrightness, effectiveSkySaturation),
                 new Float4(atmosphere.tintR(), atmosphere.tintG(), atmosphere.tintB(), 0.0f),
                 new Float4(sunDiscScale, moonDiscScale,
                         CausticaConfig.Rt.Composite.SUN_LIMB_DARKENING.value(), starScale),
@@ -2982,12 +3049,9 @@ public final class RtComposite {
                 new Float4(CausticaConfig.Rt.Composite.STAR_TINT_R.value(),
                         CausticaConfig.Rt.Composite.STAR_TINT_G.value(),
                         CausticaConfig.Rt.Composite.STAR_TINT_B.value(), 0.0f),
-                new Float4(CausticaConfig.Rt.Composite.AIRGLOW_HORIZON_R.value(),
-                        CausticaConfig.Rt.Composite.AIRGLOW_HORIZON_G.value(),
-                        CausticaConfig.Rt.Composite.AIRGLOW_HORIZON_B.value(), 0.0f),
-                new Float4(CausticaConfig.Rt.Composite.AIRGLOW_ZENITH_R.value(),
-                        CausticaConfig.Rt.Composite.AIRGLOW_ZENITH_G.value(),
-                        CausticaConfig.Rt.Composite.AIRGLOW_ZENITH_B.value(), 0.0f), atmosphere);
+                effectiveAirglowHorizon,
+                effectiveAirglowZenith, atmosphere);
+        return push;
     }
 
     static float vanillaDayFactor(int packedSky) {
@@ -3013,7 +3077,8 @@ public final class RtComposite {
                                          float ambientEv, float sunlightEv,
                                          float moonlightEv, float airglowEv,
                                          float sunAngularRadius, float moonAngularRadius,
-                                         int skyParameterSignature) {
+                                         int skyParameterSignature,
+                                         int renderedSkyParameterSignature) {
         boolean ambientChanged = !Float.isNaN(lastSkyAmbientEv)
                 && Float.floatToIntBits(ambientEv) != Float.floatToIntBits(lastSkyAmbientEv);
         boolean sourceChanged = (!Float.isNaN(lastSunlightEv)
@@ -3032,17 +3097,21 @@ public final class RtComposite {
                 && Float.floatToIntBits(sunAngularRadius) != Float.floatToIntBits(lastSunAngularRadius))
                 || (!Float.isNaN(lastMoonAngularRadius)
                 && Float.floatToIntBits(moonAngularRadius) != Float.floatToIntBits(lastMoonAngularRadius));
-        boolean skyParametersChanged = lastSkyParameterSignature != Integer.MIN_VALUE
+        boolean skyLutChanged = lastSkyParameterSignature != Integer.MIN_VALUE
                 && lastSkyParameterSignature != skyParameterSignature;
-        if (skyParametersChanged) {
+        boolean renderedSkyChanged = lastRenderedSkyParameterSignature != Integer.MIN_VALUE
+                && lastRenderedSkyParameterSignature != renderedSkyParameterSignature;
+        if (skyLutChanged) {
             skyTransmittanceReady = false;
             skyViewStateValid = false;
         }
-        if (ambientChanged || sourceChanged || timeJump || samplingChanged || skyParametersChanged) {
+        if (ambientChanged || sourceChanged || timeJump || samplingChanged || skyLutChanged || renderedSkyChanged) {
             String reason = timeJump ? "time-of-day jumped"
                     : (sourceChanged ? "sky light source changed"
                     : (samplingChanged ? "celestial sampling radius changed"
-                    : (skyParametersChanged ? "sky parameters changed" : "ambient light changed")));
+                    : (skyLutChanged ? "sky LUT parameters changed"
+                    : (renderedSkyChanged ? "rendered sky parameters changed"
+                    : "ambient light changed"))));
             fgReset = true;
             rrProducedPreviousFrame = false;
             RtReconstruction.requestHistoryReset();
@@ -3059,6 +3128,7 @@ public final class RtComposite {
         lastSunAngularRadius = sunAngularRadius;
         lastMoonAngularRadius = moonAngularRadius;
         lastSkyParameterSignature = skyParameterSignature;
+        lastRenderedSkyParameterSignature = renderedSkyParameterSignature;
     }
 
     public static float interpolatedRayleighStrength(float solarEnvelope, float nightRayleigh,
@@ -3112,6 +3182,101 @@ public final class RtComposite {
                 CausticaConfig.Rt.Composite.AIRGLOW_ZENITH_R.value(),
                 CausticaConfig.Rt.Composite.AIRGLOW_ZENITH_G.value(),
                 CausticaConfig.Rt.Composite.AIRGLOW_ZENITH_B.value());
+    }
+
+    private record SimpleDimensionAtmosphere(
+            float horizonR,
+            float horizonG,
+            float horizonB,
+            float zenithR,
+            float zenithG,
+            float zenithB,
+            float brightnessEv,
+            float saturation,
+            float gradientPower
+    ) {
+    }
+
+    private static SimpleDimensionAtmosphere simpleDimensionAtmosphere(
+            AtmosphereDimension dimension
+    ) {
+        return switch (dimension) {
+            case NETHER -> new SimpleDimensionAtmosphere(
+                    CausticaConfig.Rt.Composite.NetherAtmosphere.HORIZON_R.value(),
+                    CausticaConfig.Rt.Composite.NetherAtmosphere.HORIZON_G.value(),
+                    CausticaConfig.Rt.Composite.NetherAtmosphere.HORIZON_B.value(),
+                    CausticaConfig.Rt.Composite.NetherAtmosphere.ZENITH_R.value(),
+                    CausticaConfig.Rt.Composite.NetherAtmosphere.ZENITH_G.value(),
+                    CausticaConfig.Rt.Composite.NetherAtmosphere.ZENITH_B.value(),
+                    CausticaConfig.Rt.Composite.NetherAtmosphere.BRIGHTNESS_EV.value(),
+                    CausticaConfig.Rt.Composite.NetherAtmosphere.SATURATION.value(),
+                    CausticaConfig.Rt.Composite.NetherAtmosphere.GRADIENT_POWER.value()
+            );
+            case END -> new SimpleDimensionAtmosphere(
+                    CausticaConfig.Rt.Composite.EndAtmosphere.HORIZON_R.value(),
+                    CausticaConfig.Rt.Composite.EndAtmosphere.HORIZON_G.value(),
+                    CausticaConfig.Rt.Composite.EndAtmosphere.HORIZON_B.value(),
+                    CausticaConfig.Rt.Composite.EndAtmosphere.ZENITH_R.value(),
+                    CausticaConfig.Rt.Composite.EndAtmosphere.ZENITH_G.value(),
+                    CausticaConfig.Rt.Composite.EndAtmosphere.ZENITH_B.value(),
+                    CausticaConfig.Rt.Composite.EndAtmosphere.BRIGHTNESS_EV.value(),
+                    CausticaConfig.Rt.Composite.EndAtmosphere.SATURATION.value(),
+                    CausticaConfig.Rt.Composite.EndAtmosphere.GRADIENT_POWER.value()
+            );
+            case OVERWORLD -> throw new IllegalArgumentException(
+                    "The Overworld uses the physical atmosphere pipeline"
+            );
+        };
+    }
+
+    private static float evMultiplier(float exposureValue) {
+        return (float)Math.pow(2.0, exposureValue);
+    }
+
+    private static int dimensionAwareSkyParameterSignature(
+            AtmosphereDimension dimension
+    ) {
+        if (dimension != null && dimension.isSimpleGradient()) {
+            return dimensionAtmosphereSignature(dimension);
+        }
+
+        return skyParameterSignature();
+    }
+
+    private static int dimensionAtmosphereSignature(
+            AtmosphereDimension dimension
+    ) {
+        SimpleDimensionAtmosphere a = simpleDimensionAtmosphere(dimension);
+        int hash = 17;
+        hash = 31 * hash + dimension.ordinal();
+        hash = hashFloat(hash, a.horizonR());
+        hash = hashFloat(hash, a.horizonG());
+        hash = hashFloat(hash, a.horizonB());
+        hash = hashFloat(hash, a.zenithR());
+        hash = hashFloat(hash, a.zenithG());
+        hash = hashFloat(hash, a.zenithB());
+        hash = hashFloat(hash, a.brightnessEv());
+        hash = hashFloat(hash, a.saturation());
+        hash = hashFloat(hash, a.gradientPower());
+        return hash;
+    }
+
+    private static int hashFloat(int hash, float value) {
+        return 31 * hash + Float.floatToIntBits(value);
+    }
+
+    private static int atmosphereFrameFlags(Level level) {
+        AtmosphereDimension dimension = AtmosphereDimension.resolve(level);
+
+        if (dimension == AtmosphereDimension.OVERWORLD) {
+            return FRAME_FLAG_EARTH_ATMOSPHERE;
+        }
+
+        if (dimension != null && dimension.isSimpleGradient()) {
+            return FRAME_FLAG_DIMENSION_ATMOSPHERE;
+        }
+
+        return 0;
     }
 
     static boolean replacementAtlasesReady(boolean reloadComplete, long blockAtlas, long celestialAtlas) {

@@ -382,6 +382,10 @@ public final class SettingsCatalog {
             section(Page.SKY_ATMOSPHERE, "sky.celestial", false),
             section(Page.SKY_ATMOSPHERE, "sky.stars", false),
             section(Page.SKY_ATMOSPHERE, "sky.airglow", false),
+            section(Page.SKY_ATMOSPHERE, "sky.nether.colors", true),
+            section(Page.SKY_ATMOSPHERE, "sky.nether.shape", false),
+            section(Page.SKY_ATMOSPHERE, "sky.end.colors", true),
+            section(Page.SKY_ATMOSPHERE, "sky.end.shape", false),
             section(Page.GEOMETRY_SCENE, "geometry.pathTracer", true),
             section(Page.GEOMETRY_SCENE, "geometry.scene", true),
             section(Page.GEOMETRY_SCENE, "geometry.surface", true),
@@ -521,6 +525,22 @@ public final class SettingsCatalog {
                 "sky", "caustica.options.rt.sky.",
                 "nightAirglow", "airglowHorizonR", "airglowHorizonG", "airglowHorizonB",
                 "airglowZenithR", "airglowZenithG", "airglowZenithB");
+
+        add(controls, Page.SKY_ATMOSPHERE, "sky.nether.colors", Tier.STANDARD, ChangeEffect.LIVE,
+                "sky.nether", "caustica.options.rt.sky.nether.",
+                "horizonR", "horizonG", "horizonB",
+                "zenithR", "zenithG", "zenithB");
+        add(controls, Page.SKY_ATMOSPHERE, "sky.nether.shape", Tier.STANDARD, ChangeEffect.LIVE,
+                "sky.nether", "caustica.options.rt.sky.nether.",
+                "brightness", "saturation", "gradientPower");
+
+        add(controls, Page.SKY_ATMOSPHERE, "sky.end.colors", Tier.STANDARD, ChangeEffect.LIVE,
+                "sky.end", "caustica.options.rt.sky.end.",
+                "horizonR", "horizonG", "horizonB",
+                "zenithR", "zenithG", "zenithB");
+        add(controls, Page.SKY_ATMOSPHERE, "sky.end.shape", Tier.STANDARD, ChangeEffect.LIVE,
+                "sky.end", "caustica.options.rt.sky.end.",
+                "brightness", "saturation", "gradientPower");
 
         controls.add(control("geometry.psrMirrorDepth", "caustica.options.rt.psrMirrorDepth",
                 Page.GEOMETRY_SCENE, "geometry.surface", Tier.EXPERT, ChangeEffect.LIVE,

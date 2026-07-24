@@ -77,6 +77,9 @@ public final class CausticaConfig {
      * file round-trips the full surface even for settings the renderer has not touched yet.
      */
     public static void ensureRegistered() {
+        Rt.Composite.NetherAtmosphere.touch();
+        Rt.Composite.EndAtmosphere.touch();
+
         @SuppressWarnings("unused")
         Object[] touch = {
             Rt.ENABLED, Rt.Composite.SPP, Rt.Composite.MAX_BOUNCES,
@@ -102,6 +105,16 @@ public final class CausticaConfig {
             Rt.Materials.STONE_ROUGHNESS, Rt.Materials.WOOD_ROUGHNESS,
             Rt.Materials.METAL_ROUGHNESS, Rt.Materials.GLASS_ROUGHNESS,
             Rt.Materials.WOOL_FIBER_SHEEN, Rt.Materials.POLISHED_ROUGHNESS,
+            Rt.Composite.NetherAtmosphere.HORIZON_R, Rt.Composite.NetherAtmosphere.HORIZON_G,
+            Rt.Composite.NetherAtmosphere.HORIZON_B, Rt.Composite.NetherAtmosphere.ZENITH_R,
+            Rt.Composite.NetherAtmosphere.ZENITH_G, Rt.Composite.NetherAtmosphere.ZENITH_B,
+            Rt.Composite.NetherAtmosphere.BRIGHTNESS_EV, Rt.Composite.NetherAtmosphere.SATURATION,
+            Rt.Composite.NetherAtmosphere.GRADIENT_POWER,
+            Rt.Composite.EndAtmosphere.HORIZON_R, Rt.Composite.EndAtmosphere.HORIZON_G,
+            Rt.Composite.EndAtmosphere.HORIZON_B, Rt.Composite.EndAtmosphere.ZENITH_R,
+            Rt.Composite.EndAtmosphere.ZENITH_G, Rt.Composite.EndAtmosphere.ZENITH_B,
+            Rt.Composite.EndAtmosphere.BRIGHTNESS_EV, Rt.Composite.EndAtmosphere.SATURATION,
+            Rt.Composite.EndAtmosphere.GRADIENT_POWER,
         };
     }
 
@@ -945,6 +958,76 @@ public final class CausticaConfig {
             public static final FloatSetting AIRGLOW_ZENITH_R = skyRgb("airglow-zenith-r", 0.0f);
             public static final FloatSetting AIRGLOW_ZENITH_G = skyRgb("airglow-zenith-g", 1.0f);
             public static final FloatSetting AIRGLOW_ZENITH_B = skyRgb("airglow-zenith-b", 1.0f);
+
+            /*
+             * Placeholder dimension-atmosphere defaults.
+             *
+             * Keep these grouped so tuned values can later be copied directly from the
+             * generated TOML back into this constructor block.
+             */
+            public static final class NetherAtmosphere {
+                public static final FloatSetting HORIZON_R =
+                        dimensionAtmosphereFloat("nether", "horizonR", "horizon-r", 0.300f, 0.0f, 4.0f);
+                public static final FloatSetting HORIZON_G =
+                        dimensionAtmosphereFloat("nether", "horizonG", "horizon-g", 0.035f, 0.0f, 4.0f);
+                public static final FloatSetting HORIZON_B =
+                        dimensionAtmosphereFloat("nether", "horizonB", "horizon-b", 0.010f, 0.0f, 4.0f);
+                public static final FloatSetting ZENITH_R =
+                        dimensionAtmosphereFloat("nether", "zenithR", "zenith-r", 0.025f, 0.0f, 4.0f);
+                public static final FloatSetting ZENITH_G =
+                        dimensionAtmosphereFloat("nether", "zenithG", "zenith-g", 0.004f, 0.0f, 4.0f);
+                public static final FloatSetting ZENITH_B =
+                        dimensionAtmosphereFloat("nether", "zenithB", "zenith-b", 0.002f, 0.0f, 4.0f);
+                public static final FloatSetting BRIGHTNESS_EV =
+                        dimensionAtmosphereFloat("nether", "brightnessEv", "brightness-ev", 0.0f, -4.0f, 4.0f);
+                public static final FloatSetting SATURATION =
+                        dimensionAtmosphereFloat("nether", "saturation", "saturation", 1.0f, 0.0f, 2.0f);
+                public static final FloatSetting GRADIENT_POWER =
+                        dimensionAtmosphereFloat("nether", "gradientPower", "gradient-power", 0.75f, 0.05f, 8.0f);
+                private NetherAtmosphere() {}
+                private static void touch() {}
+            }
+
+            public static final class EndAtmosphere {
+                public static final FloatSetting HORIZON_R =
+                        dimensionAtmosphereFloat("end", "horizonR", "horizon-r", 0.040f, 0.0f, 4.0f);
+                public static final FloatSetting HORIZON_G =
+                        dimensionAtmosphereFloat("end", "horizonG", "horizon-g", 0.018f, 0.0f, 4.0f);
+                public static final FloatSetting HORIZON_B =
+                        dimensionAtmosphereFloat("end", "horizonB", "horizon-b", 0.075f, 0.0f, 4.0f);
+                public static final FloatSetting ZENITH_R =
+                        dimensionAtmosphereFloat("end", "zenithR", "zenith-r", 0.004f, 0.0f, 4.0f);
+                public static final FloatSetting ZENITH_G =
+                        dimensionAtmosphereFloat("end", "zenithG", "zenith-g", 0.002f, 0.0f, 4.0f);
+                public static final FloatSetting ZENITH_B =
+                        dimensionAtmosphereFloat("end", "zenithB", "zenith-b", 0.012f, 0.0f, 4.0f);
+                public static final FloatSetting BRIGHTNESS_EV =
+                        dimensionAtmosphereFloat("end", "brightnessEv", "brightness-ev", 0.0f, -4.0f, 4.0f);
+                public static final FloatSetting SATURATION =
+                        dimensionAtmosphereFloat("end", "saturation", "saturation", 1.0f, 0.0f, 2.0f);
+                public static final FloatSetting GRADIENT_POWER =
+                        dimensionAtmosphereFloat("end", "gradientPower", "gradient-power", 1.25f, 0.05f, 8.0f);
+                private EndAtmosphere() {}
+                private static void touch() {}
+            }
+
+            private static FloatSetting dimensionAtmosphereFloat(
+                    String dimension,
+                    String runtimeName,
+                    String tomlName,
+                    float fallback,
+                    float minimum,
+                    float maximum
+            ) {
+                return clampedFloat(
+                        "caustica.rt.sky." + dimension + "." + runtimeName,
+                        "composite.sky." + dimension + "." + tomlName,
+                        fallback,
+                        minimum,
+                        maximum
+                );
+            }
+
             public static final FloatSetting JITTER_SIGN_X =
                     finiteFloat("caustica.rt.jitterSignX", "composite.jitter-sign-x", 1.0f);
             public static final FloatSetting JITTER_SIGN_Y =

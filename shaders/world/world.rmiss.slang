@@ -399,6 +399,7 @@ void main(inout Payload payload) {
     bool presentationSky = primaryRay || filterSky
             || (payload.flags & PAYLOAD_PRESENTATION_SKY) != 0u;
     bool earthAtmosphere = (pc.flags & (1u << 10u)) != 0u;
+    bool dimensionAtmosphere = (pc.flags & FRAME_FLAG_DIMENSION_ATMOSPHERE) != 0u;
 
     // Physically-based in-scattering: blue zenith, bright/desaturated horizon, warm Mie halo + red
     // sunset all fall out of the Rayleigh/Mie/ozone march. At night the sun is below the horizon so the
@@ -417,6 +418,31 @@ void main(inout Payload payload) {
     float3 col;
     if (earthAtmosphere) {
         col = filterSky ? sampleMirrorSky(skyDir, pc) : sampleSkyView(skyDir);
+    } else if (dimensionAtmosphere) {
+        /*
+         * Simple gradient sky for Nether/End: lerp horizon→zenith using abs(dir.y) raised to
+         * gradient power, scaled by brightness EV. Below the horizon on non-presentation rays,
+         * blend toward the ground/void to avoid leaking dimension color into underground geometry.
+         */
+        float vertical = pow(
+            saturate(abs(dir.y)),
+            max(pc.skyAirglowHorizon.w, 0.01)
+        );
+
+        float3 horizon = bt709ToBt2020(
+            max(pc.skyAirglowHorizon.xyz, float3(0.0))
+        );
+
+        float3 zenith = bt709ToBt2020(
+            max(pc.skyAirglowZenith.xyz, float3(0.0))
+        );
+
+        col = lerp(horizon, zenith, vertical)
+            * max(pc.skyShape.z, 0.0);
+        if (!presentationSky && !aboveHorizon) {
+            float boundaryWeight = smoothstep(-1.0e-3, 0.0, dir.y);
+            col = lerp(groundVoid * ambientMultiplier, col, boundaryWeight);
+        }
     } else {
         col = max(pc.environmentSky.xyz, float3(0.0)) * fallbackGradient;
     }

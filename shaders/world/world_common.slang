@@ -168,6 +168,7 @@ public struct LightGridSpan {
 // Realtime primary sky stars are composited once at reconstruction output resolution. Offline ground
 // truth deliberately leaves this bit clear so its RT star path remains the reference transport.
 public static const uint FRAME_FLAG_DIRECT_SKY_STARS = 1u << 14u;
+public static const uint FRAME_FLAG_DIMENSION_ATMOSPHERE = 1u << 15u;
 
 // Radiance-ray payload (location 0). Member order and types are a cross-stage ABI.
 public struct Payload {

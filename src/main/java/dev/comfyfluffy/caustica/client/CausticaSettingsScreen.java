@@ -111,8 +111,10 @@ public class CausticaSettingsScreen extends Screen {
     private SettingsUiMetrics metrics;
     private Page category = Page.ESSENTIALS;
     private Page buildingCategory = Page.ESSENTIALS;
+    private dev.comfyfluffy.caustica.rt.AtmosphereDimension atmosphereDimension;
     private String pendingTargetId;
     private String pendingRevealReasonKey;
+    private boolean pendingAtmosphereContentReset;
     private AbstractWidget targetWidget;
     private AbstractWidget flashWidget;
     private CollapsibleLayout activeBundle;
@@ -146,6 +148,8 @@ public class CausticaSettingsScreen extends Screen {
                 ? initialCategory : legacyStateFallback
                         ? CausticaMenuUsage.INSTANCE.lastCategory() : uiState.lastPageId();
         this.category = Page.parse(requestedCategory);
+        this.atmosphereDimension =
+                dev.comfyfluffy.caustica.rt.AtmosphereDimension.editorDefault(Minecraft.getInstance().level);
         if (legacyTreeState) migrateLegacyExpansionState();
     }
 
@@ -472,11 +476,31 @@ public class CausticaSettingsScreen extends Screen {
                         CausticaConfig.Rt.Sdr.TONEMAP_MODE.configuredValue(),
                         CausticaConfig.Rt.Hdr.TONEMAP_MODE.configuredValue()));
         category = plan.page();
+
+        if (plan.page() == Page.SKY_ATMOSPHERE) {
+            atmosphereDimension = atmosphereDimensionForControl(control);
+        }
+
         searchQuery = "";
         temporaryExpandedSectionId = null;
         pendingTargetId = plan.available() ? plan.targetControlId() : null;
         pendingRevealReasonKey = plan.unavailableReasonKey();
         rebuildScreen();
+    }
+
+    private static dev.comfyfluffy.caustica.rt.AtmosphereDimension atmosphereDimensionForControl(
+            Control control
+    ) {
+        String id = control.id();
+
+        if (id.startsWith("sky.nether.")) {
+            return dev.comfyfluffy.caustica.rt.AtmosphereDimension.NETHER;
+        }
+        if (id.startsWith("sky.end.")) {
+            return dev.comfyfluffy.caustica.rt.AtmosphereDimension.END;
+        }
+
+        return dev.comfyfluffy.caustica.rt.AtmosphereDimension.OVERWORLD;
     }
 
     private void addDisplayHdr() {
@@ -799,6 +823,16 @@ public class CausticaSettingsScreen extends Screen {
 
     private void addSky() {
         addHeader("sky");
+        addAtmosphereDimensionSelector();
+
+        switch (atmosphereDimension) {
+            case OVERWORLD -> addOverworldAtmosphere();
+            case NETHER -> addNetherAtmosphere();
+            case END -> addEndAtmosphere();
+        }
+    }
+
+    private void addOverworldAtmosphere() {
         List<AbstractWidget> atmosphere = new ArrayList<>();
         atmosphere.add(skySlider("rayleigh", CausticaConfig.Rt.Composite.SKY_RAYLEIGH, 0.02, 4.0));
         atmosphere.add(skySlider("dayRayleigh", CausticaConfig.Rt.Composite.SKY_DAY_RAYLEIGH, 0.02, 4.0));
@@ -848,6 +882,153 @@ public class CausticaSettingsScreen extends Screen {
                 CausticaConfig.Rt.Composite.AIRGLOW_ZENITH_G, CausticaConfig.Rt.Composite.AIRGLOW_ZENITH_B);
         addBundle("sky.airglow");
         addGrid(airglow);
+    }
+
+    private void addNetherAtmosphere() {
+        addSimpleDimensionAtmosphere(
+                "nether",
+                CausticaConfig.Rt.Composite.NetherAtmosphere.HORIZON_R,
+                CausticaConfig.Rt.Composite.NetherAtmosphere.HORIZON_G,
+                CausticaConfig.Rt.Composite.NetherAtmosphere.HORIZON_B,
+                CausticaConfig.Rt.Composite.NetherAtmosphere.ZENITH_R,
+                CausticaConfig.Rt.Composite.NetherAtmosphere.ZENITH_G,
+                CausticaConfig.Rt.Composite.NetherAtmosphere.ZENITH_B,
+                CausticaConfig.Rt.Composite.NetherAtmosphere.BRIGHTNESS_EV,
+                CausticaConfig.Rt.Composite.NetherAtmosphere.SATURATION,
+                CausticaConfig.Rt.Composite.NetherAtmosphere.GRADIENT_POWER
+        );
+    }
+
+    private void addEndAtmosphere() {
+        addSimpleDimensionAtmosphere(
+                "end",
+                CausticaConfig.Rt.Composite.EndAtmosphere.HORIZON_R,
+                CausticaConfig.Rt.Composite.EndAtmosphere.HORIZON_G,
+                CausticaConfig.Rt.Composite.EndAtmosphere.HORIZON_B,
+                CausticaConfig.Rt.Composite.EndAtmosphere.ZENITH_R,
+                CausticaConfig.Rt.Composite.EndAtmosphere.ZENITH_G,
+                CausticaConfig.Rt.Composite.EndAtmosphere.ZENITH_B,
+                CausticaConfig.Rt.Composite.EndAtmosphere.BRIGHTNESS_EV,
+                CausticaConfig.Rt.Composite.EndAtmosphere.SATURATION,
+                CausticaConfig.Rt.Composite.EndAtmosphere.GRADIENT_POWER
+        );
+    }
+
+    private void addSimpleDimensionAtmosphere(
+            String dimension,
+            CausticaConfig.FloatSetting horizonR,
+            CausticaConfig.FloatSetting horizonG,
+            CausticaConfig.FloatSetting horizonB,
+            CausticaConfig.FloatSetting zenithR,
+            CausticaConfig.FloatSetting zenithG,
+            CausticaConfig.FloatSetting zenithB,
+            CausticaConfig.FloatSetting brightnessEv,
+            CausticaConfig.FloatSetting saturation,
+            CausticaConfig.FloatSetting gradientPower
+    ) {
+        List<AbstractWidget> colors = new ArrayList<>();
+
+        colors.add(dimensionSkySlider(dimension, "horizonR", horizonR, 0.0, 4.0));
+        colors.add(dimensionSkySlider(dimension, "horizonG", horizonG, 0.0, 4.0));
+        colors.add(dimensionSkySlider(dimension, "horizonB", horizonB, 0.0, 4.0));
+
+        colors.add(dimensionSkySlider(dimension, "zenithR", zenithR, 0.0, 4.0));
+        colors.add(dimensionSkySlider(dimension, "zenithG", zenithG, 0.0, 4.0));
+        colors.add(dimensionSkySlider(dimension, "zenithB", zenithB, 0.0, 4.0));
+
+        addBundle("sky." + dimension + ".colors");
+        addGrid(colors);
+
+        List<AbstractWidget> shape = new ArrayList<>();
+
+        shape.add(dimensionSkyEvSlider(dimension, "brightness", brightnessEv, -8.0, 8.0));
+        shape.add(dimensionSkySlider(dimension, "saturation", saturation, 0.0, 2.0));
+        shape.add(dimensionSkySlider(dimension, "gradientPower", gradientPower, 0.05, 8.0));
+
+        addBundle("sky." + dimension + ".shape");
+        addGrid(shape);
+    }
+
+    private AbstractWidget dimensionSkySlider(
+            String dimension,
+            String settingName,
+            CausticaConfig.FloatSetting setting,
+            double minimum,
+            double maximum
+    ) {
+        String translationKey =
+                "caustica.options.rt.sky." + dimension + "." + settingName;
+
+        return floatSlider(
+                Component.translatable(translationKey),
+                setting,
+                minimum,
+                maximum,
+                value -> String.format(Locale.ROOT, "%.2f", value)
+        ).tooltip(Component.translatable(translationKey + ".tooltip"));
+    }
+
+    private AbstractWidget dimensionSkyEvSlider(
+            String dimension,
+            String settingName,
+            CausticaConfig.FloatSetting setting,
+            double minimum,
+            double maximum
+    ) {
+        String translationKey =
+                "caustica.options.rt.sky." + dimension + "." + settingName;
+
+        return floatSlider(
+                Component.translatable(translationKey),
+                setting,
+                minimum,
+                maximum,
+                value -> String.format(Locale.ROOT, "%+.1f EV", value)
+        ).tooltip(Component.translatable(translationKey + ".tooltip"));
+    }
+
+    private void addAtmosphereDimensionSelector() {
+        List<AbstractWidget> buttons =
+                new ArrayList<>(dev.comfyfluffy.caustica.rt.AtmosphereDimension.values().length);
+
+        for (dev.comfyfluffy.caustica.rt.AtmosphereDimension dimension :
+                dev.comfyfluffy.caustica.rt.AtmosphereDimension.values()) {
+            ActionButton button = new ActionButton(
+                    180,
+                    () -> Component.translatable(dimension.translationKey()),
+                    () -> selectAtmosphereDimension(dimension),
+                    atmosphereDimension == dimension
+            );
+
+            button.tooltip(Component.translatable(dimension.tooltipKey()));
+            buttons.add(button);
+        }
+
+        int columns = metrics.compact() ? 1 : 3;
+
+        body.addChild(new WidgetGridLayout(
+                contentWidth,
+                columns,
+                metrics.gridGap(),
+                metrics.gridGap(),
+                metrics.controlHeight(),
+                buttons
+        ));
+    }
+
+    private void selectAtmosphereDimension(dev.comfyfluffy.caustica.rt.AtmosphereDimension target) {
+        if (atmosphereDimension == target) {
+            return;
+        }
+
+        pendingAtmosphereContentReset = true;
+        atmosphereDimension = target;
+
+        temporaryExpandedSectionId = null;
+        pendingTargetId = null;
+        pendingRevealReasonKey = null;
+
+        rebuildScreen();
     }
 
     private void addGeometry() {
@@ -1801,6 +1982,11 @@ public class CausticaSettingsScreen extends Screen {
 
     private void restorePositionOrRevealTarget(int bodyTop) {
         if (bodyScrollArea == null) return;
+        if (pendingAtmosphereContentReset) {
+            pendingAtmosphereContentReset = false;
+            bodyScrollArea.setScrollAmount(0.0);
+            return;
+        }
         if (targetWidget != null) {
             double targetScroll = Math.max(0.0, targetWidget.getY() - bodyTop - metrics.controlHeight());
             bodyScrollArea.setScrollAmount(targetScroll);
