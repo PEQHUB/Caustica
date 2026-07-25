@@ -39,7 +39,11 @@ import dev.comfyfluffy.caustica.rt.RtContext;
 import dev.comfyfluffy.caustica.rt.RtFrameStats;
 import dev.comfyfluffy.caustica.rt.accel.RtAccel;
 import dev.comfyfluffy.caustica.rt.accel.RtBuffer;
+import dev.comfyfluffy.caustica.rt.material.RtMaterialRegistry;
 import dev.comfyfluffy.caustica.rt.pipeline.RtPipeline;
+
+import net.minecraft.resources.Identifier;
+import net.minecraft.world.level.block.Blocks;
 
 import it.unimi.dsi.fastutil.floats.FloatArrayList;
 import it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap;
@@ -91,6 +95,26 @@ public final class RtEntities {
     private static final int MASK_ALL = 0xFF;
     /** Particles are primary-ray-only: visible/lit by the camera path, invisible to shadows/GI/reflections. */
     private static final int PARTICLE_MASK = MASK_PRIMARY;
+
+    /*
+     * Minimal RT representation of the vanilla End portal.
+     *
+     * The vanilla raster shader performs camera-dependent two-texture projection.
+     * Caustica's generic custom-quad capture does not carry that shader contract,
+     * so use the actual portal texture on one stable, block-local emissive plane.
+     * Resource packs can still replace the same vanilla Identifier.
+     */
+    private static final Identifier END_PORTAL_TEXTURE =
+            Identifier.withDefaultNamespace("textures/entity/end_portal.png");
+    private static final float END_PORTAL_SURFACE_Y = 0.75f;
+    private static final float END_PORTAL_EMISSION = 1.0f;
+
+    /* Counter-clockwise from above, producing a +Y geometric normal. */
+    private static final float[] END_PORTAL_X = { 0.0f, 0.0f, 1.0f, 1.0f };
+    private static final float[] END_PORTAL_Y = { END_PORTAL_SURFACE_Y, END_PORTAL_SURFACE_Y, END_PORTAL_SURFACE_Y, END_PORTAL_SURFACE_Y };
+    private static final float[] END_PORTAL_Z = { 0.0f, 1.0f, 1.0f, 0.0f };
+    private static final float[] END_PORTAL_U = { 0.0f, 0.0f, 1.0f, 1.0f };
+    private static final float[] END_PORTAL_V = { 0.0f, 1.0f, 1.0f, 0.0f };
     public static boolean particlesEnabled() {
         return CausticaConfig.Rt.Entities.PARTICLES_ENABLED.value();
     }
@@ -1232,6 +1256,28 @@ public final class RtEntities {
         }
     }
 
+    private void captureEndPortalSurface() {
+        capture.currentTexSlot =
+                RtEntityTextures.INSTANCE.slotForAtlas(END_PORTAL_TEXTURE);
+
+        capture.currentMaterialId =
+                RtMaterialRegistry.INSTANCE.entityFallbackId(false);
+
+        capture.currentAlphaBucket =
+                RtAccel.ENTITY_BUCKET_ANY_HIT;
+
+        capture.currentPrimFlags = 0;
+        capture.currentOrder = 0;
+        capture.clearUvRemap();
+
+        capture.addDirectQuad(
+                END_PORTAL_X, END_PORTAL_Y, END_PORTAL_Z,
+                END_PORTAL_U, END_PORTAL_V,
+                0.0f, 1.0f, 0.0f,
+                0xFFFFFFFF, END_PORTAL_EMISSION
+        );
+    }
+
     /** Re-mesh one block entity; rebuild its cached BLAS only if the mesh changed (budgeted); then emit it. */
     private void updateBlockEntity(RtContext ctx, FrameBuild build, BlockEntityRenderDispatcher beDispatcher,
                                    BlockEntity be, float partial, long now, int rbx, int rby, int rbz) {
@@ -1239,14 +1285,18 @@ public final class RtEntities {
         try {
             BlockEntityRenderState state = beDispatcher.tryExtractRenderState(be, partial, null, false);
             if (state == null) {
-                return; // off-screen-only (beacon/end-gateway), distance-culled, or no renderer
+                return;
             }
-            collector.begin(capture, false);
-            // Identity pose ⇒ block-local mesh; world placement is the per-frame instance transform in emitBe.
-            resetPoseStack(blockEntityPoseStack);
-            beDispatcher.submit(state, blockEntityPoseStack, collector, cameraState);
+
+            if (be.getBlockState().is(Blocks.END_PORTAL)) {
+                captureEndPortalSurface();
+            } else {
+                collector.begin(capture, false);
+                resetPoseStack(blockEntityPoseStack);
+                beDispatcher.submit(state, blockEntityPoseStack, collector, cameraState);
+            }
         } catch (Throwable t) {
-            throw new RuntimeException("RT block-entity capture failed", t); // propagate to composite() (see entity path)
+            throw new RuntimeException("RT block-entity capture failed", t);
         } finally {
             resetPoseStack(blockEntityPoseStack);
             collector.begin(null, false);
