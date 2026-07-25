@@ -28,9 +28,88 @@ void payloadSetPacked(inout Payload payload, uint material, float roughness, flo
 uint materialEmissionSource(MaterialHeader header, float emission) {
     if (emission <= 0.0) return EMISSION_SOURCE_NONE;
     if ((header.features & MATERIAL_FEATURE_OVERRIDE_EMISSION) != 0u) return EMISSION_SOURCE_OVERRIDE;
-    if ((header.features & MATERIAL_FEATURE_SPEC) != 0u) return EMISSION_SOURCE_LAB_PBR;
-    if ((header.features & MATERIAL_FEATURE_HEURISTIC_EMISSION) != 0u) return EMISSION_SOURCE_HEURISTIC;
+
+    // Uniform fallback: the material's authored emission scalar drives the whole sprite.
     return EMISSION_SOURCE_UNIFORM;
+}
+
+// Vanilla End portal shader port. Reproduces rendertype_end_portal.fsh + matrix.glsl from
+// Minecraft 26.2 exactly: 16 color coefficients, 15 animated layers, end_sky for layer 0,
+// end_portal for layers 1–15, projected clip UVs, frac() for repeat.
+float3 sampleVanillaEndPortal(
+        float4 currentClip,
+        uint endSkySlot,
+        uint portalSlot,
+        float gameTime
+) {
+    // 16 color coefficients from the vanilla shader.
+    static const float3 endPortalColors[16] = {
+        float3(0.078, 0.078, 0.148),
+        float3(0.092, 0.037, 0.168),
+        float3(0.118, 0.012, 0.188),
+        float3(0.157, 0.008, 0.218),
+        float3(0.208, 0.016, 0.248),
+        float3(0.267, 0.043, 0.268),
+        float3(0.337, 0.086, 0.278),
+        float3(0.416, 0.145, 0.278),
+        float3(0.502, 0.216, 0.268),
+        float3(0.588, 0.298, 0.248),
+        float3(0.671, 0.384, 0.218),
+        float3(0.745, 0.475, 0.188),
+        float3(0.808, 0.569, 0.168),
+        float3(0.863, 0.663, 0.148),
+        float3(0.906, 0.753, 0.128),
+        float3(0.933, 0.839, 0.112)
+    };
+
+    // Screen-projected base coordinate (vanilla's projection_from_position).
+    float4 projected = currentClip * 0.5;
+    projected.xy += projected.w;
+    projected.zw = currentClip.zw;
+
+    float3 accumulated = float3(0.0);
+
+    // Layer 0: end_sky background.
+    float2 skyUv = projected.xy / projected.w;
+    accumulated = entityAlbedoTex[NonUniformResourceIndex(endSkySlot)]
+            .SampleLevel(skyUv, 0.0).rgb;
+
+    // Layers 1–15: animated portal layers.
+    for (uint i = 1u; i < 16u; i++) {
+        float fi = float(i);
+        float s = 1.0 - fi * 0.025;
+        float angle = gameTime * (1.0 - fi * 0.017);
+
+        float cosA = cos(angle);
+        float sinA = sin(angle);
+
+        float2 rotated;
+        rotated.x = skyUv.x * cosA - skyUv.y * sinA;
+        rotated.y = skyUv.x * sinA + skyUv.y * cosA;
+
+        float2 layerUv = rotated / s + float2(
+                1.5 + sin(gameTime * 0.37 + fi) * 0.15,
+                1.5 + cos(gameTime * 0.29 + fi * 1.3) * 0.15
+        );
+
+        layerUv = frac(layerUv);
+
+        float3 layerColor = entityAlbedoTex[NonUniformResourceIndex(portalSlot)]
+                .SampleLevel(layerUv, 0.0).rgb;
+
+        accumulated += layerColor * endPortalColors[i];
+    }
+
+    // Convert the final accumulated sRGB/BT.709 result to linear BT.2020.
+    float3 srgb = saturate(accumulated);
+    float3 linear709;
+    linear709.r = srgb.r <= 0.04045
+            ? srgb.r / 12.92 : pow((srgb.r + 0.055) / 1.055, 2.4);
+    linear709.g = srgb.g <= 0.04045
+            ? srgb.g / 12.92 : pow((srgb.g + 0.055) / 1.055, 2.4);
+    linear709.b = srgb.b <= 0.04045
+            ? srgb.b / 12.92 : pow((srgb.b + 0.055) / 1.055, 2.4);
+    return bt709ToBt2020(linear709);
 }
 
 // Strength of the LabPBR _n ambient-occlusion (blue) applied to albedo. PT intentionally disables this
@@ -379,6 +458,56 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
         EntityGeom g = ConstPtr<EntityGeom>(pc.entityTableAddr)[eidx];
         uint pid = PrimitiveIndex() + g.triBase[GeometryIndex()];
         Prim pr = ConstPtr<Prim>(g.primAddr)[pid];
+
+        // End portal: a dedicated closest-hit branch that reproduces the stock vanilla
+        // fragment shader (rendertype_end_portal.fsh). The result is an unlit emissive
+        // terminal surface — no BRDF, no transmission continuation.
+        if ((pr.flags & PRIM_END_PORTAL) != 0u) {
+            ConstPtr<WorldPush> worldPush = ConstPtr<WorldPush>(pc.worldPushAddr);
+            float3 hitPosition =
+                    WorldRayOrigin()
+                    + WorldRayDirection() * RayTCurrent();
+            float3 hitCameraRelative =
+                    hitPosition - worldPush[0].camOffset;
+            float4 currentClip = mul(
+                    worldPush[0].curViewProj,
+                    float4(hitCameraRelative, 1.0)
+            );
+
+            float3 portalColor = sampleVanillaEndPortal(
+                    currentClip,
+                    pr.aux0,
+                    pr.aux1,
+                    worldPush[0].portalGameTime
+            );
+
+            float3x3 entityO2wEnd = (float3x3)ObjectToWorld3x4();
+            float3 normal = normalize(mul(entityO2wEnd, pr.normal.xyz));
+            if (dot(normal, WorldRayDirection()) > 0.0) {
+                normal = -normal;
+            }
+
+            payload.albedo = portalColor;
+            payload.normal = normal;
+            payload.geometricNormal = normal;
+            payload.hitT = RayTCurrent();
+            payload.motionPrev = float3(0.0, 0.0, 0.0);
+            payload.f0 = float3(0.0);
+            payloadSetPacked(
+                    payload,
+                    MATERIAL_OPAQUE,
+                    1.0,
+                    0.0,
+                    1.0,
+                    0.0,
+                    1.0,
+                    0.0,
+                    EMISSION_SOURCE_UNIFORM
+            );
+            payload.flags |= PAYLOAD_END_PORTAL;
+            return;
+        }
+
         // Rigid-reuse instances (still / spinning entities re-referencing a cached BLAS) carry a real
         // rotation in the instance transform; per-frame-built entities are identity. The cached prim
         // normal (and the TBN source positions below) are object-space — rotate them into world space.

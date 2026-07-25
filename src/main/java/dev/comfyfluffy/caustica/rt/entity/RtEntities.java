@@ -104,6 +104,8 @@ public final class RtEntities {
      * so use the actual portal texture on one stable, block-local emissive plane.
      * Resource packs can still replace the same vanilla Identifier.
      */
+    private static final Identifier END_SKY_TEXTURE =
+            Identifier.withDefaultNamespace("textures/environment/end_sky.png");
     private static final Identifier END_PORTAL_TEXTURE =
             Identifier.withDefaultNamespace("textures/entity/end_portal.png");
     private static final float END_PORTAL_SURFACE_Y = 0.75f;
@@ -1257,24 +1259,36 @@ public final class RtEntities {
     }
 
     private void captureEndPortalSurface() {
-        capture.currentTexSlot =
+        int endSkySlot =
+                RtEntityTextures.INSTANCE.slotForAtlas(END_SKY_TEXTURE);
+
+        int portalLayerSlot =
                 RtEntityTextures.INSTANCE.slotForAtlas(END_PORTAL_TEXTURE);
 
+        // The dedicated closest-hit branch reads the two slots from aux0/aux1.
+        // tint.w remains a valid fallback texture slot if the semantic flag is
+        // accidentally lost.
+        capture.currentTexSlot = portalLayerSlot;
         capture.currentMaterialId =
                 RtMaterialRegistry.INSTANCE.entityFallbackId(false);
 
+        // Vanilla writes an opaque final portal color. Do not run the raw portal
+        // texture through entity alpha testing.
         capture.currentAlphaBucket =
-                RtAccel.ENTITY_BUCKET_ANY_HIT;
+                RtAccel.ENTITY_BUCKET_OPAQUE;
 
         capture.currentPrimFlags = 0;
         capture.currentOrder = 0;
         capture.clearUvRemap();
 
-        capture.addDirectQuad(
+        capture.addSpecialDirectQuad(
                 END_PORTAL_X, END_PORTAL_Y, END_PORTAL_Z,
                 END_PORTAL_U, END_PORTAL_V,
                 0.0f, 1.0f, 0.0f,
-                0xFFFFFFFF, END_PORTAL_EMISSION
+                0xFFFFFFFF, 1.0f,
+                RtEntityCapture.PRIM_END_PORTAL,
+                endSkySlot,
+                portalLayerSlot
         );
     }
 

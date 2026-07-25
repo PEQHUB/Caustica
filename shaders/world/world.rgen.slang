@@ -355,6 +355,7 @@ bool payloadTorchEmitter() { return (payload.flags & PAYLOAD_TORCH_EMITTER) != 0
 bool payloadLavaSurface() { return (payload.flags & PAYLOAD_LAVA_SURFACE) != 0u; }
 bool payloadFiberSurface() { return (payload.flags & PAYLOAD_FIBER_SURFACE) != 0u; }
 bool payloadEnchanted() { return (payload.flags & PAYLOAD_ENCHANTED) != 0u; }
+bool payloadEndPortal() { return (payload.flags & PAYLOAD_END_PORTAL) != 0u; }
 float payloadRoughness() { return unpackHalf2(payload.roughMetal).x; }
 float payloadMetalness() { return unpackHalf2(payload.roughMetal).y; }
 float payloadEmission() { return unpackHalf2(payload.emissionSss).x; }
@@ -1997,6 +1998,54 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
         rayConeWidth = max(rayConeWidth + rayConeSpread * max(payload.hitT, 0.0), RAY_CONE_MIN_WIDTH);
         uint material = payloadMaterial();
         uint opticalClass = material == MATERIAL_GLASS ? payloadOpticalClass() : OPTICAL_NONE;
+
+        // End portal: an unlit emissive terminal surface. The closest-hit shader already
+        // computed the vanilla-projected portal color. Add it and terminate the path.
+        if (payloadEndPortal()) {
+            float3 portalRadiance = payload.albedo;
+
+            if (captureGuides && segment == 0) {
+                gv_normal = payload.normal;
+                gv_geometricNormal = payload.geometricNormal;
+                // This is emitted radiance, not reflected diffuse material.
+                gv_albedo = float3(0.0);
+                gv_specAlb = float3(0.0);
+                gv_rough = 1.0;
+                gv_hitCamRel = hitPos - pc.camOffset;
+                gv_motionHitCamRel = gv_hitCamRel;
+                gv_motionUseRefracted = false;
+                gv_motionObjDisp = payload.motionPrev;
+                // Vanilla's texture projection and time animation do not follow a
+                // world-surface motion vector. Reject stale reconstructed pattern.
+                gv_animatedGuide = 1.0;
+            }
+
+            if (!primaryOnly) {
+                float3 contribution = throughput * portalRadiance;
+                L += contribution;
+#if CAUSTICA_NRD
+                addNrdContribution(
+                        contribution,
+                        scatteringDepth == 0 ? 0 : nrdPrimaryLobe,
+                        nrdDiffuseRadiance,
+                        nrdSpecularRadiance
+                );
+#endif
+            }
+
+#if CAUSTICA_SHARC_UPDATE
+            SharcUpdateMiss(
+                    sharcParameters,
+                    sharcState,
+                    portalRadiance
+            );
+#endif
+
+            // The stock portal shader is a final unlit surface. It has no BRDF or
+            // transmission continuation.
+            break;
+        }
+
         bool translucentSurface = material == MATERIAL_GLASS
                 && opticalClass == OPTICAL_TRANSLUCENT_SURFACE;
 

@@ -133,6 +133,7 @@ public struct WorldPush {
     [vk::offset(880)] public int4     lightGridDims;       // xyz dense grid dimensions, w reserved
     [vk::offset(896)] public uint     lightCount;       // packed Light records in lightBufAddr
     [vk::offset(900)] public uint     risCandidates;    // RIS candidate count M per diffuse vertex (0 = emitter NEE off)
+    [vk::offset(904)] public float    portalGameTime;   // shader game time for End portal animation
 };
 
 // 48-byte hot area-light record. Radiance uses packed R11G11B10 and the grid-relative owner section
@@ -223,6 +224,7 @@ public static const uint PAYLOAD_EMITTER_IN_LIST = 1u << 19u;
 // Camera-connected reflection/refraction misses need the visible below-horizon sky fallback, but are
 // not primary rays: keeping this separate preserves the direct-sky star compositing contract.
 public static const uint PAYLOAD_PRESENTATION_SKY = 1u << 20u;
+public static const uint PAYLOAD_END_PORTAL = 1u << 21u;
 
 public static const uint PAYLOAD_MATERIAL_MASK = 3u;
 public static const uint MATERIAL_OPAQUE = 0u;
@@ -253,6 +255,7 @@ public struct Prim {
 // Terrain currently uses bit 0 for torch-emitter ownership, so keep this on a separate bit.
 public static const uint PRIM_FIRST_PERSON_THIN_GLASS = 1u << 1u;
 public static const uint PRIM_ENCHANTED = 1u << 2u;
+public static const uint PRIM_END_PORTAL = 1u << 3u;
 
 // Terrain per-triangle record (48 B). The final 16-byte lane contains integer geometry-local metadata;
 // shared surface parameters live once in MaterialHeader instead of being copied into every triangle.

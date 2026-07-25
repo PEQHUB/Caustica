@@ -2360,7 +2360,10 @@ public final class RtComposite {
                     new Int4(terrain.lightGridDimX(), terrain.lightGridDimY(),
                             terrain.lightGridDimZ(), 0),
                     terrain.lightCount(),
-                    CausticaConfig.Rt.Lights.RIS_CANDIDATES.value()
+                    CausticaConfig.Rt.Lights.RIS_CANDIDATES.value(),
+                    level != null
+                            ? (level.getGameTime() + Minecraft.getInstance().getDeltaTracker().getGameTimeDeltaPartialTick(false)) / 20.0f
+                            : 0.0f
             ).write(push);
             pushBuf.flush(0L, WORLD_PUSH_SIZE);
             if (skyViewPipeline != null && skyViewLut != null) {

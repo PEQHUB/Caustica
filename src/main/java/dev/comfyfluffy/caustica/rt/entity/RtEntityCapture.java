@@ -23,6 +23,7 @@ public final class RtEntityCapture implements VertexConsumer {
     private static final int DEFAULT_VERTEX_CAPACITY = 1024;
     static final int PRIM_FIRST_PERSON_THIN_GLASS = 1 << 1;
     static final int PRIM_ENCHANTED = 1 << 2;
+    static final int PRIM_END_PORTAL = 1 << 3;
     // Same magnitude as RtTerrain.QuadCapture.OFFSET (2e-4 blocks) — proven large enough to break a BVH
     // depth tie without a visible gap at terrain/entity scale.
     private static final float ORDER_OFFSET = 2.0e-4f;
@@ -363,6 +364,14 @@ public final class RtEntityCapture implements VertexConsumer {
         appendQuad(x, y, z, null, u, v, nx, ny, nz, color, uvRemap, emission);
     }
 
+    /** Append a direct quad with explicit primitive flags and aux0/aux1 metadata. */
+    void addSpecialDirectQuad(float[] x, float[] y, float[] z, float[] u, float[] v,
+                              float nx, float ny, float nz, int color, float emission,
+                              int primitiveFlags, int aux0, int aux1) {
+        appendQuad(x, y, z, null, u, v, nx, ny, nz, color, uvRemap, emission,
+                primitiveFlags, aux0, aux1);
+    }
+
     /** Fail fast before a later submission can accidentally complete a malformed custom-geometry quad. */
     void requireCompleteQuads(String label) {
         if (n != 0) {
@@ -380,6 +389,13 @@ public final class RtEntityCapture implements VertexConsumer {
 
     private void appendQuad(float[] x, float[] y, float[] z, int[] corners, float[] u, float[] v,
                             float nx, float ny, float nz, int color, boolean remapUv, float emission) {
+        appendQuad(x, y, z, corners, u, v, nx, ny, nz, color, remapUv, emission,
+                currentPrimFlags, 0, 0);
+    }
+
+    private void appendQuad(float[] x, float[] y, float[] z, int[] corners, float[] u, float[] v,
+                            float nx, float ny, float nz, int color, boolean remapUv, float emission,
+                            int primitiveFlags, int aux0, int aux1) {
         // Authored model normal (pose-transformed by compile); planar quad, so vertex 0's normal is the
         // face normal. Baked quads (items/blocks) pass no normal → fall back to a geometric one from the
         // quad edges. The closest-hit flips it toward the viewer, as for terrain. Computed BEFORE the
@@ -467,9 +483,9 @@ public final class RtEntityCapture implements VertexConsumer {
             primitives[lane + 6] = tb;
             primitives[lane + 7] = (float) currentTexSlot; // tint.w = bindless texture slot
             primitives[lane + 8] = Float.intBitsToFloat(currentMaterialId);
-            primitives[lane + 9] = Float.intBitsToFloat(currentPrimFlags);
-            primitives[lane + 10] = 0f; // aux0
-            primitives[lane + 11] = 0f; // aux1
+            primitives[lane + 9] = Float.intBitsToFloat(primitiveFlags);
+            primitives[lane + 10] = Float.intBitsToFloat(aux0);
+            primitives[lane + 11] = Float.intBitsToFloat(aux1);
         }
         int bucketStart = alphaBuckets.size();
         reserveUninitialized(alphaBuckets, 2);
