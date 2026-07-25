@@ -85,6 +85,7 @@ import dev.comfyfluffy.caustica.rt.pipeline.RtSharcResolvePipeline;
 import dev.comfyfluffy.caustica.rt.pipeline.RtSkyViewPipeline;
 import dev.comfyfluffy.caustica.rt.pipeline.RtSkyStarLayerPipeline;
 import dev.comfyfluffy.caustica.rt.terrain.RtTerrain;
+import dev.comfyfluffy.caustica.rt.RtVanillaPortalClock;
 
 import java.nio.ByteBuffer;
 import java.nio.LongBuffer;
@@ -2361,9 +2362,7 @@ public final class RtComposite {
                             terrain.lightGridDimZ(), 0),
                     terrain.lightCount(),
                     CausticaConfig.Rt.Lights.RIS_CANDIDATES.value(),
-                    level != null
-                            ? (level.getGameTime() + Minecraft.getInstance().getDeltaTracker().getGameTimeDeltaPartialTick(false)) / 20.0f
-                            : 0.0f
+                    RtVanillaPortalClock.portalGameTime(level, Minecraft.getInstance().getDeltaTracker().getGameTimeDeltaPartialTick(false))
             ).write(push);
             pushBuf.flush(0L, WORLD_PUSH_SIZE);
             if (skyViewPipeline != null && skyViewLut != null) {

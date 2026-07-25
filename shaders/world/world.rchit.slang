@@ -7,6 +7,7 @@
 // through worldPushAddr first would cost an extra global-memory load just to find the address of the
 // load we actually want. The cold WorldPush struct is dereferenced only for the breaking overlay.
 import world_common;
+import world_portal;
 
 [[vk::push_constant]] WorldPushConstants pc;
 
@@ -33,84 +34,7 @@ uint materialEmissionSource(MaterialHeader header, float emission) {
     return EMISSION_SOURCE_UNIFORM;
 }
 
-// Vanilla End portal shader port. Reproduces rendertype_end_portal.fsh + matrix.glsl from
-// Minecraft 26.2 exactly: 16 color coefficients, 15 animated layers, end_sky for layer 0,
-// end_portal for layers 1–15, projected clip UVs, frac() for repeat.
-float3 sampleVanillaEndPortal(
-        float4 currentClip,
-        uint endSkySlot,
-        uint portalSlot,
-        float gameTime
-) {
-    // 16 color coefficients from the vanilla shader.
-    static const float3 endPortalColors[16] = {
-        float3(0.078, 0.078, 0.148),
-        float3(0.092, 0.037, 0.168),
-        float3(0.118, 0.012, 0.188),
-        float3(0.157, 0.008, 0.218),
-        float3(0.208, 0.016, 0.248),
-        float3(0.267, 0.043, 0.268),
-        float3(0.337, 0.086, 0.278),
-        float3(0.416, 0.145, 0.278),
-        float3(0.502, 0.216, 0.268),
-        float3(0.588, 0.298, 0.248),
-        float3(0.671, 0.384, 0.218),
-        float3(0.745, 0.475, 0.188),
-        float3(0.808, 0.569, 0.168),
-        float3(0.863, 0.663, 0.148),
-        float3(0.906, 0.753, 0.128),
-        float3(0.933, 0.839, 0.112)
-    };
-
-    // Screen-projected base coordinate (vanilla's projection_from_position).
-    float4 projected = currentClip * 0.5;
-    projected.xy += projected.w;
-    projected.zw = currentClip.zw;
-
-    float3 accumulated = float3(0.0);
-
-    // Layer 0: end_sky background.
-    float2 skyUv = projected.xy / projected.w;
-    accumulated = entityAlbedoTex[NonUniformResourceIndex(endSkySlot)]
-            .SampleLevel(skyUv, 0.0).rgb;
-
-    // Layers 1–15: animated portal layers.
-    for (uint i = 1u; i < 16u; i++) {
-        float fi = float(i);
-        float s = 1.0 - fi * 0.025;
-        float angle = gameTime * (1.0 - fi * 0.017);
-
-        float cosA = cos(angle);
-        float sinA = sin(angle);
-
-        float2 rotated;
-        rotated.x = skyUv.x * cosA - skyUv.y * sinA;
-        rotated.y = skyUv.x * sinA + skyUv.y * cosA;
-
-        float2 layerUv = rotated / s + float2(
-                1.5 + sin(gameTime * 0.37 + fi) * 0.15,
-                1.5 + cos(gameTime * 0.29 + fi * 1.3) * 0.15
-        );
-
-        layerUv = frac(layerUv);
-
-        float3 layerColor = entityAlbedoTex[NonUniformResourceIndex(portalSlot)]
-                .SampleLevel(layerUv, 0.0).rgb;
-
-        accumulated += layerColor * endPortalColors[i];
-    }
-
-    // Convert the final accumulated sRGB/BT.709 result to linear BT.2020.
-    float3 srgb = saturate(accumulated);
-    float3 linear709;
-    linear709.r = srgb.r <= 0.04045
-            ? srgb.r / 12.92 : pow((srgb.r + 0.055) / 1.055, 2.4);
-    linear709.g = srgb.g <= 0.04045
-            ? srgb.g / 12.92 : pow((srgb.g + 0.055) / 1.055, 2.4);
-    linear709.b = srgb.b <= 0.04045
-            ? srgb.b / 12.92 : pow((srgb.b + 0.055) / 1.055, 2.4);
-    return bt709ToBt2020(linear709);
-}
+// Vanilla End portal shader is now in world_portal.slang.
 
 // Strength of the LabPBR _n ambient-occlusion (blue) applied to albedo. PT intentionally disables this
 // baked AO term (0.0) to avoid double-darkening with path-traced sky-visibility occlusion.
@@ -459,10 +383,13 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
         uint pid = PrimitiveIndex() + g.triBase[GeometryIndex()];
         Prim pr = ConstPtr<Prim>(g.primAddr)[pid];
 
-        // End portal: a dedicated closest-hit branch that reproduces the stock vanilla
+        // End portal / End gateway: a dedicated closest-hit branch that reproduces the stock vanilla
         // fragment shader (rendertype_end_portal.fsh). The result is an unlit emissive
         // terminal surface — no BRDF, no transmission continuation.
         if ((pr.flags & PRIM_END_PORTAL) != 0u) {
+            bool isGateway = (pr.flags & PRIM_END_GATEWAY) != 0u;
+            uint layerCount = isGateway ? 16u : 15u;
+
             ConstPtr<WorldPush> worldPush = ConstPtr<WorldPush>(pc.worldPushAddr);
             float3 hitPosition =
                     WorldRayOrigin()
@@ -474,12 +401,24 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
                     float4(hitCameraRelative, 1.0)
             );
 
-            float3 portalColor = sampleVanillaEndPortal(
-                    currentClip,
+            // Reproduce vanilla's projection_from_position: scale by 0.5, shift xy by w, keep zw.
+            float4 texProj0 = currentClip * 0.5;
+            texProj0.xy += texProj0.w;
+            texProj0.zw = currentClip.zw;
+
+            // Sample the exact vanilla portal effect (sRGB domain).
+            float3 portalSrgb = sampleVanillaEndPortal(
+                    texProj0,
                     pr.aux0,
                     pr.aux1,
-                    worldPush[0].portalGameTime
+                    worldPush[0].portalGameTime,
+                    layerCount,
+                    entityAlbedoTex
             );
+
+            // Decode sRGB → linear BT.709 → linear BT.2020.
+            float3 portalLinear709 = srgbToLinear(portalSrgb);
+            float3 portalColor = bt709ToBt2020(portalLinear709);
 
             float3x3 entityO2wEnd = (float3x3)ObjectToWorld3x4();
             float3 normal = normalize(mul(entityO2wEnd, pr.normal.xyz));

@@ -225,6 +225,7 @@ public static const uint PAYLOAD_EMITTER_IN_LIST = 1u << 19u;
 // not primary rays: keeping this separate preserves the direct-sky star compositing contract.
 public static const uint PAYLOAD_PRESENTATION_SKY = 1u << 20u;
 public static const uint PAYLOAD_END_PORTAL = 1u << 21u;
+public static const uint PAYLOAD_NETHER_PORTAL = 1u << 22u;
 
 public static const uint PAYLOAD_MATERIAL_MASK = 3u;
 public static const uint MATERIAL_OPAQUE = 0u;
@@ -256,6 +257,7 @@ public struct Prim {
 public static const uint PRIM_FIRST_PERSON_THIN_GLASS = 1u << 1u;
 public static const uint PRIM_ENCHANTED = 1u << 2u;
 public static const uint PRIM_END_PORTAL = 1u << 3u;
+public static const uint PRIM_END_GATEWAY = 1u << 4u;
 
 // Terrain per-triangle record (48 B). The final 16-byte lane contains integer geometry-local metadata;
 // shared surface parameters live once in MaterialHeader instead of being copied into every triangle.
@@ -271,6 +273,7 @@ public struct TerrainPrim {
 public static const uint TERRAIN_PRIM_TORCH = 1u;
 public static const uint TERRAIN_PRIM_LAVA = 1u << 1u;
 public static const uint TERRAIN_PRIM_IN_LIGHT_BUFFER = 1u << 2u;
+public static const uint TERRAIN_PRIM_NETHER_PORTAL = 1u << 3u;
 
 // Compiled material record (80 B). Source-format data has already been decoded into canonical pages;
 // texturePage indexes the dedicated canonical page arrays. materialUv maps sprite-local UV into the packed
