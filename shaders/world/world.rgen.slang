@@ -326,10 +326,6 @@ static const float NRD_SKY_VIEWZ_SENTINEL = 1.0e6;
 #endif
 
 static const uint OPTICAL_NONE = 0u;
-static const uint OPTICAL_THIN_GLASS = 2u;
-static const uint OPTICAL_SOLID_GLASS = 3u;
-static const uint OPTICAL_SOLID_ICE = 4u;
-static const uint OPTICAL_TRANSLUCENT_SURFACE = 5u;
 static const uint FRAME_FLAG_RR_GUIDES = 1u << 5u;
 static const uint FRAME_FLAG_FG_GUIDES = 1u << 6u;
 static const uint FRAME_FLAG_OFFLINE_GROUND_TRUTH = 1u << 7u;
@@ -430,6 +426,7 @@ void setPrimaryMissGuides(float3 rayDirection) {
 // Stained glass / ice (material 3): a thin colored dielectric. IOR ~1.5 (soda-lime glass).
 static const float GLASS_IOR = 1.52;
 static const float ICE_IOR = 1.31;
+static const float NETHER_PORTAL_IOR = 1.12;
 static const float ICE_GUIDE_ROUGH = 0.02;
 static const float GLASS_GUIDE_ROUGH = 0.04;
 // Transmitted-ray origin offset when crossing a glass face. Must be SMALLER than the terrain-side
@@ -1758,7 +1755,7 @@ void opticalGuideHit(float3 surfacePos, float3 transmittedDir, float3 surfaceNor
             }
             bool interfaceEntering = payloadInterfaceEntering();
             interfaceNormal = normalize(payload.geometricNormal);
-            if (opticalClass == OPTICAL_THIN_GLASS) {
+            if (opticalClass == OPTICAL_THIN_GLASS || opticalClass == OPTICAL_NETHER_PORTAL) {
                 // Match tracePath's collapsed-sheet model. Both geometric faces are
                 // crossed straight through, but only the entering face consumes tint.
                 straightThrough = true;
@@ -2060,7 +2057,8 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
             }
             float3 glassTint = payload.albedo;
             bool entering = payloadInterfaceEntering();
-            bool thinPane = opticalClass == OPTICAL_THIN_GLASS;
+            bool netherPortal = opticalClass == OPTICAL_NETHER_PORTAL;
+            bool thinPane = opticalClass == OPTICAL_THIN_GLASS || netherPortal;
             float3 interfaceNormal = normalize(geometricNormal);
 
             // A pane model has an entry and exit shell. The entry is the effective sheet; a later exit is
@@ -2071,7 +2069,37 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
                 continue;
             }
 
-            float materialIor = opticalClass == OPTICAL_SOLID_ICE ? ICE_IOR : GLASS_IOR;
+            if (netherPortal && payloadEmission() > 0.0) {
+#if !CAUSTICA_OFFLINE
+                bool gatePortalEmitter = risOn && payloadEmitterInList();
+#else
+                bool gatePortalEmitter = false;
+#endif
+                // RIS owns diffuse-bounce discovery of listed emitters. Primary visibility
+                // and specular/transmissive paths still gather the visible portal directly.
+                if (!gatePortalEmitter || showCelestial) {
+                    float3 portalEmission =
+                            throughput
+                            * glassTint
+                            * payloadEmission()
+                            * EMISSIVE_BASE_RADIANCE;
+                    L += portalEmission;
+#if CAUSTICA_NRD
+                    addNrdContribution(
+                            portalEmission,
+                            scatteringDepth == 0 ? 0 : nrdPrimaryLobe,
+                            nrdDiffuseRadiance,
+                            nrdSpecularRadiance
+                    );
+#endif
+                }
+            }
+
+            float materialIor = netherPortal
+                    ? NETHER_PORTAL_IOR
+                    : opticalClass == OPTICAL_SOLID_ICE
+                            ? ICE_IOR
+                            : GLASS_IOR;
             // The fluid mesher removes a water face coincident with glass/ice. The surviving optical
             // primitive therefore owns both media and must not infer its far side from the current path.
             bool exteriorWater = payloadInterfaceExteriorWater();
@@ -2125,6 +2153,12 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
                 gv_motionHitCamRel = gv_hitCamRel;
                 gv_motionUseRefracted = false;
                 gv_motionObjDisp = payload.motionPrev; // 0 for static terrain
+                if (netherPortal) {
+                    // The atlas animation changes without corresponding geometry motion.
+                    // Reject stale reconstructed portal texture while preserving ordinary
+                    // destination depth/motion for the transmitted scene.
+                    gv_animatedGuide = 1.0;
+                }
                 if (captureRefractedGuides) {
                     // The direction and medium both describe the far side of this primary interface.
                     // The shared bounded walker handles every later glass, ice, pane, and water boundary.

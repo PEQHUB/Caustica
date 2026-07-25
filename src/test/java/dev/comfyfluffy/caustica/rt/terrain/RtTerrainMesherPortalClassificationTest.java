@@ -1,5 +1,6 @@
 package dev.comfyfluffy.caustica.rt.terrain;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -9,12 +10,20 @@ import org.junit.jupiter.api.Test;
 
 final class RtTerrainMesherPortalClassificationTest {
     @Test
-    void netherPortalIsNotPhysicalGlass() {
-        assertFalse(
+    void netherPortalUsesDedicatedEmissiveGlass() {
+        var state = Blocks.NETHER_PORTAL.defaultBlockState();
+
+        assertTrue(
                 RtTerrainMesher.usesTransmissiveMaterial(
-                        Blocks.NETHER_PORTAL.defaultBlockState(),
+                        state,
                         ChunkSectionLayer.TRANSLUCENT
                 )
+        );
+
+        assertTrue(RtTerrainMesher.isNetherPortal(state));
+        assertEquals(
+                RtTerrainMesher.OPTICAL_NETHER_PORTAL,
+                RtTerrainMesher.opticalClassForTest(state)
         );
     }
 
@@ -39,7 +48,7 @@ final class RtTerrainMesherPortalClassificationTest {
     }
 
     @Test
-    void unknownTranslucentStatePreservesOldFallback() {
+    void unknownTranslucentStatePreservesFallback() {
         assertTrue(
                 RtTerrainMesher.usesTransmissiveMaterial(
                         null,

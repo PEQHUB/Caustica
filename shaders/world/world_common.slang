@@ -230,6 +230,14 @@ public static const uint MATERIAL_WATER = 1u;
 public static const uint MATERIAL_PARTICLE = 2u;
 public static const uint MATERIAL_GLASS = 3u;
 
+// Optical class identifiers. TerrainPrim.aux0 low nibble stores one of these.
+// Kept in world_common so both rchit and rgen can branch on the class.
+public static const uint OPTICAL_THIN_GLASS = 2u;
+public static const uint OPTICAL_SOLID_GLASS = 3u;
+public static const uint OPTICAL_SOLID_ICE = 4u;
+public static const uint OPTICAL_TRANSLUCENT_SURFACE = 5u;
+public static const uint OPTICAL_NETHER_PORTAL = 6u;
+
 // Entity per-triangle record (48 B). The final lane mirrors TerrainPrim's integer material metadata.
 public struct Prim {
     public float4 normal; // xyz = geometric normal, w = per-primitive emission strength

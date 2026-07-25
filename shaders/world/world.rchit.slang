@@ -516,6 +516,15 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
     // (material 3). albedo carries the transmission tint = texel rgb mixed toward white by (1 − opacity),
     // so a more opaque texel tints transmitted light more strongly.
     if (materialHeader.model == MATERIAL_GLASS) {
+        uint opticalClass = pr.aux0 & 0xfu;
+        bool netherPortal = opticalClass == OPTICAL_NETHER_PORTAL;
+
+        float encodedEmission = pr.normal.w;
+        bool nonSolid = encodedEmission >= 1.5;
+        float fallbackEmission = nonSolid
+                ? encodedEmission - 2.0
+                : encodedEmission;
+
         float alpha = blockAlbedoAtlas.SampleLevel(uv, 0.0).a;
         float3 texAlbedo = sampleSrgbLinearTrilinear(blockAlbedoAtlas, uv, blockLod,
                 materialAlbedoBounds(materialHeader), true, highQuality);
@@ -524,11 +533,10 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
         float3 glassAlbedo = bt709ToBt2020(opticalColor709);
         Surface glassSurface = evaluateMaterial(materialHeader, uv, blockLod, glassAlbedo, n,
                 tp0, tp1, tp2, uv0, uv1, uv2, vdir,
-                materialHeader.params.x, materialHeader.params.y, 0.0, false,
+                materialHeader.params.x, materialHeader.params.y,
+                netherPortal ? fallbackEmission : 0.0, false,
                 highQuality, blockPixelArt);
         n = glassSurface.normal;
-        // Translucent blocks (glass, ice, …) are breakable too; alpha remains the exact authored
-        // coverage sample while RGB follows the display-resolution reconstruction footprint.
         payload.albedo = bt709ToBt2020(applyBreaking(opticalColor709 * glassSurface.ao,
                 rayCone, WorldRayOrigin(), WorldRayDirection(), RayTCurrent(), n, highQuality));
         payload.normal = n;
@@ -536,9 +544,11 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
         payload.hitT = RayTCurrent();
         payload.motionPrev = float3(0.0, 0.0, 0.0);
         payload.f0 = glassSurface.f0;
+        float glassEmission = netherPortal ? glassSurface.emission : 0.0;
         payloadSetPacked(payload, MATERIAL_GLASS, glassSurface.roughness,
-                glassSurface.metalness, 0.0, 0.0, materialHeader.params.z,
-                materialHeader.params.w, EMISSION_SOURCE_NONE);
+                glassSurface.metalness, glassEmission, 0.0, materialHeader.params.z,
+                materialHeader.params.w,
+                materialEmissionSource(materialHeader, glassEmission));
         payload.flags |= ((pr.aux0 & 0xfu) << PAYLOAD_OPTICAL_CLASS_SHIFT);
         if ((pr.aux0 & 0x10u) != 0u) {
             payload.flags |= PAYLOAD_INTERFACE_EXTERIOR_WATER;
@@ -546,6 +556,9 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
         }
         if (entering) {
             payload.flags |= PAYLOAD_INTERFACE_ENTERING;
+        }
+        if ((pr.flags & TERRAIN_PRIM_IN_LIGHT_BUFFER) != 0u) {
+            payload.flags |= PAYLOAD_EMITTER_IN_LIST;
         }
         return;
     }
