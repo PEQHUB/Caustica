@@ -108,15 +108,6 @@ public final class RtEntities {
             Identifier.withDefaultNamespace("textures/environment/end_sky.png");
     private static final Identifier END_PORTAL_TEXTURE =
             Identifier.withDefaultNamespace("textures/entity/end_portal.png");
-    private static final float END_PORTAL_SURFACE_Y = 0.75f;
-    private static final float END_PORTAL_EMISSION = 1.0f;
-
-    /* Counter-clockwise from above, producing a +Y geometric normal. */
-    private static final float[] END_PORTAL_X = { 0.0f, 0.0f, 1.0f, 1.0f };
-    private static final float[] END_PORTAL_Y = { END_PORTAL_SURFACE_Y, END_PORTAL_SURFACE_Y, END_PORTAL_SURFACE_Y, END_PORTAL_SURFACE_Y };
-    private static final float[] END_PORTAL_Z = { 0.0f, 1.0f, 1.0f, 0.0f };
-    private static final float[] END_PORTAL_U = { 0.0f, 0.0f, 1.0f, 1.0f };
-    private static final float[] END_PORTAL_V = { 0.0f, 1.0f, 1.0f, 0.0f };
     public static boolean particlesEnabled() {
         return CausticaConfig.Rt.Entities.PARTICLES_ENABLED.value();
     }
@@ -1258,40 +1249,6 @@ public final class RtEntities {
         }
     }
 
-    private void captureEndPortalSurface() {
-        int endSkySlot =
-                RtEntityTextures.INSTANCE.slotForAtlas(END_SKY_TEXTURE);
-
-        int portalLayerSlot =
-                RtEntityTextures.INSTANCE.slotForAtlas(END_PORTAL_TEXTURE);
-
-        // The dedicated closest-hit branch reads the two slots from aux0/aux1.
-        // tint.w remains a valid fallback texture slot if the semantic flag is
-        // accidentally lost.
-        capture.currentTexSlot = portalLayerSlot;
-        capture.currentMaterialId =
-                RtMaterialRegistry.INSTANCE.entityFallbackId(false);
-
-        // Vanilla writes an opaque final portal color. Do not run the raw portal
-        // texture through entity alpha testing.
-        capture.currentAlphaBucket =
-                RtAccel.ENTITY_BUCKET_OPAQUE;
-
-        capture.currentPrimFlags = 0;
-        capture.currentOrder = 0;
-        capture.clearUvRemap();
-
-        capture.addSpecialDirectQuad(
-                END_PORTAL_X, END_PORTAL_Y, END_PORTAL_Z,
-                END_PORTAL_U, END_PORTAL_V,
-                0.0f, 1.0f, 0.0f,
-                0xFFFFFFFF, 1.0f,
-                RtEntityCapture.PRIM_END_PORTAL,
-                endSkySlot,
-                portalLayerSlot
-        );
-    }
-
     /** Re-mesh one block entity; rebuild its cached BLAS only if the mesh changed (budgeted); then emit it. */
     private void updateBlockEntity(RtContext ctx, FrameBuild build, BlockEntityRenderDispatcher beDispatcher,
                                    BlockEntity be, float partial, long now, int rbx, int rby, int rbz) {
@@ -1302,8 +1259,45 @@ public final class RtEntities {
                 return;
             }
 
-            if (be.getBlockState().is(Blocks.END_PORTAL)) {
-                captureEndPortalSurface();
+            boolean isEndPortal = be.getBlockState().is(Blocks.END_PORTAL);
+            boolean isEndGateway = be.getBlockState().is(Blocks.END_GATEWAY);
+
+            if (isEndPortal || isEndGateway) {
+                // Let the vanilla renderer emit actual geometry, then tag the
+                // emitted primitive range with portal flags and texture slots.
+                int primStart = capture.prim.size();
+
+                // Resolve portal texture slots before the vanilla callback sets texSlot.
+                int endSkySlot = RtEntityTextures.INSTANCE.slotForAtlas(END_SKY_TEXTURE);
+                int portalSlot = RtEntityTextures.INSTANCE.slotForAtlas(END_PORTAL_TEXTURE);
+
+                // Force opaque bucket and neutral material for the vanilla callback.
+                capture.currentAlphaBucket = RtAccel.ENTITY_BUCKET_OPAQUE;
+                capture.currentMaterialId =
+                        RtMaterialRegistry.INSTANCE.entityFallbackId(false);
+                capture.currentPrimFlags = 0;
+
+                collector.begin(capture, false);
+                resetPoseStack(blockEntityPoseStack);
+                beDispatcher.submit(state, blockEntityPoseStack, collector, cameraState);
+
+                // Tag every primitive emitted by the vanilla portal renderer.
+                int primEnd = capture.prim.size();
+                if (primEnd > primStart) {
+                    int flags = RtEntityCapture.PRIM_END_PORTAL;
+                    if (isEndGateway) {
+                        flags |= RtEntityCapture.PRIM_END_GATEWAY;
+                    }
+                    capture.patchPrimitiveMetadata(primStart, primEnd,
+                            flags, endSkySlot, portalSlot);
+                    // Force all emitted triangles into the opaque bucket.
+                    int triStart = primStart / 12;
+                    int triEnd = primEnd / 12;
+                    int[] buckets = capture.alphaBuckets.elements();
+                    for (int t = triStart; t < triEnd; t++) {
+                        buckets[t] = RtAccel.ENTITY_BUCKET_OPAQUE;
+                    }
+                }
             } else {
                 collector.begin(capture, false);
                 resetPoseStack(blockEntityPoseStack);

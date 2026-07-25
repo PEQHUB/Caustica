@@ -24,6 +24,7 @@ public final class RtEntityCapture implements VertexConsumer {
     static final int PRIM_FIRST_PERSON_THIN_GLASS = 1 << 1;
     static final int PRIM_ENCHANTED = 1 << 2;
     static final int PRIM_END_PORTAL = 1 << 3;
+    static final int PRIM_END_GATEWAY = 1 << 4;
     // Same magnitude as RtTerrain.QuadCapture.OFFSET (2e-4 blocks) — proven large enough to break a BVH
     // depth tie without a visible gap at terrain/entity scale.
     private static final float ORDER_OFFSET = 2.0e-4f;
@@ -125,6 +126,25 @@ public final class RtEntityCapture implements VertexConsumer {
         float[] values = prim.elements();
         for (int lane = primitiveFloatStart; lane + 9 < primitiveFloatEnd; lane += 12) {
             values[lane + 9] = Float.intBitsToFloat(Float.floatToRawIntBits(values[lane + 9]) | flags);
+        }
+    }
+
+    /**
+     * Patch a range of emitted primitives with portal flags and metadata.
+     * For every 12-float primitive record:
+     * - OR the requested flags into lane 9
+     * - write aux0 to lane 10
+     * - write aux1 to lane 11
+     */
+    void patchPrimitiveMetadata(int primitiveFloatStart, int primitiveFloatEnd,
+                                int flags, int aux0, int aux1) {
+        float[] values = prim.elements();
+        float fAux0 = Float.intBitsToFloat(aux0);
+        float fAux1 = Float.intBitsToFloat(aux1);
+        for (int lane = primitiveFloatStart; lane + 11 < primitiveFloatEnd; lane += 12) {
+            values[lane + 9] = Float.intBitsToFloat(Float.floatToRawIntBits(values[lane + 9]) | flags);
+            values[lane + 10] = fAux0;
+            values[lane + 11] = fAux1;
         }
     }
 

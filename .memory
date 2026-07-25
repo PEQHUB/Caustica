@@ -1,0 +1,41 @@
+# Caustica Development Memory
+
+## Session: Dimension-Specific Atmosphere Controls (July 24, 2026)
+
+### Implementation COMPLETE
+All code changes for Nether/End sky gradients are written and reviewed.
+
+### Files Created
+- `src/main/java/dev/comfyfluffy/caustica/rt/AtmosphereDimension.java` - dimension model enum
+- `src/test/java/dev/comfyfluffy/caustica/rt/AtmosphereDimensionTest.java` - unit tests
+- `src/test/java/dev/comfyfluffy/caustica/rt/AtmosphereDimensionCustomKeyTest.java` - custom dimension fallback tests
+- `src/test/java/dev/comfyfluffy/caustica/client/settings/DimensionAtmosphereCatalogTest.java` - catalog tests (9 controls)
+
+### Files Modified
+- `CausticaConfig.java` - NetherAtmosphere/EndAtmosphere nested static holders, ALL[] array updated
+- `SettingsCatalog.java` - 4 sections, 18 controls for Nether/End (no ambientLight)
+- `CausticaSettingsScreen.java` - dimension selector, addSimpleDimensionAtmosphere (9 params), pendingAtmosphereContentReset
+- `RtComposite.java` - SimpleDimensionAtmosphere record, skyPush() effective values, separated signatures, atmosphereFrameFlags()
+- `world_common.slang` - FRAME_FLAG_DIMENSION_ATMOSPHERE = 1u << 15u
+- `world.rmiss.slang` - dimension atmosphere gradient with lower-horizon protection
+- `en_us.json` - all dimension translations
+
+### Key Technical Decisions
+- Config uses nested static holders (NetherAtmosphere, EndAtmosphere) not instance wrappers
+- V1 scope: 9 settings per dimension (no ambientLight EV)
+- SimpleDimensionAtmosphere record holds all 9 values
+- skyPush() builds effective values BEFORE SkyPush construction (no post-hoc patching)
+- Separated signatures: lastSkyParameterSignature (LUT), lastRenderedSkyParameterSignature (miss shader)
+- Dimension tab switching resets scroll via pendingAtmosphereContentReset flag (not rememberMenuPosition)
+- Lower-horizon protection in rmiss: smoothstep(-1e-3, 0, dir.y) blend to groundVoid
+
+### Build Status
+- BLOCKED: Requires Slang 2026.13 compiler (CAUSTICA_SLANGC env var or -Pslangc=<path>)
+- Java compile not reachable until build.gradle configuration passes
+
+### Lessons Learned
+- Plan document provides detailed code snippets and file paths
+- Config structure decisions have cascading effects (settings screen, tests, ALL[] array)
+- Nested static holders are the idiomatic pattern for CausticaConfig settings
+- Signature separation is important: LUT invalidation is cheaper than full pipeline reset
+- Lower-horizon protection prevents dimension color leaking into underground geometry
