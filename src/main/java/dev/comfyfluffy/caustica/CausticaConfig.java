@@ -32,7 +32,7 @@ import org.slf4j.LoggerFactory;
 public final class CausticaConfig {
     private static final Logger LOGGER = LoggerFactory.getLogger("Caustica");
     private static final List<RuntimeSetting<?>> SETTINGS = new CopyOnWriteArrayList<>();
-    static final int CONFIG_SCHEMA_VERSION = 15;
+    static final int CONFIG_SCHEMA_VERSION = 16;
 
     private static final Path CONFIG_PATH = resolveConfigPath();
     private static final CommentedFileConfig FILE = loadAndMigrateFile(CONFIG_PATH);
@@ -389,6 +389,9 @@ public final class CausticaConfig {
         if (version < 15) {
             applySchema15Defaults(config);
         }
+        if (version < 16) {
+            applySchema16Defaults(config);
+        }
         config.set("config-version", CONFIG_SCHEMA_VERSION);
         return true;
     }
@@ -413,6 +416,60 @@ public final class CausticaConfig {
         if (untouchedPlaceholder) {
             config.set("composite.sky.end.brightness-ev", 2.0);
         }
+    }
+
+    private static void applySchema16Defaults(CommentedConfig config) {
+        boolean untouchedNether =
+                matchesDimensionAtmosphere(config, "nether",
+                        0.300, 0.035, 0.010, 0.025, 0.004, 0.002, 0.0, 1.0, 0.75);
+
+        if (untouchedNether) {
+            writeDimensionAtmosphere(config, "nether",
+                    2.00, 0.26, 0.00, 0.00, 0.00, 0.00, -3.0, 1.00, 8.00);
+        }
+
+        boolean untouchedEnd =
+                matchesDimensionAtmosphere(config, "end",
+                        0.040, 0.018, 0.075, 0.004, 0.002, 0.012, 2.0, 1.0, 1.25);
+
+        if (untouchedEnd) {
+            writeDimensionAtmosphere(config, "end",
+                    0.04, 0.02, 0.08, 0.00, 0.00, 0.00, 0.0, 2.00, 0.72);
+        }
+    }
+
+    private static boolean matchesDimensionAtmosphere(
+            CommentedConfig config, String dimension,
+            double horizonR, double horizonG, double horizonB,
+            double zenithR, double zenithG, double zenithB,
+            double brightnessEv, double saturation, double gradientPower) {
+        String prefix = "composite.sky." + dimension + ".";
+        return missingOrExactNumber(config, prefix + "horizon-r", horizonR)
+                && missingOrExactNumber(config, prefix + "horizon-g", horizonG)
+                && missingOrExactNumber(config, prefix + "horizon-b", horizonB)
+                && missingOrExactNumber(config, prefix + "zenith-r", zenithR)
+                && missingOrExactNumber(config, prefix + "zenith-g", zenithG)
+                && missingOrExactNumber(config, prefix + "zenith-b", zenithB)
+                && missingOrExactNumber(config, prefix + "brightness-ev", brightnessEv)
+                && missingOrExactNumber(config, prefix + "saturation", saturation)
+                && missingOrExactNumber(config, prefix + "gradient-power", gradientPower);
+    }
+
+    private static void writeDimensionAtmosphere(
+            CommentedConfig config, String dimension,
+            double horizonR, double horizonG, double horizonB,
+            double zenithR, double zenithG, double zenithB,
+            double brightnessEv, double saturation, double gradientPower) {
+        String prefix = "composite.sky." + dimension + ".";
+        config.set(prefix + "horizon-r", horizonR);
+        config.set(prefix + "horizon-g", horizonG);
+        config.set(prefix + "horizon-b", horizonB);
+        config.set(prefix + "zenith-r", zenithR);
+        config.set(prefix + "zenith-g", zenithG);
+        config.set(prefix + "zenith-b", zenithB);
+        config.set(prefix + "brightness-ev", brightnessEv);
+        config.set(prefix + "saturation", saturation);
+        config.set(prefix + "gradient-power", gradientPower);
     }
 
     static boolean missingOrExactNumber(CommentedConfig config, String path, double expected) {
@@ -987,53 +1044,54 @@ public final class CausticaConfig {
             public static final FloatSetting AIRGLOW_ZENITH_B = skyRgb("airglow-zenith-b", 1.0f);
 
             /*
-             * Placeholder dimension-atmosphere defaults.
+             * Approved dimension-atmosphere defaults.
              *
-             * Keep these grouped so tuned values can later be copied directly from the
-             * generated TOML back into this constructor block.
+             * These values were tuned in-game against the active alpha_weather renderer.
+             * Keep the values here identical to the visible menu values so Reset Section,
+             * fresh installs, launch-property fallbacks, and generated TOML all agree.
              */
             public static final class NetherAtmosphere {
                 public static final FloatSetting HORIZON_R =
-                        dimensionAtmosphereFloat("nether", "horizonR", "horizon-r", 0.300f, 0.0f, 4.0f);
+                        dimensionAtmosphereFloat("nether", "horizonR", "horizon-r", 2.00f, 0.0f, 4.0f);
                 public static final FloatSetting HORIZON_G =
-                        dimensionAtmosphereFloat("nether", "horizonG", "horizon-g", 0.035f, 0.0f, 4.0f);
+                        dimensionAtmosphereFloat("nether", "horizonG", "horizon-g", 0.26f, 0.0f, 4.0f);
                 public static final FloatSetting HORIZON_B =
-                        dimensionAtmosphereFloat("nether", "horizonB", "horizon-b", 0.010f, 0.0f, 4.0f);
+                        dimensionAtmosphereFloat("nether", "horizonB", "horizon-b", 0.00f, 0.0f, 4.0f);
                 public static final FloatSetting ZENITH_R =
-                        dimensionAtmosphereFloat("nether", "zenithR", "zenith-r", 0.025f, 0.0f, 4.0f);
+                        dimensionAtmosphereFloat("nether", "zenithR", "zenith-r", 0.00f, 0.0f, 4.0f);
                 public static final FloatSetting ZENITH_G =
-                        dimensionAtmosphereFloat("nether", "zenithG", "zenith-g", 0.004f, 0.0f, 4.0f);
+                        dimensionAtmosphereFloat("nether", "zenithG", "zenith-g", 0.00f, 0.0f, 4.0f);
                 public static final FloatSetting ZENITH_B =
-                        dimensionAtmosphereFloat("nether", "zenithB", "zenith-b", 0.002f, 0.0f, 4.0f);
+                        dimensionAtmosphereFloat("nether", "zenithB", "zenith-b", 0.00f, 0.0f, 4.0f);
                 public static final FloatSetting BRIGHTNESS_EV =
-                        dimensionAtmosphereFloat("nether", "brightnessEv", "brightness-ev", 0.0f, -4.0f, 4.0f);
+                        dimensionAtmosphereFloat("nether", "brightnessEv", "brightness-ev", -3.0f, -4.0f, 4.0f);
                 public static final FloatSetting SATURATION =
-                        dimensionAtmosphereFloat("nether", "saturation", "saturation", 1.0f, 0.0f, 2.0f);
+                        dimensionAtmosphereFloat("nether", "saturation", "saturation", 1.00f, 0.0f, 2.0f);
                 public static final FloatSetting GRADIENT_POWER =
-                        dimensionAtmosphereFloat("nether", "gradientPower", "gradient-power", 0.75f, 0.05f, 8.0f);
+                        dimensionAtmosphereFloat("nether", "gradientPower", "gradient-power", 8.00f, 0.05f, 8.0f);
                 private NetherAtmosphere() {}
                 private static void touch() {}
             }
 
             public static final class EndAtmosphere {
                 public static final FloatSetting HORIZON_R =
-                        dimensionAtmosphereFloat("end", "horizonR", "horizon-r", 0.040f, 0.0f, 4.0f);
+                        dimensionAtmosphereFloat("end", "horizonR", "horizon-r", 0.04f, 0.0f, 4.0f);
                 public static final FloatSetting HORIZON_G =
-                        dimensionAtmosphereFloat("end", "horizonG", "horizon-g", 0.018f, 0.0f, 4.0f);
+                        dimensionAtmosphereFloat("end", "horizonG", "horizon-g", 0.02f, 0.0f, 4.0f);
                 public static final FloatSetting HORIZON_B =
-                        dimensionAtmosphereFloat("end", "horizonB", "horizon-b", 0.075f, 0.0f, 4.0f);
+                        dimensionAtmosphereFloat("end", "horizonB", "horizon-b", 0.08f, 0.0f, 4.0f);
                 public static final FloatSetting ZENITH_R =
-                        dimensionAtmosphereFloat("end", "zenithR", "zenith-r", 0.004f, 0.0f, 4.0f);
+                        dimensionAtmosphereFloat("end", "zenithR", "zenith-r", 0.00f, 0.0f, 4.0f);
                 public static final FloatSetting ZENITH_G =
-                        dimensionAtmosphereFloat("end", "zenithG", "zenith-g", 0.002f, 0.0f, 4.0f);
+                        dimensionAtmosphereFloat("end", "zenithG", "zenith-g", 0.00f, 0.0f, 4.0f);
                 public static final FloatSetting ZENITH_B =
-                        dimensionAtmosphereFloat("end", "zenithB", "zenith-b", 0.012f, 0.0f, 4.0f);
+                        dimensionAtmosphereFloat("end", "zenithB", "zenith-b", 0.00f, 0.0f, 4.0f);
                 public static final FloatSetting BRIGHTNESS_EV =
-                        dimensionAtmosphereFloat("end", "brightnessEv", "brightness-ev", 2.0f, -4.0f, 4.0f);
+                        dimensionAtmosphereFloat("end", "brightnessEv", "brightness-ev", 0.0f, -4.0f, 4.0f);
                 public static final FloatSetting SATURATION =
-                        dimensionAtmosphereFloat("end", "saturation", "saturation", 1.0f, 0.0f, 2.0f);
+                        dimensionAtmosphereFloat("end", "saturation", "saturation", 2.00f, 0.0f, 2.0f);
                 public static final FloatSetting GRADIENT_POWER =
-                        dimensionAtmosphereFloat("end", "gradientPower", "gradient-power", 1.25f, 0.05f, 8.0f);
+                        dimensionAtmosphereFloat("end", "gradientPower", "gradient-power", 0.72f, 0.05f, 8.0f);
                 private EndAtmosphere() {}
                 private static void touch() {}
             }
