@@ -66,6 +66,13 @@ final class RtTerrainMesher {
     private static final int PRIM_FLAG_TORCH = 1;
     private static final int PRIM_FLAG_LAVA = 1 << 1;
 
+    static boolean usesTransmissiveMaterial(BlockState state, ChunkSectionLayer layer) {
+        if (layer != ChunkSectionLayer.TRANSLUCENT) {
+            return false;
+        }
+        return state == null || !state.is(Blocks.NETHER_PORTAL);
+    }
+
     /**
      * Reusable per-worker-thread meshing state. The mesh + captures are reset between tasks so their
      * backing arrays amortize across sections instead of re-growing per task. Everything the result carries out —
@@ -456,13 +463,31 @@ final class RtTerrainMesher {
             q.nx = nx; q.ny = ny; q.nz = nz;
 
             ChunkSectionLayer layer = quad.chunkLayer();
-            q.cutout = layer != ChunkSectionLayer.SOLID;
-            q.translucent = layer == ChunkSectionLayer.TRANSLUCENT;
-            q.opticalClass = q.translucent ? opticalClass(state) : 0;
+
+            q.cutout =
+                    layer != ChunkSectionLayer.SOLID;
+
+            q.translucent =
+                    layer == ChunkSectionLayer.TRANSLUCENT;
+
+            q.transmissive =
+                    usesTransmissiveMaterial(state, layer);
+
+            q.opticalClass =
+                    q.transmissive
+                            ? opticalClass(state)
+                            : 0;
+
             q.opticalWaterTint = 0;
-            Direction opticalFace = quad.nominalFace();
-            if (q.translucent && opticalFace != null
-                    && view.getFluidState(cullPos.setWithOffset(pos, opticalFace)).is(FluidTags.WATER)) {
+
+            Direction opticalFace =
+                    quad.nominalFace();
+
+            if (q.transmissive
+                    && opticalFace != null
+                    && view.getFluidState(
+                            cullPos.setWithOffset(pos, opticalFace)
+                    ).is(FluidTags.WATER)) {
                 q.opticalClass |= OPTICAL_EXTERIOR_WATER;
                 // The coincident fluid face is deliberately culled, so this glass primitive owns the
                 // complete glass/water transition. Preserve the missing face's actual biome tint in the
@@ -499,7 +524,7 @@ final class RtTerrainMesher {
             q.torch = state != null && state.getBlock() instanceof BaseTorchBlock;
             TextureAtlasSprite sprite = spriteFinder.find(quad);
             q.sprite = sprite;
-            q.materialId = materials.resolve(sprite, state, q.translucent);
+            q.materialId = materials.resolve(sprite, state, q.transmissive);
         }
 
         private static int opticalClass(BlockState state) {
@@ -634,7 +659,7 @@ final class RtTerrainMesher {
             // face that touches a full solid block, but KEEPS the one touching a non-occluding neighbour
             // (slabs / stairs) — which lands exactly coplanar with that neighbour's face and z-fights. A tiny
             // inward inset makes the glass resolve consistently behind the neighbour's surface.
-            if (q.translucent) {
+            if (q.transmissive) {
                 offset(q, -TRANSLUCENT_INSET);
             }
             Geom g = q.translucent ? cur.translucent() : (q.cutout ? cur.cutout() : cur.opaque());
@@ -680,9 +705,19 @@ final class RtTerrainMesher {
         final float[] x = new float[4], y = new float[4], z = new float[4];
         final long[] uv = new long[4];
         float nx, ny, nz;
-        boolean cutout; // non-SOLID render layer (alpha-tested) — also an overlay candidate
-        boolean translucent; // TRANSLUCENT layer (stained glass / ice): colored-transmission dielectric
-        boolean tinted; // tintIndex >= 0 — the tinted member of a base+overlay pair
+        boolean cutout;
+        /*
+         * The quad came from Minecraft's TRANSLUCENT render layer. This controls
+         * geometry/SBT routing and is intentionally true for Nether portals.
+         */
+        boolean translucent;
+        /*
+         * The surface is a physical transmissive dielectric. This controls the
+         * material model, IOR handling, adjacent-water interface data, and the tiny
+         * glass inset. It is false for Nether portals.
+         */
+        boolean transmissive;
+        boolean tinted;
         boolean torch;
         int opticalClass;
         int opticalWaterTint;
