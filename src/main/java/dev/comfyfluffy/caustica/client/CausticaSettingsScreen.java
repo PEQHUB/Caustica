@@ -112,6 +112,7 @@ public class CausticaSettingsScreen extends Screen {
     private Page category = Page.ESSENTIALS;
     private Page buildingCategory = Page.ESSENTIALS;
     private dev.comfyfluffy.caustica.rt.AtmosphereDimension atmosphereDimension;
+    private boolean atmosphereDimensionExplicitlySelected;
     private String pendingTargetId;
     private String pendingRevealReasonKey;
     private boolean pendingAtmosphereContentReset;
@@ -150,6 +151,7 @@ public class CausticaSettingsScreen extends Screen {
         this.category = Page.parse(requestedCategory);
         this.atmosphereDimension =
                 dev.comfyfluffy.caustica.rt.AtmosphereDimension.editorDefault(Minecraft.getInstance().level);
+        this.atmosphereDimensionExplicitlySelected = false;
         if (legacyTreeState) migrateLegacyExpansionState();
     }
 
@@ -479,6 +481,7 @@ public class CausticaSettingsScreen extends Screen {
 
         if (plan.page() == Page.SKY_ATMOSPHERE) {
             atmosphereDimension = atmosphereDimensionForControl(control);
+            atmosphereDimensionExplicitlySelected = true;
         }
 
         searchQuery = "";
@@ -488,7 +491,7 @@ public class CausticaSettingsScreen extends Screen {
         rebuildScreen();
     }
 
-    private static dev.comfyfluffy.caustica.rt.AtmosphereDimension atmosphereDimensionForControl(
+    static dev.comfyfluffy.caustica.rt.AtmosphereDimension atmosphereDimensionForControl(
             Control control
     ) {
         String id = control.id();
@@ -823,6 +826,9 @@ public class CausticaSettingsScreen extends Screen {
 
     private void addSky() {
         addHeader("sky");
+        if (searchQuery.isBlank() && category == Page.SKY_ATMOSPHERE) {
+            synchronizeAtmosphereEditorWithWorld();
+        }
         addAtmosphereDimensionSelector();
 
         switch (atmosphereDimension) {
@@ -941,7 +947,7 @@ public class CausticaSettingsScreen extends Screen {
 
         List<AbstractWidget> shape = new ArrayList<>();
 
-        shape.add(dimensionSkyEvSlider(dimension, "brightness", brightnessEv, -8.0, 8.0));
+        shape.add(dimensionSkyEvSlider(dimension, "brightness", brightnessEv, -4.0, 4.0));
         shape.add(dimensionSkySlider(dimension, "saturation", saturation, 0.0, 2.0));
         shape.add(dimensionSkySlider(dimension, "gradientPower", gradientPower, 0.05, 8.0));
 
@@ -987,19 +993,33 @@ public class CausticaSettingsScreen extends Screen {
         ).tooltip(Component.translatable(translationKey + ".tooltip"));
     }
 
-    private void addAtmosphereDimensionSelector() {
-        List<AbstractWidget> buttons =
-                new ArrayList<>(dev.comfyfluffy.caustica.rt.AtmosphereDimension.values().length);
+    static java.util.List<dev.comfyfluffy.caustica.rt.AtmosphereDimension> atmosphereSelectorDimensions() {
+        return java.util.List.of(
+                dev.comfyfluffy.caustica.rt.AtmosphereDimension.OVERWORLD,
+                dev.comfyfluffy.caustica.rt.AtmosphereDimension.NETHER,
+                dev.comfyfluffy.caustica.rt.AtmosphereDimension.END
+        );
+    }
 
-        for (dev.comfyfluffy.caustica.rt.AtmosphereDimension dimension :
-                dev.comfyfluffy.caustica.rt.AtmosphereDimension.values()) {
+    private void addAtmosphereDimensionSelector() {
+        sectionColumns = null;
+        activeBundle = null;
+        activeBundleId = null;
+
+        java.util.List<dev.comfyfluffy.caustica.rt.AtmosphereDimension> dimensions =
+                atmosphereSelectorDimensions();
+
+        java.util.List<AbstractWidget> buttons =
+                new java.util.ArrayList<>(dimensions.size());
+
+        for (dev.comfyfluffy.caustica.rt.AtmosphereDimension dimension : dimensions) {
+            boolean selected = atmosphereDimension == dimension;
             ActionButton button = new ActionButton(
-                    180,
+                    metrics.targetCellWidth(),
                     () -> Component.translatable(dimension.translationKey()),
                     () -> selectAtmosphereDimension(dimension),
-                    atmosphereDimension == dimension
+                    selected
             );
-
             button.tooltip(Component.translatable(dimension.tooltipKey()));
             buttons.add(button);
         }
@@ -1017,6 +1037,8 @@ public class CausticaSettingsScreen extends Screen {
     }
 
     private void selectAtmosphereDimension(dev.comfyfluffy.caustica.rt.AtmosphereDimension target) {
+        atmosphereDimensionExplicitlySelected = true;
+
         if (atmosphereDimension == target) {
             return;
         }
@@ -1029,6 +1051,14 @@ public class CausticaSettingsScreen extends Screen {
         pendingRevealReasonKey = null;
 
         rebuildScreen();
+    }
+
+    private void synchronizeAtmosphereEditorWithWorld() {
+        if (atmosphereDimensionExplicitlySelected) {
+            return;
+        }
+        atmosphereDimension =
+                dev.comfyfluffy.caustica.rt.AtmosphereDimension.editorDefault(minecraft.level);
     }
 
     private void addGeometry() {

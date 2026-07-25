@@ -46,7 +46,7 @@
 	"caustica.options.header.lighting": "Lighting",
 	"caustica.options.header.lighting.subtitle": "Transported celestial energy and texture-authored emissives",
 	"caustica.options.header.sky": "Sky & Atmosphere",
-	"caustica.options.header.sky.subtitle": "Coherent atmosphere, celestial appearance, stars, and night airglow",
+	"caustica.options.header.sky.subtitle": "Physical Overworld atmosphere and configurable Nether/End sky gradients",
 	"caustica.options.header.geometry": "Geometry & Effects",
 	"caustica.options.header.geometry.subtitle": "Path depth, scene participation, water, mirrors, and material transport",
 	"caustica.options.header.materials": "Materials",
@@ -784,16 +784,12 @@
 	"caustica.options.rt.sky.airglowZenithB": "Zenith Airglow B",
 	"caustica.options.rt.sky.airglowZenithB.tooltip": "Blue multiplier for zenith airglow.",
 
-	"caustica.options.category.skyAtmosphere": "Atmosphere",
-	"caustica.options.header.sky": "Atmosphere",
-	"caustica.options.header.sky.subtitle": "Dimension-specific sky color, shape, and environmental light.",
-
 	"caustica.options.atmosphere.dimension.overworld": "Overworld",
-	"caustica.options.atmosphere.dimension.overworld.tooltip": "Edit the existing physical Overworld atmosphere, celestial bodies, stars, and airglow.",
+	"caustica.options.atmosphere.dimension.overworld.tooltip": "Edit the physical Overworld atmosphere, celestial appearance, stars, and night airglow.",
 	"caustica.options.atmosphere.dimension.nether": "Nether",
-	"caustica.options.atmosphere.dimension.nether.tooltip": "Edit the sky gradient and environmental light used in the vanilla Nether.",
+	"caustica.options.atmosphere.dimension.nether.tooltip": "Edit the Nether horizon-to-zenith sky gradient.",
 	"caustica.options.atmosphere.dimension.end": "End",
-	"caustica.options.atmosphere.dimension.end.tooltip": "Edit the sky gradient and environmental light used in the vanilla End.",
+	"caustica.options.atmosphere.dimension.end.tooltip": "Edit the End horizon-to-zenith sky gradient.",
 
 	"caustica.options.bundle.sky.nether.colors": "Nether Sky Colors",
 	"caustica.options.bundle.sky.nether.colors.description": "Linear horizon and zenith/nadir colors for the Nether sky.",

@@ -32,7 +32,7 @@ import org.slf4j.LoggerFactory;
 public final class CausticaConfig {
     private static final Logger LOGGER = LoggerFactory.getLogger("Caustica");
     private static final List<RuntimeSetting<?>> SETTINGS = new CopyOnWriteArrayList<>();
-    static final int CONFIG_SCHEMA_VERSION = 14;
+    static final int CONFIG_SCHEMA_VERSION = 15;
 
     private static final Path CONFIG_PATH = resolveConfigPath();
     private static final CommentedFileConfig FILE = loadAndMigrateFile(CONFIG_PATH);
@@ -386,6 +386,9 @@ public final class CausticaConfig {
         if (version < 14) {
             applySchema14Defaults(config);
         }
+        if (version < 15) {
+            applySchema15Defaults(config);
+        }
         config.set("config-version", CONFIG_SCHEMA_VERSION);
         return true;
     }
@@ -393,6 +396,30 @@ public final class CausticaConfig {
     private static void applySchema14Defaults(CommentedConfig config) {
         migrateExactNumber(config, "composite.max-bounces", 8.0, 64.0);
         config.remove("composite.celestial-light-bounces");
+    }
+
+    private static void applySchema15Defaults(CommentedConfig config) {
+        boolean untouchedPlaceholder =
+                missingOrExactNumber(config, "composite.sky.end.horizon-r", 0.040)
+                && missingOrExactNumber(config, "composite.sky.end.horizon-g", 0.018)
+                && missingOrExactNumber(config, "composite.sky.end.horizon-b", 0.075)
+                && missingOrExactNumber(config, "composite.sky.end.zenith-r", 0.004)
+                && missingOrExactNumber(config, "composite.sky.end.zenith-g", 0.002)
+                && missingOrExactNumber(config, "composite.sky.end.zenith-b", 0.012)
+                && missingOrExactNumber(config, "composite.sky.end.brightness-ev", 0.0)
+                && missingOrExactNumber(config, "composite.sky.end.saturation", 1.0)
+                && missingOrExactNumber(config, "composite.sky.end.gradient-power", 1.25);
+
+        if (untouchedPlaceholder) {
+            config.set("composite.sky.end.brightness-ev", 2.0);
+        }
+    }
+
+    static boolean missingOrExactNumber(CommentedConfig config, String path, double expected) {
+        Object value = config.get(path);
+        return value == null
+                || value instanceof Number number
+                && Math.abs(number.doubleValue() - expected) <= 1.0e-6;
     }
 
     private static boolean isNrdBackend(CommentedConfig config) {
@@ -1002,7 +1029,7 @@ public final class CausticaConfig {
                 public static final FloatSetting ZENITH_B =
                         dimensionAtmosphereFloat("end", "zenithB", "zenith-b", 0.012f, 0.0f, 4.0f);
                 public static final FloatSetting BRIGHTNESS_EV =
-                        dimensionAtmosphereFloat("end", "brightnessEv", "brightness-ev", 0.0f, -4.0f, 4.0f);
+                        dimensionAtmosphereFloat("end", "brightnessEv", "brightness-ev", 2.0f, -4.0f, 4.0f);
                 public static final FloatSetting SATURATION =
                         dimensionAtmosphereFloat("end", "saturation", "saturation", 1.0f, 0.0f, 2.0f);
                 public static final FloatSetting GRADIENT_POWER =

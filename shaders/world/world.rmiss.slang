@@ -439,10 +439,6 @@ void main(inout Payload payload) {
 
         col = lerp(horizon, zenith, vertical)
             * max(pc.skyShape.z, 0.0);
-        if (!presentationSky && !aboveHorizon) {
-            float boundaryWeight = smoothstep(-1.0e-3, 0.0, dir.y);
-            col = lerp(groundVoid * ambientMultiplier, col, boundaryWeight);
-        }
     } else {
         col = max(pc.environmentSky.xyz, float3(0.0)) * fallbackGradient;
     }
@@ -460,9 +456,8 @@ void main(inout Payload payload) {
             starBrightness * pc.skyCelestialAppearance.w, VdotS, pc.celestial,
             pc.skyStarAppearance.x, pc.skyStarAppearance.y, pc.skyStarTint.xyz);
     col *= ambientMultiplier;
-    // Match the upper-hemisphere value at y=0, then collapse to the bounded void within one
-    // thousandth of a direction unit. This removes the seam without opening broad geometry leaks.
-    if (!presentationSky && earthAtmosphere && !aboveHorizon) {
+    // Close the lower-horizon seam for either atmosphere implementation.
+    if (!presentationSky && !aboveHorizon && (earthAtmosphere || dimensionAtmosphere)) {
         float boundaryWeight = smoothstep(-1.0e-3, 0.0, dir.y);
         col = lerp(groundVoid * ambientMultiplier, col, boundaryWeight);
     }

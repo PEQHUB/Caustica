@@ -2215,7 +2215,7 @@ public final class RtComposite {
                 if (fs.is(FluidTags.WATER) && camY < cameraBlockPos.getY() + fs.getHeight(level, cameraBlockPos)) {
                     flags |= 0b01;
                 }
-                flags |= atmosphereFrameFlags(level);
+                flags |= atmosphereFrameFlags(level.dimension());
             }
             if (waterWaves()) {
                 flags |= 0b10000; // W1: animated water wave normals
@@ -2937,7 +2937,10 @@ public final class RtComposite {
         float moonLightAngularRadius = (float)Math.toRadians(0.2727);
         handleSkyDiscontinuity(sunX, sunY, sunZ, ambientEv, sunlightEv, moonlightEv, airglowEv,
                 sunAngularRadius, moonAngularRadius, skyParameterSignature, renderedSkyParameterSignature);
-        Float4 environmentSky = linearBt2020FromPackedRgb(packedSky);
+        Float4 environmentSky =
+                simpleDimensionAtmosphere
+                        ? simpleDimensionFallbackEnvironment(simpleAtmosphere)
+                        : linearBt2020FromPackedRgb(packedSky);
 
         float[] sunTrans = new float[3];
         float[] moonTrans = new float[3];
@@ -3265,8 +3268,8 @@ public final class RtComposite {
         return 31 * hash + Float.floatToIntBits(value);
     }
 
-    private static int atmosphereFrameFlags(Level level) {
-        AtmosphereDimension dimension = AtmosphereDimension.resolve(level);
+    static int atmosphereFrameFlags(net.minecraft.resources.ResourceKey<Level> dimensionKey) {
+        AtmosphereDimension dimension = AtmosphereDimension.resolve(dimensionKey);
 
         if (dimension == AtmosphereDimension.OVERWORLD) {
             return FRAME_FLAG_EARTH_ATMOSPHERE;
@@ -3341,14 +3344,26 @@ public final class RtComposite {
     }
 
     private static Float4 linearBt2020FromRgb(double encodedR, double encodedG, double encodedB) {
-        double r = srgbToLinear(encodedR);
-        double g = srgbToLinear(encodedG);
-        double b = srgbToLinear(encodedB);
+        return linearBt2020FromLinearBt709(
+                srgbToLinear(encodedR),
+                srgbToLinear(encodedG),
+                srgbToLinear(encodedB));
+    }
+
+    private static Float4 linearBt2020FromLinearBt709(double linearR, double linearG, double linearB) {
         return new Float4(
-                (float) (0.6274039 * r + 0.3292830 * g + 0.0433131 * b),
-                (float) (0.0690973 * r + 0.9195406 * g + 0.0113612 * b),
-                (float) (0.0163916 * r + 0.0880132 * g + 0.8955953 * b),
+                (float) (0.6274039 * linearR + 0.3292830 * linearG + 0.0433131 * linearB),
+                (float) (0.0690973 * linearR + 0.9195406 * linearG + 0.0113612 * linearB),
+                (float) (0.0163916 * linearR + 0.0880132 * linearG + 0.8955953 * linearB),
                 0.0f);
+    }
+
+    private static Float4 simpleDimensionFallbackEnvironment(SimpleDimensionAtmosphere atmosphere) {
+        float brightness = evMultiplier(atmosphere.brightnessEv());
+        double red = Math.max(atmosphere.horizonR(), atmosphere.zenithR()) * brightness;
+        double green = Math.max(atmosphere.horizonG(), atmosphere.zenithG()) * brightness;
+        double blue = Math.max(atmosphere.horizonB(), atmosphere.zenithB()) * brightness;
+        return linearBt2020FromLinearBt709(red, green, blue);
     }
 
     private static double srgbToLinear(double value) {
