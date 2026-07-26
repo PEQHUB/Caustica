@@ -1,0 +1,13 @@
+{
+  "repository": "https://github.com/PEQHUB/Caustica",
+  "branch": "rehab/dlssg-streamline",
+  "sourceFreeze": "42ca9b8ef5d9a9aa4d5fbd7f48479e4ab060b4ad",
+  "commitAtCapture": "42ca9b8ef5d9a9aa4d5fbd7f48479e4ab060b4ad",
+  "java": "Temurin OpenJDK 25.0.1+8",
+  "streamline": "2.12.0",
+  "streamlinePath": "C:\\Users\\Administrator\\Documents\\Caustica-deps\\streamline-sdk",
+  "vulkanSdk": "C:\\VulkanSDK\\1.4.341.1",
+  "slangCompiler": "C:\\Users\\Administrator\\Documents\\Caustica-deps\\slang-2026.13\\bin\\slangc.exe",
+  "gpuRuntimeCapture": "AWAITING_RUNTIME_CAPTURE",
+  "notes": ["Build/source manifest only; no production deployment performed."]
+}

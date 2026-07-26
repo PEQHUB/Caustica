@@ -1,0 +1,4 @@
+Source/unit proof: StreamlineLibrary has fixed-arity invokeExact wrappers; no
+Object... or invokeWithArguments remains. RtDlssFg uses StreamlineScratch for
+successful frame-critical calls. Source contract tests cover these rules.
+JFR zero-allocation proof: AWAITING_RUNTIME_CAPTURE.

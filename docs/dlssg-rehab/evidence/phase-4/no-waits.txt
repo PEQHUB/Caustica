@@ -1,0 +1,4 @@
+Source/unit proof: ordinary input acquisition and live queue transitions use
+nonblocking retirement/counter queries and real-frame fallback. Device-idle and
+timeline waits remain restricted to controlled teardown code. Runtime ETW and
+validation-layer proof remain pending.

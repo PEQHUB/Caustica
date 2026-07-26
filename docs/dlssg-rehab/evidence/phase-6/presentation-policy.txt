@@ -1,0 +1,4 @@
+Source/unit proof: PRESERVE_REQUEST, FG_MAILBOX, and UNCAPPED_IMMEDIATE are
+explicit policies. FIFO is preserved and FG fails closed when the selected
+policy has no supported non-FIFO path. MAILBOX is reported as presentation, not
+vendor VSync. UI/manual capture remains pending.

@@ -1,0 +1,4 @@
+Source/unit proof: the hard-coded 260 FPS substitution is absent. The limiter
+redirect returns Minecraft's requested value pending identification of the
+actual sleep owner; it does not install a pseudo-cap. Runtime pacing ownership
+and cadence proof remain pending.

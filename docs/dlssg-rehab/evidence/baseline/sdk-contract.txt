@@ -1,0 +1,7 @@
+Streamline SDK header path: C:\Users\Administrator\Documents\Caustica-deps\streamline-sdk\include
+SL_VERSION_MAJOR=2
+SL_VERSION_MINOR=12
+SL_VERSION_PATCH=0
+Native bridge ABI: 13 (Java and C++ compile-time checks agree)
+Vulkan SDK path: C:\VulkanSDK\1.4.341.1
+Status: build/source contract verified; device/runtime feature capture pending.

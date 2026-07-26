@@ -1,0 +1,3 @@
+Source/unit proof: normal and out-of-band FrameLifecycle paths are explicit;
+out-of-band presents do not fabricate simulation/render markers or call Reflex
+sleep. PCL/Reflex HUD and submit-boundary runtime validation remain pending.

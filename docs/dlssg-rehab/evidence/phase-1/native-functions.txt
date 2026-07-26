@@ -1,0 +1,3 @@
+Source/build proof: DLSS-G, Reflex, and PCL feature function pointers are cached
+after initialization and published through the native bridge feature table.
+Native allocation/ETW proof: AWAITING_RUNTIME_CAPTURE.

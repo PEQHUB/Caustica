@@ -1,0 +1,7 @@
+Source/unit proof:
+- StreamlineFrameTrace uses fixed primitive arrays and a VarHandle sequence.
+- Producers use monotonic sequence publication and do not wait for readers.
+- Disabled tracing takes one predictable branch and does not publish events.
+- FrameStallInjector and GpuStallInjector are armed only by explicit development
+  system properties and have no production-default delay.
+Runtime allocation/JFR and overwrite-rate capture: AWAITING_RUNTIME_CAPTURE.

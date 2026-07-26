@@ -1,0 +1,6 @@
+stall_ms,seam,status,evidence
+20,development injection,AWAITING_RUNTIME_CAPTURE,RTX5090 runtime capture required
+35,development injection,AWAITING_RUNTIME_CAPTURE,RTX5090 runtime capture required
+50,development injection,AWAITING_RUNTIME_CAPTURE,RTX5090 runtime capture required
+100,development injection,AWAITING_RUNTIME_CAPTURE,RTX5090 runtime capture required
+250,development injection,AWAITING_RUNTIME_CAPTURE,RTX5090 runtime capture required

@@ -1,0 +1,18 @@
+Command results from branch rehab/dlssg-streamline:
+
+PASS  focused touched/new Java contract tests (all selected DLSS-G, Streamline,
+     lifecycle, pacing, pool, recovery, presentation, schema, settings, and
+     localization tests)
+PASS  ./gradlew testStreamlineBridge
+PASS  ./gradlew testPackagedStreamlineBridge
+PASS  ./gradlew compileShaders -PwithoutSharc=true
+PASS  ./gradlew compileShaders
+PASS  ./gradlew jar (with SHARC_SDK=C:\Users\Administrator\Documents\_vendor_refs\SHARC-1.6.5.0)
+PASS  ./gradlew verifyProductionArtifact -x test
+FAIL  ./gradlew test (408 tests, 16 pre-existing untouched contract/bootstrap
+      failures; see evidence/baseline/build.log)
+FAIL  ./gradlew check (same test boundary)
+
+Production artifact verification passed. No game launch, RTX 5090 capture,
+deployment, visual comparison, JFR allocation profile, ETW contention trace,
+validation-layer run, or soak run was performed here.

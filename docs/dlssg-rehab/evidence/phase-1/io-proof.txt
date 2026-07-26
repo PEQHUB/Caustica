@@ -1,0 +1,3 @@
+Source proof: acceptance report writes are queued on a daemon diagnostics worker;
+the render/present path does not synchronously create directories, serialize
+JSON, or atomically move report files. Runtime JFR file-I/O capture is pending.
