@@ -28,7 +28,8 @@ final class DlssdDiffusePathGuideContractTest {
                 "src/main/java/dev/comfyfluffy/caustica/rt/pipeline/RtDlssRr.java"));
         assertTrue(rr.contains("BUFFER_DIFFUSE_RAY_DIRECTION_HIT_DISTANCE = 46"));
         assertTrue(rr.contains("if (diffusePathGuide)"));
-        assertTrue(rr.contains("requiredResourceCount(diffusePathGuide, layeredTransparency, particleHistory)"));
+        assertTrue(rr.contains("+ (diffusePathGuide ? 1 : 0)"));
+        assertTrue(rr.contains("+ (transparencyLayer != null ? 1 : 0)"));
 
         String bridge = Files.readString(Path.of("native/streamline_bridge/streamline_bridge.cpp"));
         assertTrue(bridge.contains("isSupportedDlssdResourceCount(resource_count)"));
@@ -46,15 +47,15 @@ final class DlssdDiffusePathGuideContractTest {
         String miss = Files.readString(Path.of("shaders/world/world.rmiss.slang"));
         String skyLut = Files.readString(Path.of("shaders/world/world_sky_lut.slang"));
 
-        assertTrue(composite.contains("BASE_GUIDE_COUNT = 20"));
-        assertTrue(composite.contains("NRD_GUIDE_COUNT = 20"));
+        assertTrue(composite.contains("BASE_GUIDE_COUNT = 19"));
+        assertTrue(composite.contains("NRD_GUIDE_COUNT = 19"));
         assertTrue(closestHit.contains("[[vk::binding(1, 1)]] Sampler2D materialSurface0Tex[]"));
         assertTrue(closestHit.contains("[[vk::binding(2, 1)]] Sampler2D materialNormalAoTex[]"));
         assertTrue(closestHit.contains("[[vk::binding(3, 1)]] Sampler2D materialSurface1Tex[]"));
-        int highestGuideBinding = highestSetZeroBinding(raygen, 3, 19);
+        int highestGuideBinding = highestSetZeroBinding(raygen, 3, 21);
         int skyBinding = shaderBinding(miss, "celestialsAtlas");
         int skyLutBinding = shaderBinding(skyLut, "skyViewLut");
-        assertTrue(highestGuideBinding == 19);
+        assertTrue(highestGuideBinding == 21);
         assertTrue(skyBinding > highestGuideBinding);
         assertTrue(skyLutBinding > skyBinding);
         assertTrue(pipeline.contains("int skyBinding = skyAtlas ? " + skyBinding + " : -1"));

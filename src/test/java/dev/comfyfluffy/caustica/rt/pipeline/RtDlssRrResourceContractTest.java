@@ -14,12 +14,12 @@ final class RtDlssRrResourceContractTest {
     void diffusePathGuideExtendsTheCoreContractOnlyWhenSelected() {
         assertEquals(10, RtDlssRr.requiredResourceCount(false));
         assertEquals(11, RtDlssRr.requiredResourceCount(true));
-        assertEquals(13, RtDlssRr.requiredResourceCount(false, true));
-        assertEquals(14, RtDlssRr.requiredResourceCount(true, true));
+        assertEquals(11, RtDlssRr.requiredResourceCount(false, true));
+        assertEquals(12, RtDlssRr.requiredResourceCount(true, true));
         assertEquals(11, RtDlssRr.requiredResourceCount(false, false, true));
         assertEquals(12, RtDlssRr.requiredResourceCount(true, false, true));
-        assertEquals(14, RtDlssRr.requiredResourceCount(false, true, true));
-        assertEquals(15, RtDlssRr.requiredResourceCount(true, true, true));
+        assertEquals(12, RtDlssRr.requiredResourceCount(false, true, true));
+        assertEquals(13, RtDlssRr.requiredResourceCount(true, true, true));
     }
 
     @Test

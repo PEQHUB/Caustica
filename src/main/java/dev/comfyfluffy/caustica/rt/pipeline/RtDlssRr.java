@@ -28,9 +28,6 @@ public final class RtDlssRr {
     private static final int VIEWPORT = 1;
     private static final int RESULT_OK = 0;
     private static final int CORE_RESOURCE_COUNT = 10;
-    private static final int DIFFUSE_PATH_RESOURCE_COUNT = 11;
-    private static final int TRANSPARENCY_LAYER_RESOURCE_COUNT = 13;
-    private static final int DIFFUSE_PATH_TRANSPARENCY_LAYER_RESOURCE_COUNT = 14;
     private static final int LIFECYCLE_VALID_UNTIL_EVALUATE = 2;
 
     private static final int BUFFER_DEPTH = 0;
@@ -172,7 +169,7 @@ public final class RtDlssRr {
     }
 
     public static int requiredResourceCount() {
-        return requiredResourceCount(CausticaConfig.Rt.DlssRr.DIFFUSE_PATH_GUIDE.value(), false,
+        return requiredResourceCount(CausticaConfig.Rt.DlssRr.DIFFUSE_PATH_GUIDE.value(), true,
                 CausticaConfig.Rt.DlssRr.PARTICLE_TEMPORAL_HISTORY.value());
     }
 
@@ -186,15 +183,8 @@ public final class RtDlssRr {
 
     static int requiredResourceCount(boolean diffusePathGuide, boolean layeredTransparency,
             boolean particleHint) {
-        int resourceCount;
-        if (layeredTransparency) {
-            resourceCount = diffusePathGuide
-                    ? DIFFUSE_PATH_TRANSPARENCY_LAYER_RESOURCE_COUNT
-                    : TRANSPARENCY_LAYER_RESOURCE_COUNT;
-        } else {
-            resourceCount = diffusePathGuide ? DIFFUSE_PATH_RESOURCE_COUNT : CORE_RESOURCE_COUNT;
-        }
-        return resourceCount + (particleHint ? 1 : 0);
+        return CORE_RESOURCE_COUNT + (diffusePathGuide ? 1 : 0)
+                + (layeredTransparency ? 1 : 0) + (particleHint ? 1 : 0);
     }
 
     /**
@@ -252,17 +242,16 @@ public final class RtDlssRr {
                     reset || resetHistory);
 
             boolean diffusePathGuide = CausticaConfig.Rt.DlssRr.DIFFUSE_PATH_GUIDE.value();
-            boolean anyTransparencyResource = colorBeforeTransparency != null
-                    || transparencyLayer != null || transparencyLayerOpacity != null;
-            boolean completeTransparencyResources = colorBeforeTransparency != null
-                    && transparencyLayer != null && transparencyLayerOpacity != null;
-            if (anyTransparencyResource && !completeTransparencyResources) {
+            if (transparencyLayerOpacity != null && transparencyLayer == null) {
                 throw new IllegalArgumentException(
-                        "Streamline DLSS-RR color-before, transparency layer, and opacity must be supplied together");
+                        "Streamline DLSS-RR transparency opacity requires a transparency layer");
             }
-            boolean layeredTransparency = completeTransparencyResources;
             boolean particleHistory = particleHint != null;
-            int resourceCount = requiredResourceCount(diffusePathGuide, layeredTransparency, particleHistory);
+            int resourceCount = CORE_RESOURCE_COUNT + (diffusePathGuide ? 1 : 0)
+                    + (particleHistory ? 1 : 0)
+                    + (colorBeforeTransparency != null ? 1 : 0)
+                    + (transparencyLayer != null ? 1 : 0)
+                    + (transparencyLayerOpacity != null ? 1 : 0);
             MemorySegment resources = StreamlineAbi.allocate(arena,
                     StreamlineAbi.RESOURCE_DESC_SIZE * resourceCount);
             writeResource(resources, 0, color, VK10.VK_FORMAT_R16G16B16A16_SFLOAT,
@@ -295,15 +284,17 @@ public final class RtDlssRr {
                         VK10.VK_FORMAT_R16G16B16A16_SFLOAT, renderWidth, renderHeight,
                         BUFFER_DIFFUSE_RAY_DIRECTION_HIT_DISTANCE);
             }
-            if (layeredTransparency) {
-                // ScalingInputColor above remains the final noisy color. This separate snapshot is the
-                // exact base before the premultiplied optical overlay, as required by DLSS-RR.
+            if (colorBeforeTransparency != null) {
                 writeResource(resources, optionalResource++, colorBeforeTransparency,
                         VK10.VK_FORMAT_R16G16B16A16_SFLOAT,
                         renderWidth, renderHeight, BUFFER_COLOR_BEFORE_TRANSPARENCY);
+            }
+            if (transparencyLayer != null) {
                 writeResource(resources, optionalResource++, transparencyLayer,
                         TRANSPARENCY_LAYER_FORMAT, renderWidth, renderHeight,
                         BUFFER_TRANSPARENCY_LAYER);
+            }
+            if (transparencyLayerOpacity != null) {
                 writeResource(resources, optionalResource, transparencyLayerOpacity,
                         TRANSPARENCY_LAYER_OPACITY_FORMAT, renderWidth, renderHeight,
                         BUFFER_TRANSPARENCY_LAYER_OPACITY);

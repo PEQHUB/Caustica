@@ -50,9 +50,10 @@ final class PortalRenderingContractTest {
                 "src/main/java/dev/comfyfluffy/caustica/rt/RtComposite.java"));
 
         assertTrue(raygen.contains("gColorBeforeTransparency"));
-        assertTrue(raygen.contains("gTransparencyLayerOpacity"));
+        assertTrue(raygen.contains("float4(premultipliedPortal, opacity)"));
         assertTrue(raygen.contains("(frameRadiance - premultipliedPortal) / transmission"));
-        assertTrue(composite.contains("gColorBeforeTransparency,"));
-        assertTrue(composite.contains("gTransparencyLayer, gTransparencyLayerOpacity"));
+        assertTrue(composite.contains("evaluate(cmd.address(), gColorBeforeTransparency"));
+        assertTrue(composite.contains("gTransparencyLayer, null, dlssdOutput"));
+        assertFalse(composite.contains("gTransparencyLayerOpacity"));
     }
 }

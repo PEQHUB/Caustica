@@ -151,7 +151,7 @@ public final class RtPipeline {
         try (MemoryStack stack = MemoryStack.stackPush()) {
             int firstExtraBinding = withBlockAlbedoAtlas ? 3 : 2;
             int materialBase = firstExtraBinding + extraStorageImages;
-            // Reconstruction guides and DLSSD layered transparency occupy bindings 3..22.
+            // Reconstruction guides and DLSSD layered transparency occupy bindings 3..21.
             // Keep one fixed miss ABI above both ranges so backend changes cannot move sky descriptors.
             int skyBinding = skyAtlas ? 23 : -1;
             int skyLutBinding = skyAtlas ? 24 : -1;

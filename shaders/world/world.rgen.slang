@@ -102,7 +102,6 @@ static SharcRWPtr<uint> sharcStats;
 [[vk::binding(13, 0)]] [format("rgba16f")] RWTexture2D<float4> gDiffuseRayDirectionHitDistance;
 [[vk::binding(20, 0)]] [format("rgba16f")] RWTexture2D<float4> gColorBeforeTransparency;
 [[vk::binding(21, 0)]] [format("rgba16f")] RWTexture2D<float4> gTransparencyLayer;
-[[vk::binding(22, 0)]] [format("rgba16f")] RWTexture2D<float4> gTransparencyLayerOpacity;
 #if CAUSTICA_NRD
 [[vk::binding(14, 0)]] [format("rgba16f")] RWTexture2D<float4> gNrdSh1;
 [[vk::binding(15, 0)]] [format("r32f")] RWTexture2D<float> gNrdViewZ;
@@ -3758,8 +3757,9 @@ void main() {
                 : float3(0.0);
         gColorBeforeTransparency[pix] = float4(
                 opacity > 0.0 ? colorBefore : frameRadiance, 1.0);
-        gTransparencyLayer[pix] = float4(gv_portalLayerColor, 1.0);
-        gTransparencyLayerOpacity[pix] = float4(opacity, opacity, opacity, opacity);
+        // Streamline's single-texture transparency-overlay contract is premultiplied RGBA.
+        // Zero alpha outside the portal is essential: alpha=1 with zero RGB is an opaque black layer.
+        gTransparencyLayer[pix] = float4(premultipliedPortal, opacity);
     }
     outImage[pix] = float4(frameRadiance, 1.0);
 #endif // CAUSTICA_OFFLINE

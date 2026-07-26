@@ -13,17 +13,9 @@ inline bool isCompleteDlssdVulkanTexture(const slbridge_resource_desc& descripto
             && descriptor.height != 0;
 }
 
-/** Ten core tags, plus optional particle, diffuse, and/or atomic three-tag transparency resources. */
+/** Ten core tags plus independently optional guides and a supported transparency overlay encoding. */
 inline bool isSupportedDlssdResourceCount(uint32_t resourceCount) noexcept {
     return resourceCount >= 10 && resourceCount <= 15;
-}
-
-inline bool dlssdResourceCountRequiresDiffusePath(uint32_t resourceCount) noexcept {
-    return resourceCount == 11 || resourceCount == 14;
-}
-
-inline bool dlssdResourceCountRequiresTransparencyLayer(uint32_t resourceCount) noexcept {
-    return resourceCount == 13 || resourceCount == 14;
 }
 
 inline bool hasExpectedDlssdOptionalResources(uint32_t resourceCount, bool hasParticleHint,
@@ -33,14 +25,13 @@ inline bool hasExpectedDlssdOptionalResources(uint32_t resourceCount, bool hasPa
     if (!isSupportedDlssdResourceCount(resourceCount)) {
         return false;
     }
-    const bool hasAnyTransparencyLayer = hasColorBeforeTransparency
-            || hasTransparencyLayer || hasTransparencyLayerOpacity;
-    const bool hasCompleteTransparencyLayer = hasColorBeforeTransparency
-            && hasTransparencyLayer && hasTransparencyLayerOpacity;
     const uint32_t expectedCount = 10u + (hasParticleHint ? 1u : 0u)
-            + (hasDiffusePath ? 1u : 0u) + (hasCompleteTransparencyLayer ? 3u : 0u);
+            + (hasDiffusePath ? 1u : 0u)
+            + (hasColorBeforeTransparency ? 1u : 0u)
+            + (hasTransparencyLayer ? 1u : 0u)
+            + (hasTransparencyLayerOpacity ? 1u : 0u);
     return resourceCount == expectedCount
-            && (!hasAnyTransparencyLayer || hasCompleteTransparencyLayer);
+            && (!hasTransparencyLayerOpacity || hasTransparencyLayer);
 }
 
 } // namespace slbridge::detail
