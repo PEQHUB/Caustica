@@ -356,6 +356,7 @@ bool payloadLavaSurface() { return (payload.flags & PAYLOAD_LAVA_SURFACE) != 0u;
 bool payloadFiberSurface() { return (payload.flags & PAYLOAD_FIBER_SURFACE) != 0u; }
 bool payloadEnchanted() { return (payload.flags & PAYLOAD_ENCHANTED) != 0u; }
 bool payloadEndPortal() { return (payload.flags & PAYLOAD_END_PORTAL) != 0u; }
+bool payloadNetherPortal() { return (payload.flags & PAYLOAD_NETHER_PORTAL) != 0u; }
 float payloadRoughness() { return unpackHalf2(payload.roughMetal).x; }
 float payloadMetalness() { return unpackHalf2(payload.roughMetal).y; }
 float payloadEmission() { return unpackHalf2(payload.emissionSss).x; }
@@ -427,7 +428,6 @@ void setPrimaryMissGuides(float3 rayDirection) {
 // Stained glass / ice (material 3): a thin colored dielectric. IOR ~1.5 (soda-lime glass).
 static const float GLASS_IOR = 1.52;
 static const float ICE_IOR = 1.31;
-static const float NETHER_PORTAL_IOR = 1.12;
 static const float ICE_GUIDE_ROUGH = 0.02;
 static const float GLASS_GUIDE_ROUGH = 0.04;
 // Transmitted-ray origin offset when crossing a glass face. Must be SMALLER than the terrain-side
@@ -1756,7 +1756,7 @@ void opticalGuideHit(float3 surfacePos, float3 transmittedDir, float3 surfaceNor
             }
             bool interfaceEntering = payloadInterfaceEntering();
             interfaceNormal = normalize(payload.geometricNormal);
-            if (opticalClass == OPTICAL_THIN_GLASS || opticalClass == OPTICAL_NETHER_PORTAL) {
+            if (opticalClass == OPTICAL_THIN_GLASS) {
                 // Match tracePath's collapsed-sheet model. Both geometric faces are
                 // crossed straight through, but only the entering face consumes tint.
                 straightThrough = true;
@@ -2034,16 +2034,72 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
             }
 
 #if CAUSTICA_SHARC_UPDATE
-            SharcUpdateMiss(
-                    sharcParameters,
-                    sharcState,
-                    portalRadiance
-            );
+            // Camera-projected, animated portal texels are not direction-independent cache data.
+            SharcUpdateMiss(sharcParameters, sharcState, float3(0.0));
+            sharcStatAdd(SHARC_STAT_UPDATE_MISSES, 1u);
 #endif
 
             // The stock portal shader is a final unlit surface. It has no BRDF or
             // transmission continuation.
             break;
+        }
+
+        // Vanilla Nether portal presentation is deterministic source-over, not a dielectric or a
+        // stochastic translucent material. The effective entering face composites once; the paired
+        // exit face is transport-only. A primary ray beginning inside still composites its first face.
+        if (payloadNetherPortal()) {
+#if CAUSTICA_SHARC_QUERY
+            sharcPathEligible = false;
+#endif
+            bool effectiveFace = payloadInterfaceEntering() || segment == 0;
+            if (effectiveFace) {
+                float alpha = clamp(payloadSss(), 0.0, 1.0);
+#if !CAUSTICA_OFFLINE
+                bool gatePortalEmitter = risOn && payloadEmitterInList();
+#else
+                bool gatePortalEmitter = false;
+#endif
+                if (!gatePortalEmitter || showCelestial) {
+                    float3 contribution = throughput * payload.albedo * alpha;
+                    L += contribution;
+#if CAUSTICA_NRD
+                    addNrdContribution(
+                            contribution,
+                            scatteringDepth == 0 ? 0 : nrdPrimaryLobe,
+                            nrdDiffuseRadiance,
+                            nrdSpecularRadiance
+                    );
+#endif
+                }
+                throughput *= 1.0 - alpha;
+
+                if (captureGuides && segment == 0) {
+                    gv_normal = n;
+                    gv_geometricNormal = geometricNormal;
+                    gv_albedo = float3(0.0);
+                    gv_specAlb = float3(0.0);
+                    gv_rough = 1.0;
+                    gv_hitCamRel = hitPos - pc.camOffset;
+                    gv_motionHitCamRel = gv_hitCamRel;
+                    gv_motionUseRefracted = false;
+                    gv_motionObjDisp = payload.motionPrev;
+                    gv_animatedGuide = 1.0;
+                }
+            }
+#if CAUSTICA_SHARC_UPDATE
+            SharcUpdateMiss(sharcParameters, sharcState, float3(0.0));
+            sharcStatAdd(SHARC_STAT_UPDATE_MISSES, 1u);
+            break;
+#endif
+            if (primaryOnly || max(throughput.r, max(throughput.g, throughput.b)) <= 1.0e-5) {
+                break;
+            }
+            if (opticalInterfaceDepth >= MAX_OPTICAL_INTERFACE_DEPTH) {
+                break;
+            }
+            ++opticalInterfaceDepth;
+            ro = hitPos + rd * GLASS_TRANSMIT_BIAS;
+            continue;
         }
 
         bool translucentSurface = material == MATERIAL_GLASS
@@ -2106,8 +2162,7 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
             }
             float3 glassTint = payload.albedo;
             bool entering = payloadInterfaceEntering();
-            bool netherPortal = opticalClass == OPTICAL_NETHER_PORTAL;
-            bool thinPane = opticalClass == OPTICAL_THIN_GLASS || netherPortal;
+            bool thinPane = opticalClass == OPTICAL_THIN_GLASS;
             float3 interfaceNormal = normalize(geometricNormal);
 
             // A pane model has an entry and exit shell. The entry is the effective sheet; a later exit is
@@ -2118,35 +2173,7 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
                 continue;
             }
 
-            if (netherPortal && payloadEmission() > 0.0) {
-#if !CAUSTICA_OFFLINE
-                bool gatePortalEmitter = risOn && payloadEmitterInList();
-#else
-                bool gatePortalEmitter = false;
-#endif
-                // RIS owns diffuse-bounce discovery of listed emitters. Primary visibility
-                // and specular/transmissive paths still gather the visible portal directly.
-                if (!gatePortalEmitter || showCelestial) {
-                    float3 portalEmission =
-                            throughput
-                            * glassTint
-                            * payloadEmission()
-                            * EMISSIVE_BASE_RADIANCE;
-                    L += portalEmission;
-#if CAUSTICA_NRD
-                    addNrdContribution(
-                            portalEmission,
-                            scatteringDepth == 0 ? 0 : nrdPrimaryLobe,
-                            nrdDiffuseRadiance,
-                            nrdSpecularRadiance
-                    );
-#endif
-                }
-            }
-
-            float materialIor = netherPortal
-                    ? NETHER_PORTAL_IOR
-                    : opticalClass == OPTICAL_SOLID_ICE
+            float materialIor = opticalClass == OPTICAL_SOLID_ICE
                             ? ICE_IOR
                             : GLASS_IOR;
             // The fluid mesher removes a water face coincident with glass/ice. The surviving optical
@@ -2202,12 +2229,6 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
                 gv_motionHitCamRel = gv_hitCamRel;
                 gv_motionUseRefracted = false;
                 gv_motionObjDisp = payload.motionPrev; // 0 for static terrain
-                if (netherPortal) {
-                    // The atlas animation changes without corresponding geometry motion.
-                    // Reject stale reconstructed portal texture while preserving ordinary
-                    // destination depth/motion for the transmitted scene.
-                    gv_animatedGuide = 1.0;
-                }
                 if (captureRefractedGuides) {
                     // The direction and medium both describe the far side of this primary interface.
                     // The shared bounded walker handles every later glass, ice, pane, and water boundary.

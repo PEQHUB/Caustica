@@ -509,6 +509,7 @@ public final class RtComposite {
     private SkyPush frozenSkyPush;
     private int groundTruthSettingsSignature = Integer.MIN_VALUE;
     private float frozenWaterWaveTime = Float.NaN;
+    private float frozenPortalGameTime = Float.NaN;
     private boolean sceneFreezeActive;
     private boolean frozenCameraCaptured;
 
@@ -649,6 +650,7 @@ public final class RtComposite {
             groundTruthAccumulationFrames = 0;
             groundTruthSettingsSignature = Integer.MIN_VALUE;
             frozenWaterWaveTime = Float.NaN;
+            frozenPortalGameTime = Float.NaN;
             OfflineGroundTruth.INSTANCE.onRendererReset();
         }
         RtReconstruction.requestHistoryReset();
@@ -701,6 +703,7 @@ public final class RtComposite {
             sceneFreezeActive = requested;
             frozenCameraCaptured = false;
             frozenWaterWaveTime = Float.NaN;
+            frozenPortalGameTime = Float.NaN;
             frozenSkyPush = null;
             previousWaterWaveTimeValid = false;
         }
@@ -710,6 +713,7 @@ public final class RtComposite {
     public void beginOfflineSession() {
         frozenCameraCaptured = false;
         frozenWaterWaveTime = Float.NaN;
+        frozenPortalGameTime = Float.NaN;
         frozenSkyPush = null;
         offlineTlas = null;
         offlineLastPresentNanos = 0L;
@@ -1788,6 +1792,7 @@ public final class RtComposite {
         if (offlineGroundTruth) {
             groundTruthAccumulationFrames = 0;
             frozenWaterWaveTime = Float.NaN;
+            frozenPortalGameTime = Float.NaN;
             OfflineGroundTruth.INSTANCE.onRendererReset();
         }
 
@@ -2277,6 +2282,16 @@ public final class RtComposite {
             // z carries the previous frame's phase for animated-water reflection reprojection.
             Float4 waterAnchor = new Float4(terrain.blockX & WATER_ANCHOR_MASK,
                     terrain.blockZ & WATER_ANCHOR_MASK, previousWaveTime, 0f);
+            float portalGameTime = RtVanillaPortalClock.portalGameTime(level,
+                    Minecraft.getInstance().getDeltaTracker().getGameTimeDeltaPartialTick(false));
+            if (freezeScene) {
+                if (Float.isNaN(frozenPortalGameTime)) {
+                    frozenPortalGameTime = portalGameTime;
+                }
+                portalGameTime = frozenPortalGameTime;
+            } else {
+                frozenPortalGameTime = Float.NaN;
+            }
 
             // Rebuild the TLAS this frame from static section instances merged with dynamic entity
             // instances, bind it into the pipeline's descriptor ring, record the build, then barrier so
@@ -2362,7 +2377,7 @@ public final class RtComposite {
                             terrain.lightGridDimZ(), 0),
                     terrain.lightCount(),
                     CausticaConfig.Rt.Lights.RIS_CANDIDATES.value(),
-                    RtVanillaPortalClock.portalGameTime(level, Minecraft.getInstance().getDeltaTracker().getGameTimeDeltaPartialTick(false))
+                    portalGameTime
             ).write(push);
             pushBuf.flush(0L, WORLD_PUSH_SIZE);
             if (skyViewPipeline != null && skyViewLut != null) {

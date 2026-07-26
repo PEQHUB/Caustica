@@ -59,7 +59,11 @@ public final class RtVanillaPortalClock {
         if (level == null) {
             return 0.0f;
         }
-        long gameTime = level.getGameTime();
-        return ((float) (gameTime % 24000L) + partialTick) / TICKS_PER_DAY;
+        return portalGameTime(level.getGameTime(), partialTick);
+    }
+
+    /** Pure form used by numerical tests and callers that already own the tick value. */
+    public static float portalGameTime(long gameTime, float partialTick) {
+        return ((float) Math.floorMod(gameTime, 24000L) + partialTick) / TICKS_PER_DAY;
     }
 }

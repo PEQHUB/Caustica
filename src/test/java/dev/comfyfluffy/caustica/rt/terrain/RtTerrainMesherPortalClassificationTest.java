@@ -10,10 +10,10 @@ import org.junit.jupiter.api.Test;
 
 final class RtTerrainMesherPortalClassificationTest {
     @Test
-    void netherPortalUsesDedicatedEmissiveGlass() {
+    void netherPortalIsNotPhysicalGlass() {
         var state = Blocks.NETHER_PORTAL.defaultBlockState();
 
-        assertTrue(
+        assertFalse(
                 RtTerrainMesher.usesTransmissiveMaterial(
                         state,
                         ChunkSectionLayer.TRANSLUCENT
@@ -22,7 +22,7 @@ final class RtTerrainMesherPortalClassificationTest {
 
         assertTrue(RtTerrainMesher.isNetherPortal(state));
         assertEquals(
-                RtTerrainMesher.OPTICAL_NETHER_PORTAL,
+                0,
                 RtTerrainMesher.opticalClassForTest(state)
         );
     }

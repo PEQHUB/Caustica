@@ -130,6 +130,19 @@ void main(inout float4 shadowVis, in BuiltInTriangleIntersectionAttributes attr)
     // non-linearly. Multiplying into shadowVis.rgb compounds correctly across stacked panes.
     if (bucket == BUCKET_TRANSLUCENT) {
         TerrainPrim pr = ConstPtr<TerrainPrim>(sec.primAddr)[tri];
+        if ((pr.flags & TERRAIN_PRIM_NETHER_PORTAL) != 0u) {
+            // Portal model geometry contains a paired face. Apply vanilla source-over shadow
+            // transmittance on the entering face only; the exit is transport-only.
+            if (dot(WorldRayDirection(), pr.normal.xyz) < 0.0) {
+                ConstPtr<float2> portalUvs = ConstPtr<float2>(sec.uvAddr);
+                float2 portalUv = bary.x * portalUvs[3u * tri + 0u]
+                        + bary.y * portalUvs[3u * tri + 1u]
+                        + bary.z * portalUvs[3u * tri + 2u];
+                float alpha = clamp(blockAlbedoAtlas.SampleLevel(portalUv, 0.0).a, 0.0, 1.0);
+                shadowVis.rgb *= 1.0 - alpha;
+            }
+            IgnoreHit();
+        }
         MaterialHeader materialHeader = ConstPtr<MaterialHeader>(pc.materialTableAddr)[pr.materialId];
         float3 avgColor = max(materialHeader.average.rgb * pr.tint.rgb,
                 float3(1.0e-3, 1.0e-3, 1.0e-3));

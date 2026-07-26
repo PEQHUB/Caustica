@@ -29,8 +29,8 @@ void payloadSetPacked(inout Payload payload, uint material, float roughness, flo
 uint materialEmissionSource(MaterialHeader header, float emission) {
     if (emission <= 0.0) return EMISSION_SOURCE_NONE;
     if ((header.features & MATERIAL_FEATURE_OVERRIDE_EMISSION) != 0u) return EMISSION_SOURCE_OVERRIDE;
-
-    // Uniform fallback: the material's authored emission scalar drives the whole sprite.
+    if ((header.features & MATERIAL_FEATURE_SPEC) != 0u) return EMISSION_SOURCE_LAB_PBR;
+    if ((header.features & MATERIAL_FEATURE_HEURISTIC_EMISSION) != 0u) return EMISSION_SOURCE_HEURISTIC;
     return EMISSION_SOURCE_UNIFORM;
 }
 
@@ -406,8 +406,7 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
             texProj0.xy += texProj0.w;
             texProj0.zw = currentClip.zw;
 
-            // Sample the exact vanilla portal effect (sRGB domain).
-            float3 portalSrgb = sampleVanillaEndPortal(
+            float3 portalLinear709 = sampleVanillaEndPortal(
                     texProj0,
                     pr.aux0,
                     pr.aux1,
@@ -416,8 +415,6 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
                     entityAlbedoTex
             );
 
-            // Decode sRGB → linear BT.709 → linear BT.2020.
-            float3 portalLinear709 = srgbToLinear(portalSrgb);
             float3 portalColor = bt709ToBt2020(portalLinear709);
 
             float3x3 entityO2wEnd = (float3x3)ObjectToWorld3x4();
@@ -580,13 +577,35 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
     }
     float3 geometricNormal = n;
 
+    // Nether portals are vanilla alpha-blended presentation surfaces. They retain their real
+    // translucent-bucket geometry and animated atlas sample, but never enter the dielectric path.
+    if ((pr.flags & TERRAIN_PRIM_NETHER_PORTAL) != 0u) {
+        float4 portalTexel = blockAlbedoAtlas.SampleLevel(uv, blockLod);
+        float3 portal709 = srgbToLinear(portalTexel.rgb) * srgbToLinear(tint);
+        payload.albedo = bt709ToBt2020(portal709);
+        payload.normal = n;
+        payload.geometricNormal = geometricNormal;
+        payload.hitT = RayTCurrent();
+        payload.motionPrev = float3(0.0);
+        payload.f0 = float3(0.0);
+        float alpha = clamp(portalTexel.a * pr.tint.a, 0.0, 1.0);
+        payloadSetPacked(payload, MATERIAL_OPAQUE, 1.0, 0.0, 0.0,
+                alpha, 1.0, 0.0, EMISSION_SOURCE_NONE);
+        payload.flags |= PAYLOAD_NETHER_PORTAL;
+        if (entering) {
+            payload.flags |= PAYLOAD_INTERFACE_ENTERING;
+        }
+        if ((pr.flags & TERRAIN_PRIM_IN_LIGHT_BUFFER) != 0u) {
+            payload.flags |= PAYLOAD_EMITTER_IN_LIST;
+        }
+        return;
+    }
+
     // Stained glass / ice: a thin colored filter resolved in raygen
     // (material 3). albedo carries the transmission tint = texel rgb mixed toward white by (1 − opacity),
     // so a more opaque texel tints transmitted light more strongly.
     if (materialHeader.model == MATERIAL_GLASS) {
         uint opticalClass = pr.aux0 & 0xfu;
-        bool netherPortal = opticalClass == OPTICAL_NETHER_PORTAL;
-
         float encodedEmission = pr.normal.w;
         bool nonSolid = encodedEmission >= 1.5;
         float fallbackEmission = nonSolid
@@ -602,7 +621,7 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
         Surface glassSurface = evaluateMaterial(materialHeader, uv, blockLod, glassAlbedo, n,
                 tp0, tp1, tp2, uv0, uv1, uv2, vdir,
                 materialHeader.params.x, materialHeader.params.y,
-                netherPortal ? fallbackEmission : 0.0, false,
+                0.0, false,
                 highQuality, blockPixelArt);
         n = glassSurface.normal;
         payload.albedo = bt709ToBt2020(applyBreaking(opticalColor709 * glassSurface.ao,
@@ -612,7 +631,7 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
         payload.hitT = RayTCurrent();
         payload.motionPrev = float3(0.0, 0.0, 0.0);
         payload.f0 = glassSurface.f0;
-        float glassEmission = netherPortal ? glassSurface.emission : 0.0;
+        float glassEmission = 0.0;
         payloadSetPacked(payload, MATERIAL_GLASS, glassSurface.roughness,
                 glassSurface.metalness, glassEmission, 0.0, materialHeader.params.z,
                 materialHeader.params.w,

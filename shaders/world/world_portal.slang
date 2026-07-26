@@ -10,8 +10,8 @@
 //   projection.xy = vec2(projection.x + projection.w, projection.y + projection.w);
 //   projection.zw = position.zw;
 //
-// The return value is in the SAMPLED/ENCODED domain (sRGB). The caller must apply
-// sRGB-to-linear BT.709 and then BT.709-to-BT.2020 conversion.
+// The return value is linear BT.709. Decode each sampled layer before accumulation:
+// applying the EOTF to the already-summed HDR value exponentiates it and washes the portal white.
 module world_portal;
 
 import world_common;
@@ -107,8 +107,7 @@ float2 end_portal_layer_uv(float layer, float2 texProj0_xy, float texProj0_w, fl
 // layerCount: number of animated portal layers (15 for End portal, 16 for End gateway).
 // textures: the entityAlbedoTex bindless texture array.
 //
-// Returns the accumulated color in sRGB/BT.709 (sampled/encoded domain).
-// The caller must apply sRGB-to-linear BT.709 and then BT.709-to-BT.2020.
+// Returns the accumulated color in linear BT.709.
 public float3 sampleVanillaEndPortal(
         float4 texProj0,
         uint endSkySlot,
@@ -118,8 +117,8 @@ public float3 sampleVanillaEndPortal(
         Sampler2D textures[]
 ) {
     // Layer 0: end_sky background * COLORS[0]
-    float3 color = textures[NonUniformResourceIndex(endSkySlot)]
-            .SampleLevel(texProj0.xy / texProj0.w, 0.0).rgb
+    float3 color = srgbToLinear(textures[NonUniformResourceIndex(endSkySlot)]
+            .SampleLevel(texProj0.xy / texProj0.w, 0.0).rgb)
             * END_PORTAL_COLORS[0];
 
     // Layers 1..layerCount: animated portal layers with COLORS[0..layerCount-1]
@@ -128,8 +127,8 @@ public float3 sampleVanillaEndPortal(
 
         float2 layerUv = end_portal_layer_uv(fi, texProj0.xy, texProj0.w, gameTime);
 
-        float3 layerColor = textures[NonUniformResourceIndex(portalSlot)]
-                .SampleLevel(layerUv, 0.0).rgb;
+        float3 layerColor = srgbToLinear(textures[NonUniformResourceIndex(portalSlot)]
+                .SampleLevel(layerUv, 0.0).rgb);
 
         // COLORS[i] where i = 0..layerCount-1
         color += layerColor * END_PORTAL_COLORS[i];

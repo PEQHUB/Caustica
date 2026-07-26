@@ -31,7 +31,7 @@ final class TorchEmissionContractTest {
         assertTrue(raygen.contains("if (payloadTorchEmitter())"));
         assertTrue(raygen.contains("emissiveRadiance *= EMISSIVE_MAX_MULTIPLIER"));
         assertTrue(mesher.contains("state.getBlock() instanceof BaseTorchBlock"));
-        assertTrue(mesher.contains("Float.intBitsToFloat(q.torch ? PRIM_FLAG_TORCH : 0)"));
+        assertTrue(mesher.contains("int primitiveFlags = q.torch ? PRIM_FLAG_TORCH : 0"));
         assertTrue(raygen.contains("L += throughput * albedo * emission * emissiveRadiance;"));
         assertTrue(raygen.contains("float3 materialEmissive = albedo * emission * emissiveRadiance;"));
         assertTrue(raygen.contains("cacheableDirectLighting + liveDirectLighting + materialEmissive"));

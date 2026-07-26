@@ -239,7 +239,6 @@ public static const uint OPTICAL_THIN_GLASS = 2u;
 public static const uint OPTICAL_SOLID_GLASS = 3u;
 public static const uint OPTICAL_SOLID_ICE = 4u;
 public static const uint OPTICAL_TRANSLUCENT_SURFACE = 5u;
-public static const uint OPTICAL_NETHER_PORTAL = 6u;
 
 // Entity per-triangle record (48 B). The final lane mirrors TerrainPrim's integer material metadata.
 public struct Prim {

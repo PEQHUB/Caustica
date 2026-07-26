@@ -65,16 +65,16 @@ import java.util.List;
 final class RtTerrainMesher {
     private static final int PRIM_FLAG_TORCH = 1;
     private static final int PRIM_FLAG_LAVA = 1 << 1;
+    private static final int PRIM_FLAG_NETHER_PORTAL = 1 << 3;
 
     static final int OPTICAL_THIN_GLASS = 2;
     static final int OPTICAL_SOLID_GLASS = 3;
     static final int OPTICAL_SOLID_ICE = 4;
     static final int OPTICAL_TRANSLUCENT_SURFACE = 5;
-    static final int OPTICAL_NETHER_PORTAL = 6;
     static final int OPTICAL_EXTERIOR_WATER = 1 << 4;
 
     static boolean usesTransmissiveMaterial(BlockState state, ChunkSectionLayer layer) {
-        return layer == ChunkSectionLayer.TRANSLUCENT;
+        return layer == ChunkSectionLayer.TRANSLUCENT && !isNetherPortal(state);
     }
 
     static boolean isNetherPortal(BlockState state) {
@@ -82,7 +82,7 @@ final class RtTerrainMesher {
     }
 
     static int opticalClassForTest(BlockState state) {
-        return QuadCapture.opticalClass(state);
+        return isNetherPortal(state) ? 0 : QuadCapture.opticalClass(state);
     }
 
     /**
@@ -510,12 +510,13 @@ final class RtTerrainMesher {
 
             // Fabric colors are authored albedo. Continuity uses them for already-resolved overlay tint;
             // ordinary biome-tinted quads retain tintIndex and are multiplied by the world tint below.
-            int sr = 0, sg = 0, sb = 0;
+            int sr = 0, sg = 0, sb = 0, sa = 0;
             for (int i = 0; i < 4; i++) {
                 int color = quad.color(i);
                 sr += (color >> 16) & 0xFF;
                 sg += (color >> 8) & 0xFF;
                 sb += color & 0xFF;
+                sa += (color >>> 24) & 0xFF;
             }
             float tr = sr / 1020f;
             float tg = sg / 1020f;
@@ -531,7 +532,7 @@ final class RtTerrainMesher {
                     tb *= (rgb & 0xFF) * (1f / 255f);
                 }
             }
-            q.tr = tr; q.tg = tg; q.tb = tb;
+            q.tr = tr; q.tg = tg; q.tb = tb; q.ta = sa / 1020f;
 
             q.emission = quad.emissive() ? 1f : (state != null ? state.getLightEmission() / 15f : 0f);
             q.torch = state != null && state.getBlock() instanceof BaseTorchBlock;
@@ -542,7 +543,6 @@ final class RtTerrainMesher {
 
         private static int opticalClass(BlockState state) {
             if (state == null) return OPTICAL_TRANSLUCENT_SURFACE;
-            if (state.is(Blocks.NETHER_PORTAL)) return OPTICAL_NETHER_PORTAL;
             var block = state.getBlock();
             if (block == Blocks.GLASS_PANE || block instanceof StainedGlassPaneBlock) return OPTICAL_THIN_GLASS;
             if (block == Blocks.GLASS || block instanceof StainedGlassBlock || block instanceof TintedGlassBlock) {
@@ -704,9 +704,13 @@ final class RtTerrainMesher {
                 prim.add(q.tr);
                 prim.add(q.tg);
                 prim.add(q.tb);
-                prim.add(0f);
+                prim.add(q.ta);
                 prim.add(Float.intBitsToFloat(q.materialId)); // TerrainPrim.materialId uint bits
-                prim.add(Float.intBitsToFloat(q.torch ? PRIM_FLAG_TORCH : 0));
+                int primitiveFlags = q.torch ? PRIM_FLAG_TORCH : 0;
+                if (isNetherPortal(state)) {
+                    primitiveFlags |= PRIM_FLAG_NETHER_PORTAL;
+                }
+                prim.add(Float.intBitsToFloat(primitiveFlags));
                 prim.add(Float.intBitsToFloat(q.opticalClass));
                 prim.add(Float.intBitsToFloat(q.opticalWaterTint)); // aux1: adjacent-water RGB8, or zero
                 g.ommSprites.add(q.sprite);
@@ -735,7 +739,7 @@ final class RtTerrainMesher {
         boolean torch;
         int opticalClass;
         int opticalWaterTint;
-        float tr, tg, tb, emission;
+        float tr, tg, tb, ta, emission;
         int materialId;
         TextureAtlasSprite sprite;
     }
