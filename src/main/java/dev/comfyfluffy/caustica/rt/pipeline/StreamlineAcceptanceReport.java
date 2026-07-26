@@ -15,6 +15,8 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.time.Instant;
 import java.util.List;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 /** Compact, behavior-neutral runtime proof for fixed Vulkan DLSSG and DLSSD. */
 public final class StreamlineAcceptanceReport {
@@ -22,6 +24,12 @@ public final class StreamlineAcceptanceReport {
     private static final long DEVELOPMENT_WRITE_INTERVAL_NANOS = 250_000_000L;
     private static long lastWriteNanos;
     private static String lastStateKey = "";
+    private static boolean writeQueued;
+    private static final ExecutorService REPORT_EXECUTOR = Executors.newSingleThreadExecutor(runnable -> {
+        Thread thread = new Thread(runnable, "caustica-streamline-report");
+        thread.setDaemon(true);
+        return thread;
+    });
 
     private StreamlineAcceptanceReport() {
     }
@@ -37,9 +45,20 @@ public final class StreamlineAcceptanceReport {
                 return;
             }
         }
-        writeReports();
         lastWriteNanos = now;
         lastStateKey = stateKey;
+        if (!writeQueued) {
+            writeQueued = true;
+            REPORT_EXECUTOR.execute(() -> {
+                try {
+                    writeReports();
+                } finally {
+                    synchronized (StreamlineAcceptanceReport.class) {
+                        writeQueued = false;
+                    }
+                }
+            });
+        }
     }
 
     public static synchronized void publishNow() {
@@ -135,12 +154,18 @@ public final class StreamlineAcceptanceReport {
                 .append(StreamlineSwapchainCoordinator.INSTANCE.vsyncRequested()).append(",\n")
                 .append("    \"mailboxSupported\": ")
                 .append(StreamlineSwapchainCoordinator.INSTANCE.mailboxSupported()).append(",\n")
-                .append("    \"mailboxVsyncCompatibility\": ")
-                .append(StreamlineSwapchainCoordinator.INSTANCE.mailboxVsyncCompatibility()).append(",\n")
+                .append("    \"mailboxPresentationSelected\": ")
+                .append(StreamlineSwapchainCoordinator.INSTANCE.mailboxPresentationSelected()).append(",\n")
                 .append("    \"presentMode\": ")
                 .append(quote(StreamlineSwapchainCoordinator.INSTANCE.presentMode())).append(",\n")
                 .append("    \"reflexIntervalUs\": ").append(fg.reflexIntervalUs()).append(",\n")
                 .append("    \"outputTargetFps\": ").append(fg.outputTargetFps()).append(",\n")
+                .append("    \"pacingTargetStrategy\": ")
+                .append(quote(CausticaConfig.Rt.Fg.PACING_TARGET_STRATEGY.get())).append(",\n")
+                .append("    \"multiplierPolicy\": ")
+                .append(quote(CausticaConfig.Rt.Fg.MULTIPLIER_POLICY.get())).append(",\n")
+                .append("    \"minimumSourceFps\": ")
+                .append(CausticaConfig.Rt.Fg.MINIMUM_SOURCE_FPS.value()).append(",\n")
                 .append("    \"renderedTargetFps\": ").append(fg.renderedTargetFps()).append(",\n")
                 .append("    \"totalFrameMultiplier\": ").append(fg.totalFrameMultiplier()).append(",\n")
                 .append("    \"presentedCadenceSamples\": ").append(fg.presentedCadenceSamples()).append(",\n")

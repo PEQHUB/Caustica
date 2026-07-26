@@ -16,15 +16,15 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 @Mixin(Minecraft.class)
 public abstract class MinecraftMixin {
 	/**
-	 * Parallel DLSS-G uses Reflex as the sole rendered-frame pacing authority. Leaving Minecraft's
-	 * end-of-frame sleep enabled would create a second, phase-independent limiter and reintroduce
-	 * cadence quantization. The user's normal limiter remains untouched in every other mode.
+	 * Keep the limiter lookup explicit. Phase 0 established this as the available source seam;
+	 * the actual sleep owner is not guessed from this value-return call. Pacing decisions are
+	 * applied at the normal frame boundary and this wrapper never substitutes a magic FPS value.
 	 */
 	@Redirect(method = "renderFrame",
 			at = @At(value = "INVOKE",
 					target = "Lcom/mojang/blaze3d/platform/FramerateLimitTracker;getFramerateLimit()I"))
 	private int caustica$useSingleParallelFgLimiter(FramerateLimitTracker tracker) {
-		return RtDlssFg.INSTANCE.parallelPacingActive() ? 260 : tracker.getFramerateLimit();
+		return RtDlssFg.INSTANCE.resolveMinecraftLimiter(tracker.getFramerateLimit());
 	}
 
 	@Inject(method = "close", at = @At("HEAD"))

@@ -12,7 +12,7 @@
 extern "C" {
 #endif
 
-#define SLBRIDGE_ABI_VERSION 11u
+#define SLBRIDGE_ABI_VERSION 13u
 
 enum slbridge_variant {
     SLBRIDGE_VARIANT_DEVELOPMENT = 0,
@@ -335,6 +335,8 @@ SLBRIDGE_EXPORT int32_t slbridge_vk_queue_present(uint64_t queue, uint64_t prese
 SLBRIDGE_EXPORT int32_t slbridge_vk_device_wait_idle(uint64_t device);
 SLBRIDGE_EXPORT int32_t slbridge_vk_wait_timeline(uint64_t device, uint64_t semaphore,
         uint64_t value, uint64_t timeout_ns);
+SLBRIDGE_EXPORT int32_t slbridge_get_timeline_counter(uint64_t device, uint64_t semaphore,
+        uint64_t* out_value);
 
 SLBRIDGE_EXPORT int32_t slbridge_supports_feature(uint32_t feature, uint64_t physical_device);
 SLBRIDGE_EXPORT int32_t slbridge_get_feature_requirements(uint32_t feature,

@@ -11,10 +11,13 @@ import dev.comfyfluffy.caustica.rt.accel.RtImage;
 import dev.comfyfluffy.caustica.streamline.StreamlineAbi;
 import dev.comfyfluffy.caustica.streamline.StreamlineLibrary;
 import dev.comfyfluffy.caustica.streamline.StreamlineRuntime;
+import dev.comfyfluffy.caustica.streamline.StreamlineScratch;
+import dev.comfyfluffy.caustica.streamline.StreamlineFrameTrace;
+import dev.comfyfluffy.caustica.streamline.StreamlineFrameTraceEvent;
+import dev.comfyfluffy.caustica.streamline.FrameStallInjector;
+import dev.comfyfluffy.caustica.streamline.GpuStallInjector;
 import dev.comfyfluffy.caustica.streamline.StreamlineSwapchainCoordinator;
-import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
-import java.lang.foreign.ValueLayout;
 import java.nio.ByteBuffer;
 import java.util.concurrent.atomic.AtomicInteger;
 import net.minecraft.client.Minecraft;
@@ -43,6 +46,7 @@ public final class RtDlssFg {
     private static final int RESOURCE_COUNT = 5;
 
     private enum QueuePolicy {
+        AUTO("auto"),
         SYNCHRONIZED("synchronized"),
         PARALLEL("parallel");
 
@@ -53,8 +57,11 @@ public final class RtDlssFg {
         }
 
         static QueuePolicy from(String value) {
-            return "parallel".equalsIgnoreCase(value) || "no-client-queues".equalsIgnoreCase(value)
-                    ? PARALLEL : SYNCHRONIZED;
+            if ("parallel".equalsIgnoreCase(value) || "no-client-queues".equalsIgnoreCase(value)) {
+                return PARALLEL;
+            }
+            if ("auto".equalsIgnoreCase(value)) return AUTO;
+            return SYNCHRONIZED;
         }
     }
 
@@ -116,6 +123,11 @@ public final class RtDlssFg {
     private long inputsProcessingFence;
     private long inputsProcessingFenceValue;
     private final DlssgInputSlotRing inputSlots = new DlssgInputSlotRing();
+    private final DlssgInputPool inputPool = new DlssgInputPool();
+    private int currentPoolSlot = DlssgInputPool.NO_SLOT;
+    private final StreamlineScratch streamlineScratch = new StreamlineScratch();
+    private final StreamlineFrameTrace frameTrace = new StreamlineFrameTrace();
+    private final FrameLifecycle frameLifecycle = new FrameLifecycle();
     private QueuePolicy activeQueuePolicy = QueuePolicy.SYNCHRONIZED;
     private boolean queuePolicyTransitionFrame;
     private boolean queueFallback;
@@ -139,6 +151,7 @@ public final class RtDlssFg {
     private String submissionStatus = "No frame submitted";
 
     private RtDlssFg() {
+        frameTrace.setEnabled(Boolean.getBoolean("caustica.streamline.trace"));
     }
 
     /** Backward-compatible requested gate used by existing render seams. */
@@ -207,7 +220,7 @@ public final class RtDlssFg {
     }
 
     public int inputSlotCount() {
-        return inputSlots.count();
+        return inputPool.capacity() > 0 ? inputPool.capacity() : inputSlots.count();
     }
 
     public int activeInputSlot() {
@@ -390,6 +403,14 @@ public final class RtDlssFg {
                 && CausticaConfig.Rt.Fg.OUTPUT_TARGET_FPS.value() > 0;
     }
 
+    /**
+     * Source seam adapter for Minecraft's limiter lookup. It deliberately preserves the
+     * requested value until the mapped sleep invocation is identified; no pseudo-cap is used.
+     */
+    public int resolveMinecraftLimiter(int requestedLimit) {
+        return Math.max(0, requestedLimit);
+    }
+
     private boolean stateDynamicMfgSupported;
 
     /** Earliest per-loop point: obtain the token, apply pacing, and begin PCL simulation markers. */
@@ -403,24 +424,34 @@ public final class RtDlssFg {
         }
         probeAvailabilityOnce();
         StreamlineLibrary library = StreamlineRuntime.library();
-        try (Arena arena = Arena.ofConfined()) {
-            MemorySegment tokenOut = arena.allocate(ValueLayout.JAVA_LONG);
+        try {
+            streamlineScratch.assertOwnerThread();
             int requestedFrameIndex = frameIndex.getAndIncrement();
-            frameToken = library.beginFrame(requestedFrameIndex, tokenOut);
+            frameTrace.record(StreamlineFrameTraceEvent.FRAME_BEGIN, 0L, requestedFrameIndex, 0L,
+                    requestedFrameIndex, StreamlineFrameTraceEvent.PRODUCER_CLIENT);
+            FrameStallInjector.maybeInject(frameTrace, 0L, requestedFrameIndex);
+            frameToken = library.beginFrame(requestedFrameIndex, streamlineScratch.frameTokenOut());
             if (frameToken == 0L) {
                 CausticaMod.LOGGER.warn("Streamline did not return a frame token: {}", library.lastError());
                 return;
             }
             currentFrameIndex = requestedFrameIndex;
-            applyReflexOptions(library, arena);
+            frameLifecycle.beginNormal(requestedFrameIndex, frameToken, System.nanoTime());
+            applyReflexOptions(library, streamlineScratch);
             if (reflexSupported) {
+                frameTrace.record(StreamlineFrameTraceEvent.REFLEX_SLEEP_ENTER, frameToken, 0L, 0L,
+                        requestedFrameIndex, StreamlineFrameTraceEvent.PRODUCER_CLIENT);
                 warnResult(library.reflexSleep(frameToken), "slReflexSleep");
+                frameLifecycle.markSleep();
+                frameTrace.record(StreamlineFrameTraceEvent.REFLEX_SLEEP_EXIT, frameToken, 0L, 0L,
+                        requestedFrameIndex, StreamlineFrameTraceEvent.PRODUCER_CLIENT);
             }
             if (triggerFlashPending) {
                 marker(PCL_TRIGGER_FLASH);
                 triggerFlashPending = false;
             }
             marker(PCL_SIMULATION_START);
+            frameLifecycle.markSimulationStart();
         } catch (Throwable throwable) {
             CausticaMod.LOGGER.warn("Streamline frame begin failed", throwable);
             frameToken = 0L;
@@ -435,9 +466,24 @@ public final class RtDlssFg {
     /** Ensure synchronous redraws that bypass normal simulation still receive their own present token. */
     public void ensurePresentToken() {
         if (frameToken == 0L) {
-            beginSimulationFrame();
-            marker(PCL_SIMULATION_END);
-            marker(PCL_RENDER_SUBMIT_START);
+            beginOutOfBandPresent();
+        }
+    }
+
+    private void beginOutOfBandPresent() {
+        if (!StreamlineRuntime.initializeForVulkan()) return;
+        StreamlineLibrary library = StreamlineRuntime.library();
+        try {
+            int index = frameIndex.getAndIncrement();
+            frameToken = library.beginFrame(-1, streamlineScratch.frameTokenOut());
+            if (frameToken == 0L) return;
+            currentFrameIndex = index;
+            frameLifecycle.beginOutOfBand(index, frameToken, System.nanoTime());
+            frameTrace.record(StreamlineFrameTraceEvent.FRAME_BEGIN, frameToken, index, 1L, index,
+                    StreamlineFrameTraceEvent.PRODUCER_RENDER);
+        } catch (Throwable throwable) {
+            frameToken = 0L;
+            CausticaMod.LOGGER.debug("Could not begin out-of-band Streamline present", throwable);
         }
     }
 
@@ -451,6 +497,15 @@ public final class RtDlssFg {
         if (frameToken == 0L || !pclSupported || !StreamlineRuntime.initialized()) {
             return;
         }
+        if (frameLifecycle.outOfBand()
+                && (marker == PCL_SIMULATION_START || marker == PCL_SIMULATION_END
+                || marker == PCL_RENDER_SUBMIT_START || marker == PCL_RENDER_SUBMIT_END)) {
+            return;
+        }
+        if (marker == PCL_SIMULATION_END) frameLifecycle.markSimulationEnd();
+        if (marker == PCL_RENDER_SUBMIT_START) frameLifecycle.markRenderSubmitStart();
+        if (marker == PCL_RENDER_SUBMIT_END) frameLifecycle.markRenderSubmitEnd();
+        if (marker == PCL_PRESENT_START) frameLifecycle.markPresentStart();
         warnResult(StreamlineRuntime.library().pclSetMarker(marker, frameToken), "slPCLSetMarker(" + marker + ")");
     }
 
@@ -508,6 +563,8 @@ public final class RtDlssFg {
         pluginForSwapchain = pluginEnabled;
         swapchainGeneration = generation;
         resetInputSlots(Math.max(0, imageCount));
+        inputPool.reset(Math.max(imageCount + 2, 5), generation);
+        currentPoolSlot = DlssgInputPool.NO_SLOT;
         activeQueuePolicy = requestedQueuePolicy();
         queuePolicyTransitionFrame = false;
         queueFallback = false;
@@ -576,20 +633,10 @@ public final class RtDlssFg {
             return true;
         }
         if (!inputSlots.valid(activeInputSlot)) {
-            return enterBlockingQueueFallback("Streamline returned no completion fence/value for input slot "
+            return enterRecoverableInputStarvation("Streamline returned no completion fence/value for input slot "
                     + activeInputSlot);
         }
-        int result;
-        try (RtFrameStats.Scope ignored = RtFrameStats.FRAME.stage("frame.dlssgInputWait")) {
-            result = waitForInputSlot(activeInputSlot);
-        }
-        if (result != RESULT_OK) {
-            timelineWaitFailures++;
-            return enterBlockingQueueFallback("Timeline wait failed for input slot " + activeInputSlot + ": "
-                    + StreamlineRuntime.lastError());
-        }
-        inputSlots.markPrepared();
-        return true;
+        return enterRecoverableInputStarvation("Input completion is still pending; this present is real-frame-only");
     }
 
     /** Drain every outstanding tagged-input retirement before their owning image ring is destroyed. */
@@ -600,6 +647,20 @@ public final class RtDlssFg {
     /** Associate the next frame's tagged resources with the application-visible acquired image. */
     public void onImageAcquired(int imageIndex) {
         inputSlots.acquire(imageIndex);
+        if (StreamlineRuntime.initialized() && StreamlineRuntime.library() != null
+                && RenderSystem.getDevice() != null
+                && ((GpuDeviceAccessor) RenderSystem.getDevice()).caustica$getBackend() instanceof VulkanDevice device) {
+            inputPool.retireCompleted((ignoredDevice, semaphore) -> {
+                streamlineScratch.clear(streamlineScratch.apiErrorOut());
+                return StreamlineRuntime.library().getTimelineCounter(device.vkDevice().address(), semaphore,
+                        streamlineScratch.apiErrorOut()) == RESULT_OK
+                        ? streamlineScratch.apiErrorOut().get(java.lang.foreign.ValueLayout.JAVA_LONG, 0) : -1L;
+            }, device.vkDevice().address());
+        }
+        currentPoolSlot = frameToken == 0L ? DlssgInputPool.NO_SLOT : inputPool.tryAcquire(frameToken);
+        if (currentPoolSlot == DlssgInputPool.NO_SLOT) {
+            submissionStatus = "No free immutable input slot; presenting the real frame";
+        }
     }
 
     /** Called immediately before the one real proxy present. */
@@ -657,6 +718,8 @@ public final class RtDlssFg {
         frameToken = 0L;
         currentFrameIndex = -1;
         frameInputsSubmitted = false;
+        frameLifecycle.markPresentEnd(presentResult);
+        frameLifecycle.resetAfterPresent();
         afterPresentCpuNanos = Math.max(0L, System.nanoTime() - started);
     }
 
@@ -681,9 +744,10 @@ public final class RtDlssFg {
         if (!canSubmit(colorWidth, colorHeight, commandBuffer, depth, motion, hudless)) {
             return false;
         }
-        try (Arena arena = Arena.ofConfined()) {
+        try {
             StreamlineLibrary library = StreamlineRuntime.library();
-            MemorySegment constants = StreamlineAbi.allocate(arena, StreamlineAbi.CONSTANTS_SIZE);
+            MemorySegment constants = streamlineScratch.constants();
+            streamlineScratch.clear(constants);
             int generatedFrameCount = effectiveMultiFrameCount();
             boolean effectiveReset = reset || forceResetNextSubmission
                     || generatedFrameCount != lastFrameInputGeneratedCount
@@ -693,8 +757,8 @@ public final class RtDlssFg {
                     cameraDeltaX, cameraDeltaY, cameraDeltaZ, effectiveReset, true);
             check(library.setConstants(frameToken, VIEWPORT, constants), "slSetConstants");
 
-            MemorySegment resources = StreamlineAbi.allocate(arena,
-                    StreamlineAbi.RESOURCE_DESC_SIZE * RESOURCE_COUNT);
+            MemorySegment resources = streamlineScratch.fgResources();
+            streamlineScratch.clear(resources);
             writeResource(resources, 0, depth, VK10.VK_FORMAT_R32_SFLOAT, renderWidth, renderHeight, 0, true);
             writeResource(resources, 1, motion, VK10.VK_FORMAT_R16G16_SFLOAT, renderWidth, renderHeight, 1, true);
             int contentWidth = hudless.width;
@@ -725,6 +789,9 @@ public final class RtDlssFg {
             lastAppliedOffFlags = Integer.MIN_VALUE;
             submissionStatus = "Submitted; waiting for generated present";
             frameInputsSubmitted = true;
+            if (currentPoolSlot != DlssgInputPool.NO_SLOT) {
+                inputPool.markReady(currentPoolSlot, frameToken);
+            }
             lastSubmissionReset = effectiveReset;
             if (loggedSubmissionGeneration != swapchainGeneration) {
                 loggedSubmissionGeneration = swapchainGeneration;
@@ -756,6 +823,10 @@ public final class RtDlssFg {
         }
         if (!isAvailable()) {
             submissionStatus = unavailableReason();
+            return false;
+        }
+        if (currentPoolSlot == DlssgInputPool.NO_SLOT) {
+            submissionStatus = "No free immutable input slot; presenting the real frame";
             return false;
         }
         if (commandBuffer == 0L || frameToken == 0L) {
@@ -792,7 +863,7 @@ public final class RtDlssFg {
         return runtimeStatus == 0;
     }
 
-    private void applyReflexOptions(StreamlineLibrary library, Arena arena) {
+    private void applyReflexOptions(StreamlineLibrary library, StreamlineScratch scratch) {
         int mode = requested() || CausticaConfig.Rt.Reflex.ENABLED.value()
                 ? (CausticaConfig.Rt.Reflex.LOW_LATENCY_BOOST.value() ? 2 : 1) : 0;
         // Reflex and DLSS-G jointly interpret frameLimitUs as the desired final output cadence and
@@ -805,7 +876,8 @@ public final class RtDlssFg {
         if (mode == lastReflexMode && limit == lastReflexLimit) {
             return;
         }
-        MemorySegment options = StreamlineAbi.allocate(arena, StreamlineAbi.REFLEX_OPTIONS_SIZE);
+        MemorySegment options = scratch.reflexOptions();
+        scratch.clear(options);
         ByteBuffer bytes = StreamlineAbi.bytes(options);
         bytes.putInt(0, mode);
         bytes.putInt(4, limit);
@@ -822,9 +894,9 @@ public final class RtDlssFg {
         if (frameToken == 0L || !StreamlineRuntime.initialized() || !pluginForSwapchain) {
             return;
         }
-        try (Arena arena = Arena.ofConfined()) {
-            MemorySegment resources = StreamlineAbi.allocate(arena,
-                    StreamlineAbi.RESOURCE_DESC_SIZE * RESOURCE_COUNT);
+        {
+            MemorySegment resources = streamlineScratch.fgResources();
+            streamlineScratch.clear(resources);
             ByteBuffer bytes = StreamlineAbi.bytes(resources);
             bytes.putInt(56, 0);
             bytes.putInt(56 + StreamlineAbi.RESOURCE_DESC_SIZE, 1);
@@ -847,8 +919,9 @@ public final class RtDlssFg {
         if (!optionsEnabled && lastAppliedOffFlags == flags) {
             return;
         }
-        try (Arena arena = Arena.ofConfined()) {
-            MemorySegment options = StreamlineAbi.allocate(arena, StreamlineAbi.DLSSG_OPTIONS_SIZE);
+        try {
+            MemorySegment options = streamlineScratch.dlssgOptions();
+            streamlineScratch.clear(options);
             writeOffOptions(options, retainResources);
             int result = StreamlineRuntime.library().setDlssgOptions(VIEWPORT, options);
             warnResult(result, "slDLSSGSetOptions(Off)");
@@ -867,8 +940,9 @@ public final class RtDlssFg {
             optionsEnabled = false;
             return;
         }
-        try (Arena arena = Arena.ofConfined()) {
-            MemorySegment options = StreamlineAbi.allocate(arena, StreamlineAbi.DLSSG_OPTIONS_SIZE);
+        try {
+            MemorySegment options = streamlineScratch.dlssgOptions();
+            streamlineScratch.clear(options);
             if (frameInputsSubmitted) {
                 writeOptions(options, swapchainWidth, swapchainHeight, swapchainFormat,
                         lastRenderWidth, lastRenderHeight, lastHudlessFormat, lastUiAlphaValid);
@@ -910,8 +984,9 @@ public final class RtDlssFg {
         if (!StreamlineRuntime.initialized() || !pluginForSwapchain || !dlssgSupported) {
             return;
         }
-        try (Arena arena = Arena.ofConfined()) {
-            MemorySegment state = StreamlineAbi.allocate(arena, StreamlineAbi.DLSSG_STATE_SIZE);
+        {
+            MemorySegment state = streamlineScratch.dlssgState();
+            streamlineScratch.clear(state);
             int result = StreamlineRuntime.library().getDlssgState(VIEWPORT, state);
             if (result != RESULT_OK) {
                 dlssgFailed = true;
@@ -967,6 +1042,10 @@ public final class RtDlssFg {
             if (frameInputsSubmitted && optionsEnabled && useNoClientQueues()
                     && inputSlots.hasActive()) {
                 inputSlots.retireActive(inputsProcessingFence, inputsProcessingFenceValue);
+                if (currentPoolSlot != DlssgInputPool.NO_SLOT) {
+                    inputPool.markPending(currentPoolSlot, frameToken, inputsProcessingFence,
+                            inputsProcessingFenceValue);
+                }
             }
             if (runtimeStatus != 0) {
                 unavailableReason = statusDescription(runtimeStatus);
@@ -981,8 +1060,9 @@ public final class RtDlssFg {
     }
 
     private void logNativeTrace() {
-        try (Arena arena = Arena.ofConfined()) {
-            MemorySegment trace = StreamlineAbi.allocate(arena, StreamlineAbi.TRACE_STATE_SIZE);
+        try {
+            MemorySegment trace = streamlineScratch.traceState();
+            streamlineScratch.clear(trace);
             if (StreamlineRuntime.library().getTraceState(trace) != RESULT_OK) {
                 CausticaMod.LOGGER.warn("Could not query native DLSS-G frame trace: {}", StreamlineRuntime.lastError());
                 return;
@@ -1030,19 +1110,15 @@ public final class RtDlssFg {
         return result;
     }
 
-    private boolean enterBlockingQueueFallback(String reason) {
+    private boolean enterRecoverableInputStarvation(String reason) {
         // A missing/failed completion fence means the no-client-queues ownership contract cannot be
         // proven. Waiting for device-idle here deadlocks when Caustica's GPU worker is itself waiting
         // for graphics progress from this render thread. Fail FG closed and leave the tagged input
         // slots untouched; normal rendering can continue without reusing potentially live resources.
-        dlssgFailed = true;
         optionsEnabled = false;
-        queueFallback = true;
-        queueFallbackReason = reason;
         forceResetNextSubmission = true;
-        unavailableReason = "Disabled DLSS-G because asynchronous input retirement was unavailable: " + reason;
-        submissionStatus = unavailableReason;
-        CausticaMod.LOGGER.error(unavailableReason);
+        unavailableReason = reason;
+        submissionStatus = reason;
         return false;
     }
 
@@ -1056,9 +1132,7 @@ public final class RtDlssFg {
         }
         // Parallel mode gives Streamline ownership of tagged inputs beyond vkQueuePresentKHR. Before
         // changing that contract, retire every prior input without a device-wide idle on the render thread.
-        if (activeQueuePolicy == QueuePolicy.PARALLEL && !retireInputsForLiveTransition()) {
-            return false;
-        }
+        if (activeQueuePolicy == QueuePolicy.PARALLEL && !retireInputsForLiveTransition()) return false;
         activeQueuePolicy = requested;
         clearAllInputSlots();
         queuePolicyTransitionFrame = true;
@@ -1073,18 +1147,10 @@ public final class RtDlssFg {
                 continue;
             }
             if (!inputSlots.valid(slot)) {
-                return enterBlockingQueueFallback(
+                return enterRecoverableInputStarvation(
                         "Streamline returned no completion fence/value during queue-policy transition");
             }
-            int result;
-            try (RtFrameStats.Scope ignored = RtFrameStats.FRAME.stage("frame.dlssgInputWait")) {
-                result = waitForInputSlot(slot);
-            }
-            if (result != RESULT_OK) {
-                timelineWaitFailures++;
-                return enterBlockingQueueFallback("Timeline wait failed during queue-policy transition: "
-                        + StreamlineRuntime.lastError());
-            }
+            return enterRecoverableInputStarvation("Queue-policy transition deferred until input completion retires");
         }
         return true;
     }
@@ -1145,8 +1211,9 @@ public final class RtDlssFg {
         if (!isAvailable() || swapchainWidth <= 0 || swapchainHeight <= 0) {
             return 0L;
         }
-        try (Arena arena = Arena.ofConfined()) {
-            MemorySegment options = StreamlineAbi.allocate(arena, StreamlineAbi.DLSSG_OPTIONS_SIZE);
+        {
+            MemorySegment options = streamlineScratch.dlssgEstimateOptions();
+            streamlineScratch.clear(options);
             int renderWidth = lastRenderWidth > 0 ? lastRenderWidth : swapchainWidth;
             int renderHeight = lastRenderHeight > 0 ? lastRenderHeight : swapchainHeight;
             int hudlessFormat = lastHudlessFormat != 0
@@ -1155,7 +1222,8 @@ public final class RtDlssFg {
             writeOptions(options, swapchainWidth, swapchainHeight, swapchainFormat,
                     renderWidth, renderHeight, hudlessFormat, lastUiAlphaValid);
             StreamlineAbi.bytes(options).putInt(8, 1 << 2);
-            MemorySegment state = StreamlineAbi.allocate(arena, StreamlineAbi.DLSSG_STATE_SIZE);
+            MemorySegment state = streamlineScratch.dlssgState();
+            streamlineScratch.clear(state);
             if (StreamlineRuntime.library().getDlssgState(VIEWPORT, state, options) == RESULT_OK) {
                 estimatedVramUsage = StreamlineAbi.bytes(state).getLong(0);
             }
@@ -1164,14 +1232,16 @@ public final class RtDlssFg {
     }
 
     private void queryFeatureMetadata() {
-        try (Arena arena = Arena.ofConfined()) {
-            MemorySegment version = StreamlineAbi.allocate(arena, 24);
+        {
+            MemorySegment version = streamlineScratch.featureVersion();
+            streamlineScratch.clear(version);
             if (StreamlineRuntime.library().getFeatureVersion(StreamlineRuntime.FEATURE_DLSS_G, version) == RESULT_OK) {
                 ByteBuffer bytes = StreamlineAbi.bytes(version);
                 featureVersion = bytes.getInt(0) + "." + bytes.getInt(4) + "." + bytes.getInt(8)
                         + " / NGX " + bytes.getInt(12) + "." + bytes.getInt(16) + "." + bytes.getInt(20);
             }
-            MemorySegment requirements = StreamlineAbi.allocate(arena, 24);
+            MemorySegment requirements = streamlineScratch.featureRequirements();
+            streamlineScratch.clear(requirements);
             if (StreamlineRuntime.library().getFeatureRequirements(
                     StreamlineRuntime.FEATURE_DLSS_G, requirements) == RESULT_OK) {
                 ByteBuffer bytes = StreamlineAbi.bytes(requirements);
@@ -1185,8 +1255,9 @@ public final class RtDlssFg {
         if (!StreamlineRuntime.initialized() || !reflexSupported) {
             return;
         }
-        try (Arena arena = Arena.ofConfined()) {
-            MemorySegment state = StreamlineAbi.allocate(arena, StreamlineAbi.REFLEX_STATE_SIZE);
+        {
+            MemorySegment state = streamlineScratch.reflexState();
+            streamlineScratch.clear(state);
             if (StreamlineRuntime.library().getReflexState(state) == RESULT_OK) {
                 ByteBuffer bytes = StreamlineAbi.bytes(state);
                 flashIndicatorDriverControlled = bytes.getInt(8) != 0;

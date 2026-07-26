@@ -39,6 +39,7 @@ public final class StreamlineLibrary {
     private final MethodHandle vkQueuePresent;
     private final MethodHandle vkDeviceWaitIdle;
     private final MethodHandle vkWaitTimeline;
+    private final MethodHandle getTimelineCounter;
     private final MethodHandle supportsFeature;
     private final MethodHandle getFeatureRequirements;
     private final MethodHandle getFeatureVersion;
@@ -82,6 +83,7 @@ public final class StreamlineLibrary {
         vkQueuePresent = handle(lookup, "slbridge_vk_queue_present", FunctionDescriptor.of(I32, I64, I64));
         vkDeviceWaitIdle = handle(lookup, "slbridge_vk_device_wait_idle", FunctionDescriptor.of(I32, I64));
         vkWaitTimeline = handle(lookup, "slbridge_vk_wait_timeline", FunctionDescriptor.of(I32, I64, I64, I64, I64));
+        getTimelineCounter = handle(lookup, "slbridge_get_timeline_counter", FunctionDescriptor.of(I32, I64, I64, I64));
 
         supportsFeature = handle(lookup, "slbridge_supports_feature", FunctionDescriptor.of(I32, I32, I64));
         getFeatureRequirements = handle(lookup, "slbridge_get_feature_requirements", FunctionDescriptor.of(I32, I32, I64));
@@ -196,6 +198,10 @@ public final class StreamlineLibrary {
         return invokeInt(vkWaitTimeline, device, semaphore, value, timeoutNs);
     }
 
+    public int getTimelineCounter(long device, long semaphore, MemorySegment output) {
+        return invokeInt(getTimelineCounter, device, semaphore, output.address());
+    }
+
     public int supportsFeature(int feature, long physicalDevice) {
         return invokeInt(supportsFeature, feature, physicalDevice);
     }
@@ -296,12 +302,83 @@ public final class StreamlineLibrary {
                 .orElseThrow(() -> new IllegalStateException("streamlinebridge missing export " + name)), descriptor);
     }
 
-    private static int invokeInt(MethodHandle handle, Object... arguments) {
+    private static int invokeInt(MethodHandle handle) {
         try {
-            return (int) handle.invokeWithArguments(arguments);
+            return (int) handle.invokeExact();
         } catch (Throwable throwable) {
             throw new IllegalStateException("Streamline bridge call failed", throwable);
         }
+    }
+
+    private static int invokeInt(MethodHandle handle, long a) {
+        try { return (int) handle.invokeExact(a); }
+        catch (Throwable throwable) { throw new IllegalStateException("Streamline bridge call failed", throwable); }
+    }
+
+    private static int invokeInt(MethodHandle handle, long a, long b) {
+        try { return (int) handle.invokeExact(a, b); }
+        catch (Throwable throwable) { throw new IllegalStateException("Streamline bridge call failed", throwable); }
+    }
+
+    private static int invokeInt(MethodHandle handle, long a, long b, long c) {
+        try { return (int) handle.invokeExact(a, b, c); }
+        catch (Throwable throwable) { throw new IllegalStateException("Streamline bridge call failed", throwable); }
+    }
+
+    private static int invokeInt(MethodHandle handle, long a, long b, long c, long d) {
+        try { return (int) handle.invokeExact(a, b, c, d); }
+        catch (Throwable throwable) { throw new IllegalStateException("Streamline bridge call failed", throwable); }
+    }
+
+    private static int invokeInt(MethodHandle handle, long a, long b, long c, long d, long e) {
+        try { return (int) handle.invokeExact(a, b, c, d, e); }
+        catch (Throwable throwable) { throw new IllegalStateException("Streamline bridge call failed", throwable); }
+    }
+
+    private static int invokeInt(MethodHandle handle, long a, long b, long c, long d, long e, long f) {
+        try { return (int) handle.invokeExact(a, b, c, d, e, f); }
+        catch (Throwable throwable) { throw new IllegalStateException("Streamline bridge call failed", throwable); }
+    }
+
+    private static int invokeInt(MethodHandle handle, int a, long b) {
+        try { return (int) handle.invokeExact(a, b); }
+        catch (Throwable throwable) { throw new IllegalStateException("Streamline bridge call failed", throwable); }
+    }
+
+    private static int invokeInt(MethodHandle handle, int a, int b) {
+        try { return (int) handle.invokeExact(a, b); }
+        catch (Throwable throwable) { throw new IllegalStateException("Streamline bridge call failed", throwable); }
+    }
+
+    private static int invokeInt(MethodHandle handle, int a, long b, long c) {
+        try { return (int) handle.invokeExact(a, b, c); }
+        catch (Throwable throwable) { throw new IllegalStateException("Streamline bridge call failed", throwable); }
+    }
+
+    private static int invokeInt(MethodHandle handle, int a, long b, long c, long d) {
+        try { return (int) handle.invokeExact(a, b, c, d); }
+        catch (Throwable throwable) { throw new IllegalStateException("Streamline bridge call failed", throwable); }
+    }
+
+    private static int invokeInt(MethodHandle handle, long a, int b, long c, int d, long e) {
+        try { return (int) handle.invokeExact(a, b, c, d, e); }
+        catch (Throwable throwable) { throw new IllegalStateException("Streamline bridge call failed", throwable); }
+    }
+
+    private static int invokeInt(MethodHandle handle, long a, int b, long c, int d, long e, long f) {
+        try { return (int) handle.invokeExact(a, b, c, d, e, f); }
+        catch (Throwable throwable) { throw new IllegalStateException("Streamline bridge call failed", throwable); }
+    }
+
+    private static int invokeInt(MethodHandle handle, int a, int b, int c,
+            long d, long e, long f, long g, long h, long i, long j) {
+        try { return (int) handle.invokeExact(a, b, c, d, e, f, g, h, i, j); }
+        catch (Throwable throwable) { throw new IllegalStateException("Streamline bridge call failed", throwable); }
+    }
+
+    private static int invokeInt(MethodHandle handle, MemorySegment a, MemorySegment b, int c, int d) {
+        try { return (int) handle.invokeExact(a, b, c, d); }
+        catch (Throwable throwable) { throw new IllegalStateException("Streamline bridge call failed", throwable); }
     }
 
     private static long invokeAddress(MethodHandle handle) {
@@ -312,9 +389,9 @@ public final class StreamlineLibrary {
         }
     }
 
-    private static void invokeVoid(MethodHandle handle, Object... arguments) {
+    private static void invokeVoid(MethodHandle handle, long a, long b, long c) {
         try {
-            handle.invokeWithArguments(arguments);
+            handle.invokeExact(a, b, c);
         } catch (Throwable throwable) {
             throw new IllegalStateException("Streamline bridge call failed", throwable);
         }

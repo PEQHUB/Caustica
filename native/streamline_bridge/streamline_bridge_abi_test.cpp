@@ -103,7 +103,7 @@ int main() {
     assert(SLBRIDGE_BUFFER_UI_COLOR_AND_ALPHA == 23);
     assert(SLBRIDGE_BUFFER_BACKBUFFER == 53);
     assert(SLBRIDGE_BUFFER_UI_ALPHA == 69);
-    assert(SLBRIDGE_ABI_VERSION == 11);
+    assert(SLBRIDGE_ABI_VERSION == 13);
     assert(slbridge::detail::isSupportedDlssdResourceCount(10));
     assert(slbridge::detail::isSupportedDlssdResourceCount(11));
     assert(slbridge::detail::isSupportedDlssdResourceCount(12));

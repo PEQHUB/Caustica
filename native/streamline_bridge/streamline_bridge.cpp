@@ -31,6 +31,8 @@
 
 namespace {
 
+constexpr uint32_t kMaxFrameTags = 8;
+
 static_assert(SL_VERSION_MAJOR == 2 && SL_VERSION_MINOR == 12 && SL_VERSION_PATCH == 0,
         "The native bridge must be compiled against Streamline SDK 2.12.0");
 static_assert(sl::kSDKVersionMagic == 0xfedc, "Unexpected Streamline SDK version magic");
@@ -74,6 +76,12 @@ using FnSlGetNewFrameToken = PFun_slGetNewFrameToken*;
 using FnSlGetFeatureFunction = PFun_slGetFeatureFunction*;
 using FnSlEvaluateFeature = PFun_slEvaluateFeature*;
 using FnSlFreeResources = PFun_slFreeResources*;
+using FnSlDlssgSetOptions = PFun_slDLSSGSetOptions*;
+using FnSlDlssgGetState = PFun_slDLSSGGetState*;
+using FnSlReflexSetOptions = PFun_slReflexSetOptions*;
+using FnSlReflexSleep = PFun_slReflexSleep*;
+using FnSlReflexGetState = PFun_slReflexGetState*;
+using FnSlPclSetMarker = PFun_slPCLSetMarker*;
 
 using FnVkCreateInstance = PFN_vkCreateInstance;
 using FnVkCreateDevice = PFN_vkCreateDevice;
@@ -85,6 +93,7 @@ using FnVkGetSwapchainImagesKHR = PFN_vkGetSwapchainImagesKHR;
 using FnVkAcquireNextImageKHR = PFN_vkAcquireNextImageKHR;
 using FnVkQueuePresentKHR = PFN_vkQueuePresentKHR;
 using FnVkDeviceWaitIdle = PFN_vkDeviceWaitIdle;
+using FnVkGetSemaphoreCounterValue = PFN_vkGetSemaphoreCounterValue;
 using FnVkGetInstanceProcAddr = PFN_vkGetInstanceProcAddr;
 using FnVkGetDeviceProcAddr = PFN_vkGetDeviceProcAddr;
 
@@ -105,6 +114,7 @@ FnSlFreeResources g_slFreeResources{};
 
 FnVkGetInstanceProcAddr g_vkGetInstanceProcAddr{};
 FnVkGetDeviceProcAddr g_vkGetDeviceProcAddr{};
+FnVkGetSemaphoreCounterValue g_vkGetSemaphoreCounterValue{};
 
 VkInstance g_instance{};
 VkPhysicalDevice g_physicalDevice{};
@@ -119,8 +129,23 @@ std::atomic<int32_t> g_lastResult{0};
 std::mutex g_errorMutex;
 std::string g_lastError;
 std::atomic<int32_t> g_asyncApiError{VK_SUCCESS};
-std::mutex g_traceMutex;
+struct StreamlineFeatureFunctions {
+    FnSlDlssgSetOptions dlssgSetOptions{};
+    FnSlDlssgGetState dlssgGetState{};
+    FnSlReflexSetOptions reflexSetOptions{};
+    FnSlReflexSleep reflexSleep{};
+    FnSlReflexGetState reflexGetState{};
+    FnSlPclSetMarker pclSetMarker{};
+};
+StreamlineFeatureFunctions g_featureFunctions{};
+std::atomic<bool> g_featureFunctionsReady{false};
+std::atomic<uint64_t> g_traceSequence{0};
 slbridge_trace_state g_trace{};
+
+struct TraceWriteGuard final {
+    TraceWriteGuard() { g_traceSequence.fetch_add(1, std::memory_order_acq_rel); }
+    ~TraceWriteGuard() { g_traceSequence.fetch_add(1, std::memory_order_release); }
+};
 
 void setError(std::string message, int32_t result = -1) {
     std::lock_guard lock(g_errorMutex);
@@ -131,6 +156,37 @@ void setError(std::string message, int32_t result = -1) {
 template <typename T>
 T loadExport(const char* name) {
     return reinterpret_cast<T>(GetProcAddress(g_interposer, name));
+}
+
+template <typename T>
+T resolveFeatureFunction(sl::Feature feature, const char* name) {
+    T function{};
+    if (g_slGetFeatureFunction) {
+        g_slGetFeatureFunction(feature, name, reinterpret_cast<void*&>(function));
+    }
+    return function;
+}
+
+void cacheFeatureFunctions(sl::Feature feature) noexcept {
+    StreamlineFeatureFunctions candidate = g_featureFunctions;
+    if (feature == sl::kFeatureDLSS_G) {
+        candidate.dlssgSetOptions = resolveFeatureFunction<FnSlDlssgSetOptions>(
+                sl::kFeatureDLSS_G, "slDLSSGSetOptions");
+        candidate.dlssgGetState = resolveFeatureFunction<FnSlDlssgGetState>(
+                sl::kFeatureDLSS_G, "slDLSSGGetState");
+    } else if (feature == sl::kFeatureReflex) {
+        candidate.reflexSetOptions = resolveFeatureFunction<FnSlReflexSetOptions>(
+                sl::kFeatureReflex, "slReflexSetOptions");
+        candidate.reflexSleep = resolveFeatureFunction<FnSlReflexSleep>(
+                sl::kFeatureReflex, "slReflexSleep");
+        candidate.reflexGetState = resolveFeatureFunction<FnSlReflexGetState>(
+                sl::kFeatureReflex, "slReflexGetState");
+    } else if (feature == sl::kFeaturePCL) {
+        candidate.pclSetMarker = resolveFeatureFunction<FnSlPclSetMarker>(
+                sl::kFeaturePCL, "slPCLSetMarker");
+    }
+    g_featureFunctions = candidate;
+    g_featureFunctionsReady.store(true, std::memory_order_release);
 }
 
 int32_t resultCode(sl::Result result, const char* operation) {
@@ -433,6 +489,8 @@ SLBRIDGE_EXPORT int32_t slbridge_initialize(const wchar_t* plugin_directory,
     g_initialized = true;
     g_dlssgLoaded = true;
     g_dlssgSupportCached = false;
+    g_featureFunctionsReady.store(false, std::memory_order_release);
+    g_featureFunctions = {};
     g_asyncApiError.store(VK_SUCCESS, std::memory_order_release);
     return 0;
 }
@@ -497,9 +555,14 @@ SLBRIDGE_EXPORT int32_t slbridge_get_trace_state(slbridge_trace_state* out_state
     if (!out_state) {
         return -1;
     }
-    std::lock_guard lock(g_traceMutex);
-    *out_state = g_trace;
-    return 0;
+    for (int attempt = 0; attempt < 4; attempt++) {
+        const uint64_t before = g_traceSequence.load(std::memory_order_acquire);
+        if (before & 1u) continue;
+        *out_state = g_trace;
+        const uint64_t after = g_traceSequence.load(std::memory_order_acquire);
+        if (before == after) return 0;
+    }
+    return -2;
 }
 
 SLBRIDGE_EXPORT int32_t slbridge_vk_create_instance(uint64_t create_info, uint64_t allocator,
@@ -596,7 +659,7 @@ SLBRIDGE_EXPORT int32_t slbridge_vk_create_swapchain(uint64_t device, uint64_t c
             "vkCreateSwapchainKHR");
     if (!function || !swapchain_out) {
         {
-            std::lock_guard lock(g_traceMutex);
+            TraceWriteGuard traceGuard;
             g_trace.last_swapchain_handle = 0;
             g_trace.last_swapchain_present_mode = info ? static_cast<uint32_t>(info->presentMode) : 0;
             g_trace.last_swapchain_min_image_count = info ? info->minImageCount : 0;
@@ -612,7 +675,7 @@ SLBRIDGE_EXPORT int32_t slbridge_vk_create_swapchain(uint64_t device, uint64_t c
             info, reinterpret_cast<const VkAllocationCallbacks*>(allocator),
             reinterpret_cast<VkSwapchainKHR*>(swapchain_out));
     {
-        std::lock_guard lock(g_traceMutex);
+        TraceWriteGuard traceGuard;
         g_trace.last_swapchain_handle = result == VK_SUCCESS
                 ? reinterpret_cast<uint64_t>(*reinterpret_cast<VkSwapchainKHR*>(swapchain_out)) : 0;
         g_trace.last_swapchain_present_mode = info ? static_cast<uint32_t>(info->presentMode) : 0;
@@ -649,7 +712,7 @@ SLBRIDGE_EXPORT int32_t slbridge_vk_get_swapchain_images(uint64_t device, uint64
             reinterpret_cast<VkSwapchainKHR>(swapchain), imageCount,
             reinterpret_cast<VkImage*>(images));
     if (result == VK_SUCCESS && imageCount) {
-        std::lock_guard lock(g_traceMutex);
+        TraceWriteGuard traceGuard;
         g_trace.last_swapchain_image_count = *imageCount;
     }
     return vkResult(result, "vkGetSwapchainImagesKHR");
@@ -664,7 +727,7 @@ SLBRIDGE_EXPORT int32_t slbridge_vk_acquire_next_image(uint64_t device, uint64_t
         return -1;
     }
     {
-        std::lock_guard lock(g_traceMutex);
+        TraceWriteGuard traceGuard;
         g_trace.acquire_calls++;
     }
     return vkResult(function(reinterpret_cast<VkDevice>(device), reinterpret_cast<VkSwapchainKHR>(swapchain),
@@ -680,7 +743,7 @@ SLBRIDGE_EXPORT int32_t slbridge_vk_queue_present(uint64_t queue, uint64_t prese
     }
     const auto* info = reinterpret_cast<const VkPresentInfoKHR*>(present_info);
     {
-        std::lock_guard lock(g_traceMutex);
+        TraceWriteGuard traceGuard;
         g_trace.present_calls++;
         g_trace.proxy_present_sequence = ++g_trace.event_sequence;
         g_trace.last_present_queue = queue;
@@ -702,7 +765,7 @@ SLBRIDGE_EXPORT int32_t slbridge_vk_device_wait_idle(uint64_t device) {
         return -1;
     }
     {
-        std::lock_guard lock(g_traceMutex);
+        TraceWriteGuard traceGuard;
         g_trace.device_wait_idle_calls++;
     }
     return vkResult(function(reinterpret_cast<VkDevice>(device)), "vkDeviceWaitIdle");
@@ -723,13 +786,37 @@ SLBRIDGE_EXPORT int32_t slbridge_vk_wait_timeline(uint64_t device, uint64_t sema
     const int32_t result = vkResult(function(reinterpret_cast<VkDevice>(device), &waitInfo, timeout_ns),
             "vkWaitSemaphores");
     {
-        std::lock_guard lock(g_traceMutex);
+        TraceWriteGuard traceGuard;
         g_trace.timeline_wait_calls++;
         g_trace.timeline_wait_failures += result == 0 ? 0 : 1;
         g_trace.last_timeline_semaphore = semaphore;
         g_trace.last_timeline_value = value;
     }
     return result;
+}
+
+SLBRIDGE_EXPORT int32_t slbridge_get_timeline_counter(uint64_t device, uint64_t semaphore,
+        uint64_t* out_value) {
+    if (!device || !semaphore || !out_value) {
+        setError("Streamline timeline counter query received an invalid argument");
+        return -1;
+    }
+    if (!g_vkGetSemaphoreCounterValue) {
+        g_vkGetSemaphoreCounterValue = deviceProc<FnVkGetSemaphoreCounterValue>(
+                reinterpret_cast<VkDevice>(device), "vkGetSemaphoreCounterValue");
+    }
+    if (!g_vkGetSemaphoreCounterValue) {
+        setError("Vulkan timeline counter entry point is unavailable");
+        return -1;
+    }
+    uint64_t value = 0;
+    const VkResult result = g_vkGetSemaphoreCounterValue(
+            reinterpret_cast<VkDevice>(device), reinterpret_cast<VkSemaphore>(semaphore), &value);
+    if (result != VK_SUCCESS) {
+        return vkResult(result, "vkGetSemaphoreCounterValue");
+    }
+    *out_value = value;
+    return VK_SUCCESS;
 }
 
 SLBRIDGE_EXPORT int32_t slbridge_supports_feature(uint32_t feature, uint64_t physical_device) {
@@ -793,6 +880,9 @@ SLBRIDGE_EXPORT int32_t slbridge_set_feature_loaded(uint32_t feature, uint32_t l
     if (result == static_cast<int32_t>(sl::Result::eOk) && feature == sl::kFeatureDLSS_G) {
         g_dlssgLoaded = loaded != 0;
     }
+    if (result == static_cast<int32_t>(sl::Result::eOk) && loaded != 0) {
+        cacheFeatureFunctions(static_cast<sl::Feature>(feature));
+    }
     return result;
 }
 
@@ -813,7 +903,7 @@ SLBRIDGE_EXPORT int32_t slbridge_begin_frame(uint32_t frame_index, uint64_t* out
     const int32_t result = resultCode(g_slGetNewFrameToken(token, requestedIndex), "slGetNewFrameToken");
     if (result == static_cast<int32_t>(sl::Result::eOk)) {
         *out_frame_token = reinterpret_cast<uint64_t>(token);
-        std::lock_guard lock(g_traceMutex);
+        TraceWriteGuard traceGuard;
         g_trace.begin_frame_calls++;
         g_trace.begin_sequence = ++g_trace.event_sequence;
         g_trace.last_frame_index = frame_index;
@@ -835,7 +925,7 @@ SLBRIDGE_EXPORT int32_t slbridge_set_constants(uint64_t frame_token, uint32_t vi
     }
     sl::Constants values = makeConstants(*constants);
     {
-        std::lock_guard lock(g_traceMutex);
+        TraceWriteGuard traceGuard;
         g_trace.set_constants_calls++;
         g_trace.constants_sequence = ++g_trace.event_sequence;
         g_trace.last_frame_token = frame_token;
@@ -845,7 +935,7 @@ SLBRIDGE_EXPORT int32_t slbridge_set_constants(uint64_t frame_token, uint32_t vi
 
 SLBRIDGE_EXPORT int32_t slbridge_tag_resources(uint64_t frame_token, uint32_t viewport,
         const slbridge_resource_desc* resources, uint32_t resource_count, uint64_t command_buffer) {
-    if (!resources || !g_slSetTagForFrame) {
+    if (!resources || !g_slSetTagForFrame || resource_count > kMaxFrameTags) {
         setError("Streamline resource tags were null");
         return -1;
     }
@@ -855,12 +945,18 @@ SLBRIDGE_EXPORT int32_t slbridge_tag_resources(uint64_t frame_token, uint32_t vi
         return -1;
     }
 
-    std::vector<sl::Resource> nativeResources;
-    std::vector<sl::Extent> extents;
-    std::vector<sl::ResourceTag> tags;
-    nativeResources.reserve(resource_count);
-    extents.reserve(resource_count);
-    tags.reserve(resource_count);
+    std::array<sl::Resource, kMaxFrameTags> nativeResources{};
+    std::array<sl::Extent, kMaxFrameTags> extents{};
+    std::array<sl::ResourceTag, kMaxFrameTags> tags = {
+        sl::ResourceTag(nullptr, sl::kBufferTypeBackbuffer, sl::ResourceLifecycle::eOnlyValidNow),
+        sl::ResourceTag(nullptr, sl::kBufferTypeBackbuffer, sl::ResourceLifecycle::eOnlyValidNow),
+        sl::ResourceTag(nullptr, sl::kBufferTypeBackbuffer, sl::ResourceLifecycle::eOnlyValidNow),
+        sl::ResourceTag(nullptr, sl::kBufferTypeBackbuffer, sl::ResourceLifecycle::eOnlyValidNow),
+        sl::ResourceTag(nullptr, sl::kBufferTypeBackbuffer, sl::ResourceLifecycle::eOnlyValidNow),
+        sl::ResourceTag(nullptr, sl::kBufferTypeBackbuffer, sl::ResourceLifecycle::eOnlyValidNow),
+        sl::ResourceTag(nullptr, sl::kBufferTypeBackbuffer, sl::ResourceLifecycle::eOnlyValidNow),
+        sl::ResourceTag(nullptr, sl::kBufferTypeBackbuffer, sl::ResourceLifecycle::eOnlyValidNow),
+    };
     uint32_t validMask = 0;
     uint32_t memoryMask = 0;
     uint32_t backbufferExtentWidth = 0;
@@ -877,8 +973,8 @@ SLBRIDGE_EXPORT int32_t slbridge_tag_resources(uint64_t frame_token, uint32_t vi
         const uint32_t extentHeight = descriptor.extent_height != 0
                 ? descriptor.extent_height : descriptor.height;
         if (extentWidth != 0 && extentHeight != 0) {
-            extents.push_back(sl::Extent{0u, 0u, extentWidth, extentHeight});
-            extent = &extents.back();
+            extents[i] = sl::Extent{0u, 0u, extentWidth, extentHeight};
+            extent = &extents[i];
             if (descriptor.buffer_type == SLBRIDGE_BUFFER_BACKBUFFER) {
                 backbufferExtentWidth = extentWidth;
                 backbufferExtentHeight = extentHeight;
@@ -888,8 +984,7 @@ SLBRIDGE_EXPORT int32_t slbridge_tag_resources(uint64_t frame_token, uint32_t vi
             if (i < 32) {
                 validMask |= 1u << i;
             }
-            nativeResources.emplace_back();
-            native = &nativeResources.back();
+            native = &nativeResources[i];
             native->type = sl::ResourceType::eTex2d;
             native->native = reinterpret_cast<void*>(static_cast<uintptr_t>(descriptor.image));
             native->view = reinterpret_cast<void*>(static_cast<uintptr_t>(descriptor.view));
@@ -907,12 +1002,12 @@ SLBRIDGE_EXPORT int32_t slbridge_tag_resources(uint64_t frame_token, uint32_t vi
             }
 
         }
-        tags.emplace_back(native, static_cast<sl::BufferType>(descriptor.buffer_type),
+        tags[i] = sl::ResourceTag(native, static_cast<sl::BufferType>(descriptor.buffer_type),
                 static_cast<sl::ResourceLifecycle>(descriptor.lifecycle), extent);
     }
     auto* command = reinterpret_cast<sl::CommandBuffer*>(static_cast<uintptr_t>(command_buffer));
     {
-        std::lock_guard lock(g_traceMutex);
+        TraceWriteGuard traceGuard;
         g_trace.tag_resources_calls++;
         g_trace.tags_sequence = ++g_trace.event_sequence;
         g_trace.last_frame_token = frame_token;
@@ -959,7 +1054,7 @@ SLBRIDGE_EXPORT int32_t slbridge_set_dlssg_options(uint32_t viewport,
     values.onErrorCallback = &apiError;
 
     {
-        std::lock_guard lock(g_traceMutex);
+        TraceWriteGuard traceGuard;
         g_trace.set_options_calls++;
         g_trace.options_sequence = ++g_trace.event_sequence;
         g_trace.last_options_mode = options->mode;
@@ -972,11 +1067,11 @@ SLBRIDGE_EXPORT int32_t slbridge_set_dlssg_options(uint32_t viewport,
     }
 
     using FnSetOptions = PFun_slDLSSGSetOptions*;
-    FnSetOptions function{};
-    const auto lookup = g_slGetFeatureFunction(sl::kFeatureDLSS_G, "slDLSSGSetOptions", reinterpret_cast<void*&>(function));
-    if (lookup != sl::Result::eOk) {
-        return resultCode(lookup, "slGetFeatureFunction(slDLSSGSetOptions)");
-    }
+    FnSetOptions function = g_featureFunctionsReady.load(std::memory_order_acquire)
+            ? g_featureFunctions.dlssgSetOptions : nullptr;
+    const auto lookup = function ? sl::Result::eOk
+            : g_slGetFeatureFunction(sl::kFeatureDLSS_G, "slDLSSGSetOptions", reinterpret_cast<void*&>(function));
+    if (lookup != sl::Result::eOk) return resultCode(lookup, "slGetFeatureFunction(slDLSSGSetOptions)");
     if (!function) {
         setError("slGetFeatureFunction returned a null slDLSSGSetOptions function");
         return -1;
@@ -991,11 +1086,11 @@ SLBRIDGE_EXPORT int32_t slbridge_get_dlssg_state(uint32_t viewport,
         return -1;
     }
     using FnGetState = PFun_slDLSSGGetState*;
-    FnGetState function{};
-    const auto lookup = g_slGetFeatureFunction(sl::kFeatureDLSS_G, "slDLSSGGetState", reinterpret_cast<void*&>(function));
-    if (lookup != sl::Result::eOk) {
-        return resultCode(lookup, "slGetFeatureFunction(slDLSSGGetState)");
-    }
+    FnGetState function = g_featureFunctionsReady.load(std::memory_order_acquire)
+            ? g_featureFunctions.dlssgGetState : nullptr;
+    const auto lookup = function ? sl::Result::eOk
+            : g_slGetFeatureFunction(sl::kFeatureDLSS_G, "slDLSSGGetState", reinterpret_cast<void*&>(function));
+    if (lookup != sl::Result::eOk) return resultCode(lookup, "slGetFeatureFunction(slDLSSGGetState)");
     if (!function) {
         setError("slGetFeatureFunction returned a null slDLSSGGetState function");
         return -1;
@@ -1037,7 +1132,7 @@ SLBRIDGE_EXPORT int32_t slbridge_get_dlssg_state(uint32_t viewport,
         out_state->dynamic_mfg_supported = state.bIsDynamicMFGSupported == sl::Boolean::eTrue;
         out_state->inputs_processing_completion_fence = reinterpret_cast<uint64_t>(state.inputsProcessingCompletionFence);
         out_state->last_inputs_processing_completion_fence_value = state.lastPresentInputsProcessingCompletionFenceValue;
-        std::lock_guard lock(g_traceMutex);
+        TraceWriteGuard traceGuard;
         g_trace.get_state_calls++;
         g_trace.last_dlssg_status = out_state->status;
         g_trace.last_frames_presented = out_state->num_frames_actually_presented;
@@ -1081,7 +1176,7 @@ SLBRIDGE_EXPORT int32_t slbridge_get_dlssd_optimal_settings(uint32_t mode,
         *out_render_height_max = settings.renderHeightMax;
     }
     {
-        std::lock_guard lock(g_traceMutex);
+        TraceWriteGuard traceGuard;
         g_trace.dlssd_optimal_calls++;
         g_trace.last_dlssd_mode = mode;
         g_trace.last_dlssd_result = static_cast<uint32_t>(result);
@@ -1113,7 +1208,7 @@ SLBRIDGE_EXPORT int32_t slbridge_set_dlssd_options(uint32_t viewport,
     const int32_t result = resultCode(function(sl::ViewportHandle(viewport), nativeOptions),
             "slDLSSDSetOptions");
     {
-        std::lock_guard lock(g_traceMutex);
+        TraceWriteGuard traceGuard;
         g_trace.dlssd_options_calls++;
         g_trace.last_dlssd_mode = options->mode;
         g_trace.last_dlssd_viewport = viewport;
@@ -1218,7 +1313,7 @@ SLBRIDGE_EXPORT int32_t slbridge_evaluate_dlssd(uint64_t frame_token, uint32_t v
     const int32_t constantsResult = resultCode(g_slSetConstants(localConstants, *token, viewportHandle),
             "slSetConstants(DLSS-RR)");
     if (constantsResult != static_cast<int32_t>(sl::Result::eOk)) {
-        std::lock_guard lock(g_traceMutex);
+        TraceWriteGuard traceGuard;
         g_trace.dlssd_evaluate_calls++;
         g_trace.last_dlssd_frame_token = frame_token;
         g_trace.last_dlssd_command_buffer = command_buffer;
@@ -1237,7 +1332,7 @@ SLBRIDGE_EXPORT int32_t slbridge_evaluate_dlssd(uint64_t frame_token, uint32_t v
     const int32_t result = resultCode(g_slEvaluateFeature(sl::kFeatureDLSS_RR, *token,
             inputs.data(), static_cast<uint32_t>(inputs.size()), command), "slEvaluateFeature(DLSS-RR)");
     {
-        std::lock_guard lock(g_traceMutex);
+        TraceWriteGuard traceGuard;
         g_trace.dlssd_evaluate_calls++;
         g_trace.last_dlssd_frame_token = frame_token;
         g_trace.last_dlssd_command_buffer = command_buffer;
@@ -1256,7 +1351,7 @@ SLBRIDGE_EXPORT int32_t slbridge_free_dlssd_resources(uint32_t viewport) {
     const int32_t result = resultCode(g_slFreeResources(sl::kFeatureDLSS_RR,
             sl::ViewportHandle(viewport)), "slFreeResources(DLSS-RR)");
     {
-        std::lock_guard lock(g_traceMutex);
+        TraceWriteGuard traceGuard;
         g_trace.dlssd_free_calls++;
         g_trace.last_dlssd_result = static_cast<uint32_t>(result);
         g_trace.last_dlssd_viewport = viewport;
@@ -1270,11 +1365,11 @@ SLBRIDGE_EXPORT int32_t slbridge_set_reflex_options(const slbridge_reflex_option
         return -1;
     }
     using FnSetOptions = PFun_slReflexSetOptions*;
-    FnSetOptions function{};
-    const auto lookup = g_slGetFeatureFunction(sl::kFeatureReflex, "slReflexSetOptions", reinterpret_cast<void*&>(function));
-    if (lookup != sl::Result::eOk) {
-        return resultCode(lookup, "slGetFeatureFunction(slReflexSetOptions)");
-    }
+    FnSetOptions function = g_featureFunctionsReady.load(std::memory_order_acquire)
+            ? g_featureFunctions.reflexSetOptions : nullptr;
+    const auto lookup = function ? sl::Result::eOk
+            : g_slGetFeatureFunction(sl::kFeatureReflex, "slReflexSetOptions", reinterpret_cast<void*&>(function));
+    if (lookup != sl::Result::eOk) return resultCode(lookup, "slGetFeatureFunction(slReflexSetOptions)");
     if (!function) {
         setError("slGetFeatureFunction returned a null slReflexSetOptions function");
         return -1;
@@ -1287,11 +1382,11 @@ SLBRIDGE_EXPORT int32_t slbridge_set_reflex_options(const slbridge_reflex_option
 
 SLBRIDGE_EXPORT int32_t slbridge_reflex_sleep(uint64_t frame_token) {
     using FnSleep = PFun_slReflexSleep*;
-    FnSleep function{};
-    const auto lookup = g_slGetFeatureFunction(sl::kFeatureReflex, "slReflexSleep", reinterpret_cast<void*&>(function));
-    if (lookup != sl::Result::eOk) {
-        return resultCode(lookup, "slGetFeatureFunction(slReflexSleep)");
-    }
+    FnSleep function = g_featureFunctionsReady.load(std::memory_order_acquire)
+            ? g_featureFunctions.reflexSleep : nullptr;
+    const auto lookup = function ? sl::Result::eOk
+            : g_slGetFeatureFunction(sl::kFeatureReflex, "slReflexSleep", reinterpret_cast<void*&>(function));
+    if (lookup != sl::Result::eOk) return resultCode(lookup, "slGetFeatureFunction(slReflexSleep)");
     if (!function || !tokenFromHandle(frame_token)) {
         setError("slReflexSleep function or frame token was null");
         return -1;
@@ -1301,17 +1396,17 @@ SLBRIDGE_EXPORT int32_t slbridge_reflex_sleep(uint64_t frame_token) {
 
 SLBRIDGE_EXPORT int32_t slbridge_pcl_set_marker(uint32_t marker, uint64_t frame_token) {
     using FnMarker = PFun_slPCLSetMarker*;
-    FnMarker function{};
-    const auto lookup = g_slGetFeatureFunction(sl::kFeaturePCL, "slPCLSetMarker", reinterpret_cast<void*&>(function));
-    if (lookup != sl::Result::eOk) {
-        return resultCode(lookup, "slGetFeatureFunction(slPCLSetMarker)");
-    }
+    FnMarker function = g_featureFunctionsReady.load(std::memory_order_acquire)
+            ? g_featureFunctions.pclSetMarker : nullptr;
+    const auto lookup = function ? sl::Result::eOk
+            : g_slGetFeatureFunction(sl::kFeaturePCL, "slPCLSetMarker", reinterpret_cast<void*&>(function));
+    if (lookup != sl::Result::eOk) return resultCode(lookup, "slGetFeatureFunction(slPCLSetMarker)");
     if (!function || !tokenFromHandle(frame_token)) {
         setError("slPCLSetMarker function or frame token was null");
         return -1;
     }
     {
-        std::lock_guard lock(g_traceMutex);
+        TraceWriteGuard traceGuard;
         g_trace.pcl_marker_calls++;
         const uint64_t sequence = ++g_trace.event_sequence;
         if (marker == SLBRIDGE_PCL_PRESENT_START) {
@@ -1331,11 +1426,11 @@ SLBRIDGE_EXPORT int32_t slbridge_get_reflex_state(slbridge_reflex_state* out_sta
         return -1;
     }
     using FnGetState = PFun_slReflexGetState*;
-    FnGetState function{};
-    const auto lookup = g_slGetFeatureFunction(sl::kFeatureReflex, "slReflexGetState", reinterpret_cast<void*&>(function));
-    if (lookup != sl::Result::eOk) {
-        return resultCode(lookup, "slGetFeatureFunction(slReflexGetState)");
-    }
+    FnGetState function = g_featureFunctionsReady.load(std::memory_order_acquire)
+            ? g_featureFunctions.reflexGetState : nullptr;
+    const auto lookup = function ? sl::Result::eOk
+            : g_slGetFeatureFunction(sl::kFeatureReflex, "slReflexGetState", reinterpret_cast<void*&>(function));
+    if (lookup != sl::Result::eOk) return resultCode(lookup, "slGetFeatureFunction(slReflexGetState)");
     if (!function) {
         setError("slGetFeatureFunction returned a null slReflexGetState function");
         return -1;

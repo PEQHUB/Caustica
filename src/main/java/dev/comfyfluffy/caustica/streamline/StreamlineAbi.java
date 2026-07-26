@@ -9,7 +9,7 @@ import org.joml.Matrix4fc;
 
 /** Versioned Caustica-owned C ABI shared with {@code streamlinebridge.dll}. */
 public final class StreamlineAbi {
-    public static final int VERSION = 11;
+    public static final int VERSION = 13;
     public static final int RESOURCE_DESC_SIZE = 80;
     public static final int CONSTANTS_SIZE = 444;
     public static final int DLSSD_OPTIONS_SIZE = 144;
@@ -33,6 +33,7 @@ public final class StreamlineAbi {
     public static final int TRACE_LAST_TIMELINE_VALUE_OFFSET = 368;
 
     private static final int ABI_INFO_SIZE = 36;
+    private static final MemorySegment API_ERROR_OUTPUT = Arena.global().allocate(ValueLayout.JAVA_INT);
 
     private StreamlineAbi() {
     }
@@ -75,10 +76,8 @@ public final class StreamlineAbi {
     }
 
     public static int pollApiError(StreamlineLibrary library) {
-        try (Arena arena = Arena.ofConfined()) {
-            MemorySegment output = arena.allocate(ValueLayout.JAVA_INT);
-            return library.pollApiError(output) == 0 ? 0 : output.get(ValueLayout.JAVA_INT, 0);
-        }
+        API_ERROR_OUTPUT.set(ValueLayout.JAVA_INT, 0, 0);
+        return library.pollApiError(API_ERROR_OUTPUT) == 0 ? 0 : API_ERROR_OUTPUT.get(ValueLayout.JAVA_INT, 0);
     }
 
     private static void require(String field, int actual, int expected) {
