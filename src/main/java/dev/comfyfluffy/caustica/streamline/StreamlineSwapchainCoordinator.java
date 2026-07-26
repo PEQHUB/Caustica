@@ -9,6 +9,7 @@ import dev.comfyfluffy.caustica.rt.pipeline.RtDlssFg;
 import net.minecraft.client.Minecraft;
 
 import java.util.Collection;
+import java.util.EnumSet;
 
 /** Coordinates DLSS-G plugin ownership with Minecraft's existing surface reconfiguration transaction. */
 public final class StreamlineSwapchainCoordinator {
@@ -21,9 +22,10 @@ public final class StreamlineSwapchainCoordinator {
     private boolean physicalFifo;
     private boolean vsyncRequested;
     private boolean mailboxSupported;
-    private boolean mailboxVsyncCompatibility;
+    private boolean mailboxPresentationSelected;
     private GpuSurface.PresentMode requestedPresentMode;
     private GpuSurface.PresentMode presentMode;
+    private Collection<GpuSurface.PresentMode> supportedPresentModes = EnumSet.noneOf(GpuSurface.PresentMode.class);
     private int width;
     private int height;
     private int format;
@@ -57,8 +59,8 @@ public final class StreamlineSwapchainCoordinator {
         if (!configured || configuring || reconfigureRequested) {
             return;
         }
-        boolean desiredPlugin = CausticaConfig.Rt.Fg.requested()
-                && (!isVsyncRequested() || mailboxSupported);
+        boolean desiredPlugin = requestedPresentMode != null
+                && presentationDecision(requestedPresentMode).frameGenerationAllowed();
         boolean desiredHdr = CausticaConfig.Rt.Hdr.enabled();
         if (desiredPlugin != pluginRequestedForSwapchain || desiredHdr != hdrRequestForSwapchain) {
             requestReconfigure();
@@ -75,31 +77,54 @@ public final class StreamlineSwapchainCoordinator {
         RtDlssFg.INSTANCE.suspendForSwapchainChange();
     }
 
-    /**
-     * Preserve Minecraft's VSync option while keeping Vulkan DLSS-G on a supported presentation path.
-     *
-     * <p>Streamline 2.12 cannot run Vulkan DLSS-G on a FIFO swapchain. Use MAILBOX when VSync is
-     * requested: MAILBOX remains tear-free because display replacement occurs at vblank and it owns
-     * presentation cadence without an application-side frame limiter.
-     * A surface without MAILBOX stays on the requested FIFO mode and DLSS-G fails closed.</p>
-     */
+    /** Resolve the explicit presentation policy without conflating MAILBOX with vendor VSync. */
     public GpuSurface.Configuration normalizeConfiguration(GpuSurface.Configuration configuration,
             Collection<GpuSurface.PresentMode> supportedPresentModes) {
         requestedPresentMode = configuration.presentMode();
         vsyncRequested = isVsyncConfiguration(configuration);
         mailboxSupported = supportedPresentModes.contains(GpuSurface.PresentMode.MAILBOX);
-        mailboxVsyncCompatibility = false;
-        if (!CausticaConfig.Rt.Fg.requested() || !vsyncRequested
-                || !mailboxSupported) {
-            presentMode = configuration.presentMode();
-            return configuration;
-        }
-        mailboxVsyncCompatibility = true;
-        presentMode = GpuSurface.PresentMode.MAILBOX;
+        this.supportedPresentModes = supportedPresentModes.isEmpty()
+                ? EnumSet.noneOf(GpuSurface.PresentMode.class) : EnumSet.copyOf(supportedPresentModes);
+        mailboxPresentationSelected = false;
+        VulkanFgPresentationPolicy.Decision decision = presentationDecision(configuration.presentMode());
+        presentMode = toGpuMode(decision.resolved());
+        mailboxPresentationSelected = decision.mailboxPresentationSelected();
+        if (presentMode == configuration.presentMode()) return configuration;
         CausticaMod.LOGGER.debug(
-                "DLSS-G VSync compatibility: requested {} -> MAILBOX (no application frame limiter)",
-                configuration.presentMode());
+                "Frame Generation presentation policy {}: requested {} -> {} ({})",
+                CausticaConfig.Rt.Fg.PRESENTATION_POLICY.get(), configuration.presentMode(), presentMode,
+                decision.reason());
         return new GpuSurface.Configuration(configuration.width(), configuration.height(), presentMode);
+    }
+
+    private VulkanFgPresentationPolicy.Decision presentationDecision(GpuSurface.PresentMode requested) {
+        VulkanFgPresentationPolicy policy = VulkanFgPresentationPolicy.valueOf(
+                CausticaConfig.Rt.Fg.PRESENTATION_POLICY.get().toUpperCase(java.util.Locale.ROOT)
+                        .replace('-', '_'));
+        EnumSet<VulkanFgPresentationPolicy.PresentMode> supported =
+                EnumSet.noneOf(VulkanFgPresentationPolicy.PresentMode.class);
+        for (GpuSurface.PresentMode mode : supportedPresentModes) supported.add(toPolicyMode(mode));
+        return policy.resolve(toPolicyMode(requested), supported, CausticaConfig.Rt.Fg.requested());
+    }
+
+    private static VulkanFgPresentationPolicy.PresentMode toPolicyMode(GpuSurface.PresentMode mode) {
+        return switch (mode) {
+            case FIFO -> VulkanFgPresentationPolicy.PresentMode.FIFO;
+            case FIFO_RELAXED -> VulkanFgPresentationPolicy.PresentMode.FIFO_RELAXED;
+            case MAILBOX -> VulkanFgPresentationPolicy.PresentMode.MAILBOX;
+            case IMMEDIATE -> VulkanFgPresentationPolicy.PresentMode.IMMEDIATE;
+            default -> VulkanFgPresentationPolicy.PresentMode.OTHER;
+        };
+    }
+
+    private static GpuSurface.PresentMode toGpuMode(VulkanFgPresentationPolicy.PresentMode mode) {
+        return switch (mode) {
+            case FIFO -> GpuSurface.PresentMode.FIFO;
+            case FIFO_RELAXED -> GpuSurface.PresentMode.FIFO_RELAXED;
+            case MAILBOX -> GpuSurface.PresentMode.MAILBOX;
+            case IMMEDIATE -> GpuSurface.PresentMode.IMMEDIATE;
+            case OTHER -> GpuSurface.PresentMode.FIFO;
+        };
     }
 
     /** Called after the old swapchain is destroyed and immediately before replacement creation. */
@@ -141,15 +166,15 @@ public final class StreamlineSwapchainCoordinator {
         RtDlssFg.INSTANCE.onSwapchainConfigured(width, height, format, imageCount, vsyncRequested,
                 physicalFifo, pluginForSwapchain, generation);
         CausticaMod.LOGGER.debug(
-                "Streamline swapchain generation {}: {}x{}, format={}, applicationImages={}, plugin={}, requestedPresentMode={}, normalizedPresentMode={}, vsyncRequested={}, mailboxVsyncCompatibility={}, nativePresentMode={} (value={}), requestedNativeMinImages={}, proxyVisibleImages={}, nativeCreateResult={}, nativeProxyDispatch={}, nativeSwapchain={}",
+                "Streamline swapchain generation {}: {}x{}, format={}, applicationImages={}, plugin={}, requestedPresentMode={}, normalizedPresentMode={}, vsyncRequested={}, mailboxPresentationSelected={}, nativePresentMode={} (value={}), requestedNativeMinImages={}, proxyVisibleImages={}, nativeCreateResult={}, nativeProxyDispatch={}, nativeSwapchain={}",
                 generation, width, height, format, imageCount, pluginForSwapchain, requestedPresentMode, presentMode, vsyncRequested,
-                mailboxVsyncCompatibility, nativeSwapchain.presentMode(), nativeSwapchain.presentModeValue(),
+                mailboxPresentationSelected, nativeSwapchain.presentMode(), nativeSwapchain.presentModeValue(),
                 nativeSwapchain.minImageCount(), nativeSwapchain.imageCount(), nativeSwapchain.createResult(),
                 nativeSwapchain.proxyDispatch(), nativeSwapchain.handleHex());
-        if (mailboxVsyncCompatibility && nativeSwapchain.presentModeKnown()
+        if (mailboxPresentationSelected && nativeSwapchain.presentModeKnown()
                 && !"MAILBOX".equals(nativeSwapchain.presentMode())) {
             CausticaMod.LOGGER.error(
-                    "DLSS-G MAILBOX VSync proof failed: requested MAILBOX but native proxy observed {} (value={})",
+                    "Frame Generation MAILBOX presentation proof failed: requested MAILBOX but native proxy observed {} (value={})",
                     nativeSwapchain.presentMode(), nativeSwapchain.presentModeValue());
         }
     }
@@ -205,8 +230,8 @@ public final class StreamlineSwapchainCoordinator {
         return vsyncRequested;
     }
 
-    public boolean mailboxVsyncCompatibility() {
-        return mailboxVsyncCompatibility;
+    public boolean mailboxPresentationSelected() {
+        return mailboxPresentationSelected;
     }
 
     public boolean mailboxSupported() {

@@ -48,9 +48,10 @@ final class FullscreenExtentContractTest {
         assertTrue(coordinator.contains(
                 "new GpuSurface.Configuration(configuration.width(), configuration.height(), presentMode)"));
         assertTrue(coordinator.contains("boolean desiredPlugin = CausticaConfig.Rt.Fg.requested() && !physicalFifo"));
-        assertTrue(coordinator.contains("A surface without MAILBOX stays on the requested FIFO mode and DLSS-G fails closed"));
+        assertTrue(coordinator.contains("explicit presentation policy"));
+        assertTrue(coordinator.contains("presentationDecision(configuration.presentMode())"));
         assertTrue(frameGeneration.contains("reflexLimitForDisplayedTarget(outputTargetFps())"));
-        assertTrue(minecraft.contains("parallelPacingActive() ? 260 : tracker.getFramerateLimit()"));
+		assertTrue(minecraft.contains("resolveMinecraftLimiter(tracker.getFramerateLimit())"));
         assertFalse(frameGeneration.contains("FrameDeadlinePacer"));
         assertFalse(config.contains("AUTO_CAP"));
     }

@@ -16,7 +16,7 @@ class ReflexIndependentOfFrameGenerationContractTest {
 
         assertTrue(fg.contains("requested() || CausticaConfig.Rt.Reflex.ENABLED.value()"),
                 "Reflex On must remain effective when DLSS-G is not requested");
-        assertTrue(fg.contains("applyReflexOptions(library, arena);"));
+        assertTrue(fg.contains("applyReflexOptions(library, streamlineScratch);"));
         assertTrue(fg.contains("if (reflexSupported) {") && fg.contains("library.reflexSleep(frameToken)"),
                 "Reflex sleep must run from the unconditional frame-token path");
 

@@ -25,30 +25,31 @@ class DlssgPresentationContractTest {
         String coordinator = source("src/main/java/dev/comfyfluffy/caustica/streamline/StreamlineSwapchainCoordinator.java");
         assertTrue(coordinator.replace("\r\n", "\n")
                 .contains("vsyncRequested,\n                physicalFifo, pluginForSwapchain"));
-        assertTrue(coordinator.contains("presentMode = GpuSurface.PresentMode.MAILBOX"));
-        assertTrue(coordinator.contains("desiredPlugin = CausticaConfig.Rt.Fg.requested() && !physicalFifo"));
+        assertTrue(coordinator.contains("case MAILBOX -> GpuSurface.PresentMode.MAILBOX"));
+        assertTrue(coordinator.contains("boolean desiredPlugin = CausticaConfig.Rt.Fg.requested() && !physicalFifo"));
+        assertTrue(coordinator.contains("PRESENTATION_POLICY"));
     }
 
     @Test
     void steadyStateRetirementNeverUsesDeviceIdle() throws Exception {
         String fg = source("src/main/java/dev/comfyfluffy/caustica/rt/pipeline/RtDlssFg.java");
         int wait = fg.indexOf("private int waitForInputSlot");
-        int fallback = fg.indexOf("private boolean enterBlockingQueueFallback", wait);
+        int fallback = fg.indexOf("private boolean enterRecoverableInputStarvation", wait);
         assertTrue(wait >= 0 && fallback > wait);
         assertFalse(fg.substring(wait, fallback).contains("vkDeviceWaitIdle"));
         int drain = fg.indexOf("private void drainInputSlots", fallback);
         assertTrue(drain > fallback);
         assertFalse(fg.substring(fallback, drain).contains("vkDeviceWaitIdle"));
-        assertTrue(fg.substring(fallback, drain).contains("dlssgFailed = true"));
+        assertFalse(fg.substring(fallback, drain).contains("dlssgFailed = true"));
     }
 
     @Test
     void synchronizedIsTheStableDefaultAndParallelIsExplicit() throws Exception {
         String config = source("src/main/java/dev/comfyfluffy/caustica/CausticaConfig.java");
         String fg = source("src/main/java/dev/comfyfluffy/caustica/rt/pipeline/RtDlssFg.java");
-        assertTrue(config.contains("\"frame-generation.queue-parallelism\", \"synchronized\""));
+        assertTrue(config.contains("\"frame-generation.queue-parallelism\", \"auto\""));
         assertTrue(fg.contains("activeQueuePolicy == QueuePolicy.PARALLEL && !queueFallback"));
-        assertEquals("synchronized", RtDlssFg.canonicalQueuePolicy("auto"));
+        assertEquals("auto", RtDlssFg.canonicalQueuePolicy("auto"));
         assertEquals("synchronized", RtDlssFg.canonicalQueuePolicy("safe"));
         assertEquals("parallel", RtDlssFg.canonicalQueuePolicy("no-client-queues"));
         assertEquals("parallel", RtDlssFg.canonicalQueuePolicy("parallel"));
