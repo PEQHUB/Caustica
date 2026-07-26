@@ -177,7 +177,7 @@ public final class StreamlineAcceptanceReport {
                 .append("    \"queueFallbackActive\": ").append(fg.queueFallbackActive()).append(",\n")
                 .append("    \"queueFallbackReason\": ").append(quote(fg.queueFallbackReason())).append(",\n")
                 .append("    \"inputSlotCount\": ").append(fg.inputSlotCount()).append(",\n")
-                .append("    \"activeInputSlot\": ").append(fg.activeInputSlot()).append(",\n")
+                .append("    \"currentInputSlot\": ").append(fg.currentInputSlot()).append(",\n")
                 .append("    \"acquiredApplicationImage\": ").append(fg.acquiredApplicationImage()).append(",\n")
                 .append("    \"inputSlotRetirements\": ").append(quote(fg.inputSlotRetirements())).append(",\n")
                 .append("    \"lastInputsProcessingFence\": ").append(quote(hex(fg.lastInputFence()))).append(",\n")

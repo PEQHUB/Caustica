@@ -27,3 +27,7 @@ All 12 steps implemented and review corrections applied.
 ## Remaining
 - [ ] Build verification (requires Slang 2026.13 compiler)
 - [ ] Runtime manual verification in all three vanilla dimensions
+
+## C1 Execution Note (July 26, 2026)
+- Immutable DLSS-G input-pool migration implemented on `rehab/dlssg-streamline`.
+- Gradle verification remains blocked by the unavailable pinned Slang 2026.13 compiler.

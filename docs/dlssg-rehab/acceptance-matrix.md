@@ -17,7 +17,7 @@ evidence.
 | 2 | PCL-002, PCL-003, INPUT-001, INPUT-002, SUBMIT-001, REFLEX-001 | AWAITING_RUNTIME_CAPTURE |
 | 3 | PACE-001, PACE-002, PACE-003, PACE-007 | PASS after source/unit gates |
 | 3 | PACE-004, PACE-005, PACE-006 | AWAITING_RUNTIME_CAPTURE |
-| 4 | POOL-001, POOL-002, POOL-003, POOL-004, POOL-005, POOL-006 | PASS after source/unit/native gates |
+| 4 | POOL-001, POOL-002, POOL-003, POOL-004, POOL-005, POOL-006 | C1 source contracts implemented; Gradle verification blocked by missing pinned Slang 2026.13 |
 | 4 | POOL-007 | AWAITING_RUNTIME_CAPTURE |
 | 5 | REC-001, REC-002, REC-007 | PASS after source/unit gates |
 | 5 | REC-003, REC-004, REC-005, REC-006 | AWAITING_RUNTIME_CAPTURE |

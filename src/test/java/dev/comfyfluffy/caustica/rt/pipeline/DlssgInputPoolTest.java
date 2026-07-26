@@ -26,6 +26,29 @@ class DlssgInputPoolTest {
         pool.markPending(slot, 3L, 2L, 1L);
         pool.retireCompleted((device, semaphore) -> -1L, 1L);
         assertEquals(DlssgInputPoolState.QUARANTINED, pool.state(slot));
-        assertEquals(0, pool.freeCount() - 4);
+        assertEquals(4, pool.freeCount());
+    }
+
+    @Test
+    void leaseIdentityIncludesTokenAndGeneration() {
+        DlssgInputPool pool = new DlssgInputPool();
+        pool.reset(5, 9L);
+        int slot = pool.tryAcquire(3L);
+        assertTrue(pool.isCapturing(slot, 3L, 9L));
+        assertFalse(pool.isCapturing(slot, 4L, 9L));
+        assertFalse(pool.isCapturing(slot, 3L, 8L));
+        assertTrue(pool.markReady(slot, 3L));
+        assertTrue(pool.releaseSubmittedSynchronously(slot, 3L));
+        assertEquals(5, pool.freeCount());
+    }
+
+    @Test
+    void deviceIdleReleaseClearsQuarantine() {
+        DlssgInputPool pool = new DlssgInputPool();
+        pool.reset(5, 1L);
+        int slot = pool.tryAcquire(1L);
+        assertTrue(pool.quarantine(slot, 1L));
+        pool.releaseAllAfterDeviceIdle();
+        assertEquals(5, pool.freeCount());
     }
 }

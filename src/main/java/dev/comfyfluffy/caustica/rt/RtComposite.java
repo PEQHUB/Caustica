@@ -64,6 +64,7 @@ import dev.comfyfluffy.caustica.rt.material.RtMaterialRegistry;
 import dev.comfyfluffy.caustica.rt.pipeline.RtDisplayPipeline;
 import dev.comfyfluffy.caustica.rt.pipeline.RtBloomPipeline;
 import dev.comfyfluffy.caustica.rt.pipeline.RtDlssFg;
+import dev.comfyfluffy.caustica.rt.pipeline.DlssgInputPool;
 import dev.comfyfluffy.caustica.rt.pipeline.RtDlssdDisocclusionPipeline;
 import dev.comfyfluffy.caustica.rt.pipeline.DlssdResolutionPlan;
 import dev.comfyfluffy.caustica.rt.pipeline.RtFgUiAlphaPipeline;
@@ -385,6 +386,8 @@ public final class RtComposite {
     // these resources asynchronously after the real present, so no set may be overwritten until its
     // DLSSGState timeline value completes.
     private FgInputSlot[] fgInputSlots = new FgInputSlot[0];
+    private int fgInputSlotCapacity;
+    private long fgInputSlotGeneration = Long.MIN_VALUE;
     private RtFgUiAlphaPipeline fgUiAlphaPipeline;
     // Step C.2: composites the combined UI overlay over hdrDisplayImage at paper white, just before present.
     private RtHdrCompositePipeline hdrCompositePipeline;
@@ -4069,10 +4072,12 @@ public final class RtComposite {
         if (ctx == null || outputWidth <= 0 || outputHeight <= 0) {
             return;
         }
-        FgInputSlot slot = activeFgInputSlot(ctx);
-        if (slot == null || !RtDlssFg.INSTANCE.beforeFrameInputs()) {
+        int slotIndex = RtDlssFg.INSTANCE.beginFrameInputCapture();
+        if (slotIndex == DlssgInputPool.NO_SLOT) {
             return;
         }
+        FgInputSlot slot = fgInputSlot(ctx, slotIndex);
+        if (slot == null) return;
         long srcImage;
         try {
             srcImage = vkImage(main.getColorTexture());
@@ -4085,7 +4090,7 @@ public final class RtComposite {
                 slot.hudlessSdr.destroy();
             }
             slot.hudlessSdr = ctx.createStorageImage(outputWidth, outputHeight, VK10.VK_FORMAT_R8G8B8A8_UNORM,
-                    "FG hudless capture slot " + RtDlssFg.INSTANCE.activeInputSlot() + " "
+                    "FG hudless capture slot " + slotIndex + " "
                             + outputWidth + "x" + outputHeight);
         }
         var encoder = (VulkanCommandEncoder) ((CommandEncoderAccessor) RenderSystem.getDevice().createCommandEncoder()).caustica$getBackend();
@@ -4119,17 +4124,19 @@ public final class RtComposite {
                 && swapchainFormat != VK10.VK_FORMAT_A2R10G10B10_UNORM_PACK32)) {
             return;
         }
-        FgInputSlot slot = activeFgInputSlot(ctx);
-        if (slot == null || !RtDlssFg.INSTANCE.beforeFrameInputs()) {
+        int slotIndex = RtDlssFg.INSTANCE.beginFrameInputCapture();
+        if (slotIndex == DlssgInputPool.NO_SLOT) {
             return;
         }
+        FgInputSlot slot = fgInputSlot(ctx, slotIndex);
+        if (slot == null) return;
         if (slot.hudlessHdr == null || slot.hudlessHdr.width != src.width
                 || slot.hudlessHdr.height != src.height || slot.hudlessHdr.format != swapchainFormat) {
             if (slot.hudlessHdr != null) {
                 slot.hudlessHdr.destroy();
             }
             slot.hudlessHdr = ctx.createSampledTransferImage(src.width, src.height, swapchainFormat,
-                    "FG HDR10 hudless slot " + RtDlssFg.INSTANCE.activeInputSlot() + " "
+                    "FG HDR10 hudless slot " + slotIndex + " "
                             + src.width + "x" + src.height);
         }
         VulkanCommandEncoder.memoryBarrier(cmd, stack);
@@ -4149,10 +4156,12 @@ public final class RtComposite {
         if (ctx == null) {
             return false;
         }
-        FgInputSlot slot = activeFgInputSlot(ctx);
-        if (slot == null || !RtDlssFg.INSTANCE.beforeFrameInputs()) {
+        int slotIndex = RtDlssFg.INSTANCE.beginFrameInputCapture();
+        if (slotIndex == DlssgInputPool.NO_SLOT) {
             return false;
         }
+        FgInputSlot slot = fgInputSlot(ctx, slotIndex);
+        if (slot == null) return false;
         RtImage hudless = hdr ? slot.hudlessHdr : slot.hudlessSdr;
         if (hudless == null) {
             return false;
@@ -4177,14 +4186,14 @@ public final class RtComposite {
                     slot.uiAlpha.destroy();
                 }
                 slot.uiAlpha = ctx.createStorageImage(contentWidth, contentHeight, VK10.VK_FORMAT_R32_SFLOAT,
-                        "DLSS-G UI alpha slot " + RtDlssFg.INSTANCE.activeInputSlot() + " "
+                        "DLSS-G UI alpha slot " + slotIndex + " "
                                 + contentWidth + "x" + contentHeight);
             }
             uiAlpha = slot.uiAlpha;
         }
         VkCommandBuffer commandBuffer = encoder.allocateAndBeginTransientCommandBuffer();
         try (MemoryStack stack = MemoryStack.stackPush()) {
-            ensureFgGuideImages(ctx, slot, renderW, renderH);
+            ensureFgGuideImages(ctx, slotIndex, slot, renderW, renderH);
             VulkanCommandEncoder.memoryBarrier(commandBuffer, stack);
             blitFlipped(commandBuffer, stack, gDepth.image, gDepth.width, gDepth.height,
                     slot.depth, VK10.VK_FILTER_NEAREST);
@@ -4196,7 +4205,7 @@ public final class RtComposite {
             }
             VulkanCommandEncoder.memoryBarrier(commandBuffer, stack);
         }
-        boolean submitted = RtDlssFg.INSTANCE.submitFrame(commandBuffer.address(), swapWidth, swapHeight,
+        boolean submitted = RtDlssFg.INSTANCE.submitFrame(slotIndex, commandBuffer.address(), swapWidth, swapHeight,
                 swapchainFormat, renderW, renderH, slot.depth, slot.motion, hudless, hudlessFormat,
                 uiAlpha,
                 frameProjection, mvCurProjView,
@@ -4214,13 +4223,13 @@ public final class RtComposite {
         return submitted;
     }
 
-    private void ensureFgGuideImages(RtContext ctx, FgInputSlot slot, int width, int height) {
+    private void ensureFgGuideImages(RtContext ctx, int slotIndex, FgInputSlot slot, int width, int height) {
         if (slot.depth == null || slot.depth.width != width || slot.depth.height != height) {
             if (slot.depth != null) {
                 slot.depth.destroy();
             }
             slot.depth = ctx.createStorageImage(width, height, VK10.VK_FORMAT_R32_SFLOAT,
-                    "DLSS-G normalized depth slot " + RtDlssFg.INSTANCE.activeInputSlot() + " "
+                    "DLSS-G normalized depth slot " + slotIndex + " "
                             + width + "x" + height);
         }
         if (slot.motion == null || slot.motion.width != width || slot.motion.height != height) {
@@ -4228,25 +4237,29 @@ public final class RtComposite {
                 slot.motion.destroy();
             }
             slot.motion = ctx.createStorageImage(width, height, VK10.VK_FORMAT_R16G16_SFLOAT,
-                    "DLSS-G normalized motion slot " + RtDlssFg.INSTANCE.activeInputSlot() + " "
+                    "DLSS-G normalized motion slot " + slotIndex + " "
                             + width + "x" + height);
         }
     }
 
-    private FgInputSlot activeFgInputSlot(RtContext ctx) {
+    private FgInputSlot fgInputSlot(RtContext ctx, int slotIndex) {
         int count = RtDlssFg.INSTANCE.inputSlotCount();
-        int active = RtDlssFg.INSTANCE.activeInputSlot();
-        if (count <= 0 || active < 0 || active >= count) {
+        long generation = RtDlssFg.INSTANCE.inputPoolGeneration();
+        if (count <= 0 || slotIndex < 0 || slotIndex >= count) {
             return null;
         }
-        if (fgInputSlots.length != count) {
+        if (fgInputSlots.length != count || fgInputSlotCapacity != count
+                || fgInputSlotGeneration != generation) {
             destroyFgInputSlots();
             fgInputSlots = new FgInputSlot[count];
             for (int slot = 0; slot < count; slot++) {
                 fgInputSlots[slot] = new FgInputSlot();
+                fgInputSlots[slot].generation = generation;
             }
+            fgInputSlotCapacity = count;
+            fgInputSlotGeneration = generation;
         }
-        return fgInputSlots[active];
+        return fgInputSlots[slotIndex].generation == generation ? fgInputSlots[slotIndex] : null;
     }
 
     private void destroyFgInputSlots() {
@@ -4256,9 +4269,12 @@ public final class RtComposite {
             }
         }
         fgInputSlots = new FgInputSlot[0];
+        fgInputSlotCapacity = 0;
+        fgInputSlotGeneration = Long.MIN_VALUE;
     }
 
     private static final class FgInputSlot {
+        private long generation;
         private RtImage hudlessSdr;
         private RtImage hudlessHdr;
         private RtImage depth;
@@ -4266,11 +4282,11 @@ public final class RtComposite {
         private RtImage uiAlpha;
 
         private void destroy() {
-            for (RtImage image : new RtImage[] {hudlessSdr, hudlessHdr, depth, motion, uiAlpha}) {
-                if (image != null) {
-                    image.destroy();
-                }
-            }
+            if (hudlessSdr != null) hudlessSdr.destroy();
+            if (hudlessHdr != null) hudlessHdr.destroy();
+            if (depth != null) depth.destroy();
+            if (motion != null) motion.destroy();
+            if (uiAlpha != null) uiAlpha.destroy();
             hudlessSdr = null;
             hudlessHdr = null;
             depth = null;

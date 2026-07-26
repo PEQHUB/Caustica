@@ -39,3 +39,9 @@ All code changes for Nether/End sky gradients are written and reviewed.
 - Nested static holders are the idiomatic pattern for CausticaConfig settings
 - Signature separation is important: LUT invalidation is cheaper than full pipeline reset
 - Lower-horizon protection prevents dimension color leaking into underground geometry
+
+## Session: DLSS-G Immutable Input Pool C1 (July 26, 2026)
+- Branch started at expected `507edc6731525bf96631995f972b0e901074808d`.
+- Removed the split `DlssgInputSlotRing`; pool slot and generation now select all FG resources.
+- Gradle checks were attempted but blocked before compilation because available Slang is `2026.1`, not pinned `2026.13`.
+- No runtime or hardware qualification was performed.

@@ -1,0 +1,6 @@
+C1 immutable DLSS-G input ownership source gate
+Old DlssgInputSlotRing deleted.
+RtDlssFg owns slot acquisition, generation, retirement, quarantine, and lifecycle drain.
+RtComposite resolves one explicit pool slot index before every tagged image write.
+Ordinary-frame timeline waits and device-idle drains are absent from RtDlssFg.
+Gradle verification remains blocked until pinned Slang 2026.13 is installed.

@@ -12,3 +12,7 @@
   but validation-layer, FrameView, fault-injection, and two-hour soak proof are
   still required.
 - Production deployment was not performed by this branch.
+- C1 Java/build verification is blocked in this environment because the available `slangc` reports
+  `2026.1-52-gc8ddf20bb`, while the repository requires pinned Slang `2026.13`.
+- C2 still requires runtime ownership capture, hardware qualification, and the remaining acceptance
+  ledger evidence. These are intentionally not claimed by C1.
