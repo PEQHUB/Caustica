@@ -241,8 +241,8 @@ public final class RtComposite {
     // Real inline push constants (fast constant-bank reads), separate from the WorldPush BDA ring above.
     // tableAddr/entityTableAddr/frameIndex are duplicated so hit shaders skip a global-memory dereference;
     // PushAddrData is generated from the same Slang module and owns this second ABI as well.
-    private static final int BASE_GUIDE_COUNT = 11;
-    private static final int NRD_GUIDE_COUNT = 17;
+    private static final int BASE_GUIDE_COUNT = 20;
+    private static final int NRD_GUIDE_COUNT = 20;
     private static final int FRAME_FLAG_RR_GUIDES = 1 << 5;
     private static final int FRAME_FLAG_FG_GUIDES = 1 << 6;
     private static final int FRAME_FLAG_OFFLINE_GROUND_TRUTH = 1 << 7;
@@ -439,6 +439,9 @@ public final class RtComposite {
     private RtImage gParticleHint;
     private RtImage gDisocclusion;
     private RtImage gBiasCurrentColor;
+    private RtImage gColorBeforeTransparency;
+    private RtImage gTransparencyLayer;
+    private RtImage gTransparencyLayerOpacity;
     private boolean diffusePathGuideKnown;
     private boolean lastDiffusePathGuide;
     private RtDlssdDisocclusionPipeline dlssdDisocclusionPipeline;
@@ -1446,6 +1449,9 @@ public final class RtComposite {
                 }
                 pipeline.setExtraStorageImage(7, gAnimatedGuide.view);
                 pipeline.setExtraStorageImage(10, gDiffuseRayDirectionHitDistance.view);
+                pipeline.setExtraStorageImage(17, gColorBeforeTransparency.view);
+                pipeline.setExtraStorageImage(18, gTransparencyLayer.view);
+                pipeline.setExtraStorageImage(19, gTransparencyLayerOpacity.view);
             }
             if (RtReconstruction.usesNrd() && worldPipeline != null && gNrdSignal != null) {
                 worldPipeline.setExtraStorageImage(11, gNrdSh1.view);
@@ -1598,6 +1604,18 @@ public final class RtComposite {
         if (gBiasCurrentColor != null) {
             gBiasCurrentColor.destroy();
             gBiasCurrentColor = null;
+        }
+        if (gColorBeforeTransparency != null) {
+            gColorBeforeTransparency.destroy();
+            gColorBeforeTransparency = null;
+        }
+        if (gTransparencyLayer != null) {
+            gTransparencyLayer.destroy();
+            gTransparencyLayer = null;
+        }
+        if (gTransparencyLayerOpacity != null) {
+            gTransparencyLayerOpacity.destroy();
+            gTransparencyLayerOpacity = null;
         }
         if (dlssdOutput != null && dlssdOutput != rrOutput) {
             dlssdOutput.destroy();
@@ -1955,6 +1973,12 @@ public final class RtComposite {
                 "DLSSD disocclusion mask");
         gBiasCurrentColor = ctx.createStorageImage(dlssGuideW, dlssGuideH, VK10.VK_FORMAT_R16_SFLOAT,
                 "DLSSD current color bias");
+        gColorBeforeTransparency = ctx.createStorageImage(dlssGuideW, dlssGuideH,
+                VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "DLSSD color before portal transparency");
+        gTransparencyLayer = ctx.createStorageImage(dlssGuideW, dlssGuideH,
+                VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "DLSSD portal transparency layer");
+        gTransparencyLayerOpacity = ctx.createStorageImage(dlssGuideW, dlssGuideH,
+                VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "DLSSD portal transparency opacity");
         if (dlssOperational) {
             dlssdDisocclusionPipeline = RtDlssdDisocclusionPipeline.create(ctx, particleTemporalHistory);
             dlssdDisocclusionPipeline.setImages(gDepth.view, gMotion.view,
@@ -2624,8 +2648,8 @@ public final class RtComposite {
                     if (RtReconstruction.usesDlss()) {
                         rrDone = RtDlssRr.INSTANCE.evaluate(cmd.address(), output, gDepth, gMotion, gAlbedo,
                                 gSpecAlbedo, gNormal, gSpecMotion, gDisocclusion, gBiasCurrentColor,
-                                gParticleHint, gDiffuseRayDirectionHitDistance, null,
-                                null, null, dlssdOutput,
+                                gParticleHint, gDiffuseRayDirectionHitDistance, gColorBeforeTransparency,
+                                gTransparencyLayer, gTransparencyLayerOpacity, dlssdOutput,
                                 renderW, renderH, dlssdResolutionPlan.dlssdOutputWidth(),
                                 dlssdResolutionPlan.dlssdOutputHeight(),
                                 jitterX, jitterY, frameProjection, mvCurProjView,

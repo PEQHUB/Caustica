@@ -100,6 +100,9 @@ static SharcRWPtr<uint> sharcStats;
 [[vk::binding(9, 0)]] [format("r16f")]    RWTexture2D<float>  gPrimarySkyMask; // primary sky miss classification
 [[vk::binding(10, 0)]] [format("r16f")] RWTexture2D<float> gAnimatedGuide; // animated-surface / particle temporal responsivity
 [[vk::binding(13, 0)]] [format("rgba16f")] RWTexture2D<float4> gDiffuseRayDirectionHitDistance;
+[[vk::binding(20, 0)]] [format("rgba16f")] RWTexture2D<float4> gColorBeforeTransparency;
+[[vk::binding(21, 0)]] [format("rgba16f")] RWTexture2D<float4> gTransparencyLayer;
+[[vk::binding(22, 0)]] [format("rgba16f")] RWTexture2D<float4> gTransparencyLayerOpacity;
 #if CAUSTICA_NRD
 [[vk::binding(14, 0)]] [format("rgba16f")] RWTexture2D<float4> gNrdSh1;
 [[vk::binding(15, 0)]] [format("r32f")] RWTexture2D<float> gNrdViewZ;
@@ -305,6 +308,8 @@ static const uint OPTICAL_GUIDE_FAILURE_BUDGET = 2u;
 static const uint OPTICAL_GUIDE_FAILURE_UNSUPPORTED = 3u;
 static uint gv_opticalGuideFailure;
 static float gv_animatedGuide;
+static float3 gv_portalLayerColor;
+static float gv_portalLayerOpacity;
 // Optional DLSSD B-mode guide: normalized world-space direction of the first diffuse continuation
 // and the world-space distance to its first hit. Zero means that the primary path chose no diffuse ray.
 static float4 gv_diffuseRayDirectionHitDistance;
@@ -2084,6 +2089,8 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
                     gv_motionUseRefracted = false;
                     gv_motionObjDisp = payload.motionPrev;
                     gv_animatedGuide = 1.0;
+                    gv_portalLayerColor = payload.albedo;
+                    gv_portalLayerOpacity = alpha;
                 }
             }
 #if CAUSTICA_SHARC_UPDATE
@@ -3369,6 +3376,8 @@ void main() {
     gv_opticalGuideFailure = OPTICAL_GUIDE_FAILURE_NONE;
     gv_opticalGuideTransmissionFilter = float3(1.0, 1.0, 1.0);
     gv_animatedGuide = 0.0;
+    gv_portalLayerColor = float3(0.0);
+    gv_portalLayerOpacity = 0.0;
     gv_primarySky = false;
     gv_diffuseRayDirectionHitDistance = float4(0.0, 0.0, 0.0, 0.0);
     gv_diffuseGuidePending = false;
@@ -3740,6 +3749,18 @@ void main() {
         gNrdViewDirection[pix] = float4(normalize(-gv_hitCamRel), specSurfaceRoughness);
     }
 #endif
+    if (writeRrGuides) {
+        float opacity = clamp(gv_portalLayerOpacity, 0.0, 1.0);
+        float transmission = 1.0 - opacity;
+        float3 premultipliedPortal = gv_portalLayerColor * opacity;
+        float3 colorBefore = transmission > 1.0e-4
+                ? max((frameRadiance - premultipliedPortal) / transmission, float3(0.0))
+                : float3(0.0);
+        gColorBeforeTransparency[pix] = float4(
+                opacity > 0.0 ? colorBefore : frameRadiance, 1.0);
+        gTransparencyLayer[pix] = float4(gv_portalLayerColor, 1.0);
+        gTransparencyLayerOpacity[pix] = float4(opacity, opacity, opacity, opacity);
+    }
     outImage[pix] = float4(frameRadiance, 1.0);
 #endif // CAUSTICA_OFFLINE
 #endif

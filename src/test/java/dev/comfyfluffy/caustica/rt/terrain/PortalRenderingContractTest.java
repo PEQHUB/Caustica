@@ -42,4 +42,17 @@ final class PortalRenderingContractTest {
         assertTrue(mask.contains("disocclusion = max(disocclusion, portalSilhouette)"));
         assertTrue(mask.contains("biasCurrentColorImage"));
     }
+
+    @Test
+    void netherPortalUsesDlssdLayeredTransparencyInputs() throws Exception {
+        String raygen = Files.readString(Path.of("shaders/world/world.rgen.slang"));
+        String composite = Files.readString(Path.of(
+                "src/main/java/dev/comfyfluffy/caustica/rt/RtComposite.java"));
+
+        assertTrue(raygen.contains("gColorBeforeTransparency"));
+        assertTrue(raygen.contains("gTransparencyLayerOpacity"));
+        assertTrue(raygen.contains("(frameRadiance - premultipliedPortal) / transmission"));
+        assertTrue(composite.contains("gColorBeforeTransparency,"));
+        assertTrue(composite.contains("gTransparencyLayer, gTransparencyLayerOpacity"));
+    }
 }
