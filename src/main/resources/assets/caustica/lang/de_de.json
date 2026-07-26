@@ -69,5 +69,10 @@
 	"caustica.options.rt.debugView.5": "Bewegung",
 	"caustica.options.rt.debugView.6": "Spiegelnd",
 	"caustica.options.rt.debugView.7": "Spiegelnde Bewegung",
-	"caustica.options.rt.debugView.8": "Tonemapper-Vergleich"
+	"caustica.options.rt.debugView.8": "Tonemapper-Vergleich",
+	"caustica.options.rt.fg.presentationPolicy": "Vulkan-Präsentationsrichtlinie",
+	"caustica.options.rt.fg.presentationPolicy.tooltip": "Angeforderten Modus beibehalten, MAILBOX für FIFO wählen oder IMMEDIATE bevorzugen.",
+	"caustica.options.rt.fg.pacingTargetStrategy": "Pacing-Zielstrategie",
+	"caustica.options.rt.fg.multiplierPolicy": "Multiplikator-Richtlinie",
+	"caustica.options.rt.fg.minimumSourceFps": "Minimale Quell-FPS"
 }

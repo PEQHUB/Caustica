@@ -70,4 +70,14 @@
 	"caustica.options.rt.debugView.6": "Especular",
 	"caustica.options.rt.debugView.7": "Movimento especular",
 	"caustica.options.rt.debugView.8": "Comparação de tonemappers"
+,
+	"caustica.options.rt.fg.presentationPolicy": "Presentation policy",
+	"caustica.options.rt.fg.presentationPolicy.tooltip": "Keep the requested mode, select MAILBOX for FIFO, or prefer IMMEDIATE.",
+	"caustica.options.rt.fg.presentationPolicy.preserve": "Preserve requested mode",
+	"caustica.options.rt.fg.presentationPolicy.mailbox": "FG MAILBOX",
+	"caustica.options.rt.fg.presentationPolicy.immediate": "Uncapped IMMEDIATE",
+	"caustica.options.rt.fg.pacingTargetStrategy": "Pacing target strategy",
+	"caustica.options.rt.fg.multiplierPolicy": "Multiplier policy",
+	"caustica.options.rt.fg.minimumSourceFps": "Minimum source FPS",
+	"caustica.options.rt.fg.queueParallelism.auto": "Auto (safe until qualified)"
 }

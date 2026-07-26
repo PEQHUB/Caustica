@@ -15,7 +15,7 @@ final class CausticaConfigSchema16Test {
 
         assertTrue(CausticaConfig.migrateLegacySceneConfig(config));
 
-        assertEquals(16, ((Number) config.get("config-version")).intValue());
+        assertEquals(17, ((Number) config.get("config-version")).intValue());
 
         assertProfile(config, "end",
                 0.04, 0.02, 0.08, 0.00, 0.00, 0.00, 0.0, 2.00, 0.72);
@@ -61,6 +61,22 @@ final class CausticaConfigSchema16Test {
         assertEquals(0.0f, CausticaConfig.Rt.Composite.EndAtmosphere.BRIGHTNESS_EV.defaultValue(), EPSILON);
         assertEquals(2.00f, CausticaConfig.Rt.Composite.EndAtmosphere.SATURATION.defaultValue(), EPSILON);
         assertEquals(0.72f, CausticaConfig.Rt.Composite.EndAtmosphere.GRADIENT_POWER.defaultValue(), EPSILON);
+    }
+
+    @Test
+    void schema16MigratesFrameGenerationPolicyDefaultsWithoutChangingExplicitQueueChoice() {
+        CommentedConfig config = CommentedConfig.inMemory();
+        config.set("config-version", 16);
+        config.set("frame-generation.queue-parallelism", "parallel");
+
+        assertTrue(CausticaConfig.migrateLegacySceneConfig(config));
+
+        assertEquals(17, ((Number) config.get("config-version")).intValue());
+        assertEquals("parallel", config.get("frame-generation.queue-parallelism"));
+        assertEquals("fg-mailbox", config.get("frame-generation.presentation-policy"));
+        assertEquals("displayed-target", config.get("frame-generation.pacing-target-strategy"));
+        assertEquals("manual", config.get("frame-generation.multiplier-policy"));
+        assertEquals(90, ((Number) config.get("frame-generation.minimum-source-fps")).intValue());
     }
 
     private static CommentedConfig schema14PlaceholderEndProfile() {

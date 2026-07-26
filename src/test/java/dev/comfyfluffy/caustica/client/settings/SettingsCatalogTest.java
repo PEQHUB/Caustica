@@ -26,8 +26,8 @@ final class SettingsCatalogTest {
             assertSame(control, SettingsCatalog.byId(control.id()));
             assertSame(control, SettingsCatalog.byLabelKey(control.labelKey()));
         }
-        assertEquals(205, ids.size());
-        assertEquals(205, SettingsCatalog.Control.values().length);
+        assertEquals(227, ids.size());
+        assertEquals(227, SettingsCatalog.Control.values().length);
     }
 
     @Test
@@ -80,8 +80,8 @@ final class SettingsCatalogTest {
 
     @Test
     void everyControlReferencesACanonicalSectionOnItsOwnPage() {
-        assertEquals(38, SettingsCatalog.allSections().size());
-        assertEquals(38, SettingsCatalog.allSections().stream().map(SettingsCatalog.Section::id)
+        assertEquals(42, SettingsCatalog.allSections().size());
+        assertEquals(42, SettingsCatalog.allSections().stream().map(SettingsCatalog.Section::id)
                 .collect(Collectors.toSet()).size());
 
         Set<String> defaultCollapsed = SettingsCatalog.allSections().stream()
@@ -95,6 +95,8 @@ final class SettingsCatalogTest {
                 "sky.celestial",
                 "sky.stars",
                 "sky.airglow",
+                "sky.nether.shape",
+                "sky.end.shape",
                 "sharc.foundation",
                 "sharc.cadence",
                 "sharc.transport",
@@ -125,9 +127,9 @@ final class SettingsCatalogTest {
                 .filter(control -> control.id().startsWith("tone."))
                 .toList();
         assertEquals(39, dynamic.size());
-        assertEquals(166, SettingsCatalog.allControls().size() - dynamic.size());
+        assertEquals(188, SettingsCatalog.allControls().size() - dynamic.size());
         // Five output controls are deliberately placed on both Display/HDR and Exposure.
-        assertEquals(171, SettingsCatalog.allControls().size() - dynamic.size() + 5);
+        assertEquals(193, SettingsCatalog.allControls().size() - dynamic.size() + 5);
 
         Set<String> dynamicLabels = dynamic.stream().map(SettingsCatalog.ControlDescriptor::labelKey)
                 .collect(Collectors.toSet());
@@ -177,11 +179,11 @@ final class SettingsCatalogTest {
     void broadPageCoverageMatchesTheAuditedCanonicalInventory() {
         Map<SettingsCatalog.Page, Long> expected = Map.ofEntries(
                 Map.entry(SettingsCatalog.Page.DISPLAY_HDR, 6L),
-                Map.entry(SettingsCatalog.Page.FRAME_GENERATION, 8L),
+                Map.entry(SettingsCatalog.Page.FRAME_GENERATION, 12L),
                 Map.entry(SettingsCatalog.Page.RECONSTRUCTION, 8L),
                 Map.entry(SettingsCatalog.Page.DENOISING, 46L),
                 Map.entry(SettingsCatalog.Page.LIGHTING, 5L),
-                Map.entry(SettingsCatalog.Page.SKY_ATMOSPHERE, 37L),
+                Map.entry(SettingsCatalog.Page.SKY_ATMOSPHERE, 55L),
                 Map.entry(SettingsCatalog.Page.GEOMETRY_SCENE, 8L),
                 Map.entry(SettingsCatalog.Page.SHARC, 14L),
                 Map.entry(SettingsCatalog.Page.MATERIALS, 8L),

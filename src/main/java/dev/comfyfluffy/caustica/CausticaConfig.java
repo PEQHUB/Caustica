@@ -32,7 +32,7 @@ import org.slf4j.LoggerFactory;
 public final class CausticaConfig {
     private static final Logger LOGGER = LoggerFactory.getLogger("Caustica");
     private static final List<RuntimeSetting<?>> SETTINGS = new CopyOnWriteArrayList<>();
-    static final int CONFIG_SCHEMA_VERSION = 16;
+    static final int CONFIG_SCHEMA_VERSION = 17;
 
     private static final Path CONFIG_PATH = resolveConfigPath();
     private static final CommentedFileConfig FILE = loadAndMigrateFile(CONFIG_PATH);
@@ -96,7 +96,8 @@ public final class CausticaConfig {
             Rt.Nrd.MAX_FAST_ACCUMULATED_FRAMES, Rt.Nrd.HISTORY_FIX_FRAMES,
             Rt.Nrd.PREPASS_BLUR_RADIUS, Rt.Nrd.MAX_BLUR_RADIUS, Rt.Nrd.ANTI_FIREFLY,
             Rt.Fg.ENABLED, Rt.Fg.MODE, Rt.Fg.MULTI_FRAME_COUNT, Rt.Fg.DYNAMIC_TARGET_FPS,
-            Rt.Fg.OUTPUT_TARGET_FPS, Rt.Fg.QUEUE_PARALLELISM,
+            Rt.Fg.OUTPUT_TARGET_FPS, Rt.Fg.QUEUE_PARALLELISM, Rt.Fg.PRESENTATION_POLICY,
+            Rt.Fg.PACING_TARGET_STRATEGY, Rt.Fg.MULTIPLIER_POLICY, Rt.Fg.MINIMUM_SOURCE_FPS,
             Rt.Reflex.ENABLED, Rt.Exposure.MODE, Rt.FrameStats.ENABLED,
             Rt.Sharc.ENABLED, Rt.Sharc.PRIMARY_DIFFUSE_REUSE, Rt.Sharc.CACHE_EXPONENT, Rt.Sharc.UPDATE_TILE_SIZE,
             Rt.Sdr.TONEMAP_MODE, Rt.Hdr.ENABLED, Rt.Hdr.TONEMAP_MODE, Rt.PsychoV23.COMPRESSION,
@@ -179,7 +180,7 @@ public final class CausticaConfig {
                 " Streamline DLSS Frame Generation. mode is off or fixed; legacy auto/dynamic values migrate to fixed.\n"
                         + " multi-frame-count is generated frames per rendered frame (1 = 2x, 2 = 3x, ...).\n"
                         + " Dynamic MFG is D3D12-only and is migrated to fixed because Caustica uses Vulkan.\n"
-                        + " With VSync requested, Vulkan DLSS-G uses MAILBOX presentation. With VSync off,\n"
+                        + " With the FG_MAILBOX presentation policy, FIFO requests may resolve to MAILBOX.\n"
                         + " it uses IMMEDIATE presentation. DLSS-G itself is never frame-limited by Reflex.");
         FILE.setComment("reconstruction",
                 " Global reconstruction backend: auto, nrd, dlss-rr, or off. Auto prefers NRD on Linux/AMD/Intel\n"
@@ -392,8 +393,33 @@ public final class CausticaConfig {
         if (version < 16) {
             applySchema16Defaults(config);
         }
+        if (version < 17) {
+            applySchema17Defaults(config);
+        }
         config.set("config-version", CONFIG_SCHEMA_VERSION);
         return true;
+    }
+
+    private static void applySchema17Defaults(CommentedConfig config) {
+        if (!config.contains("frame-generation.presentation-policy")) {
+            config.set("frame-generation.presentation-policy", "fg-mailbox");
+        }
+        Object queue = config.get("frame-generation.queue-parallelism");
+        String normalized = queue == null ? "auto" : queue.toString().trim().toLowerCase(Locale.ROOT);
+        config.set("frame-generation.queue-parallelism", switch (normalized) {
+            case "parallel", "no-client-queues" -> "parallel";
+            case "synchronized", "safe" -> "synchronized";
+            default -> "auto";
+        });
+        if (!config.contains("frame-generation.pacing-target-strategy")) {
+            config.set("frame-generation.pacing-target-strategy", "displayed-target");
+        }
+        if (!config.contains("frame-generation.multiplier-policy")) {
+            config.set("frame-generation.multiplier-policy", "manual");
+        }
+        if (!config.contains("frame-generation.minimum-source-fps")) {
+            config.set("frame-generation.minimum-source-fps", 90);
+        }
     }
 
     private static void applySchema14Defaults(CommentedConfig config) {
@@ -1491,13 +1517,30 @@ public final class CausticaConfig {
             public static final BooleanSetting SHOW_ONLY_INTERPOLATED = bool(
                     "caustica.rt.fg.showOnlyInterpolated", "frame-generation.show-only-interpolated", false);
             public static final StringSetting QUEUE_PARALLELISM = string(
-                    "caustica.rt.fg.queueParallelism", "frame-generation.queue-parallelism", "synchronized",
+                    "caustica.rt.fg.queueParallelism", "frame-generation.queue-parallelism", "auto",
                     value -> switch (value.trim().toLowerCase(java.util.Locale.ROOT)) {
                         case "parallel", "no-client-queues" -> "parallel";
-                        // Migrate the former diagnostic names to the safe canonical policy.
-                        case "auto", "safe", "synchronized" -> "synchronized";
-                        default -> "synchronized";
+                        case "synchronized", "safe" -> "synchronized";
+                        case "auto" -> "auto";
+                        default -> "auto";
                     });
+            public static final StringSetting PRESENTATION_POLICY = string(
+                    "caustica.rt.fg.presentationPolicy", "frame-generation.presentation-policy", "fg-mailbox",
+                    value -> switch (value.trim().toLowerCase(java.util.Locale.ROOT)) {
+                        case "preserve-request", "preserve" -> "preserve-request";
+                        case "uncapped-immediate", "immediate", "uncapped" -> "uncapped-immediate";
+                        default -> "fg-mailbox";
+                    });
+            public static final StringSetting PACING_TARGET_STRATEGY = string(
+                    "caustica.rt.fg.pacingTargetStrategy", "frame-generation.pacing-target-strategy",
+                    "displayed-target", value -> "source-target".equalsIgnoreCase(value.trim())
+                            ? "source-target" : "displayed-target");
+            public static final StringSetting MULTIPLIER_POLICY = string(
+                    "caustica.rt.fg.multiplierPolicy", "frame-generation.multiplier-policy", "manual",
+                    value -> "latency-aware-auto".equalsIgnoreCase(value.trim())
+                            ? "latency-aware-auto" : "manual");
+            public static final IntSetting MINIMUM_SOURCE_FPS = clampedInt(
+                    "caustica.rt.fg.minimumSourceFps", "frame-generation.minimum-source-fps", 90, 30, 240);
 
             private Fg() {
             }

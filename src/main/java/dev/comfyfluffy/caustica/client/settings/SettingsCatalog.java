@@ -238,6 +238,18 @@ public final class SettingsCatalog {
         public static final Control FG_QUEUE = control("frameGeneration.queueParallelism",
                 "caustica.options.rt.fg.queueParallelism", Page.FRAME_GENERATION, "output.frameGeneration",
                 Tier.EXPERT, ChangeEffect.LIVE, "parallel queue");
+        public static final Control FG_PRESENTATION_POLICY = control("frameGeneration.presentationPolicy",
+                "caustica.options.rt.fg.presentationPolicy", Page.FRAME_GENERATION, "output.frameGeneration",
+                Tier.EXPERT, ChangeEffect.SWAPCHAIN_RECREATE, "mailbox", "present mode", "fifo");
+        public static final Control FG_PACING_TARGET = control("frameGeneration.pacingTargetStrategy",
+                "caustica.options.rt.fg.pacingTargetStrategy", Page.FRAME_GENERATION, "output.frameGeneration",
+                Tier.EXPERT, ChangeEffect.LIVE, "displayed target", "source target");
+        public static final Control FG_MULTIPLIER_POLICY = control("frameGeneration.multiplierPolicy",
+                "caustica.options.rt.fg.multiplierPolicy", Page.FRAME_GENERATION, "output.frameGeneration",
+                Tier.EXPERT, ChangeEffect.LIVE, "hysteresis", "latency aware");
+        public static final Control FG_MINIMUM_SOURCE_FPS = control("frameGeneration.minimumSourceFps",
+                "caustica.options.rt.fg.minimumSourceFps", Page.FRAME_GENERATION, "output.frameGeneration",
+                Tier.EXPERT, ChangeEffect.LIVE, "source fps floor");
         public static final Control FG_OUTPUT_TARGET = control("frameGeneration.outputTarget",
                 "caustica.options.rt.fg.outputTarget", Page.FRAME_GENERATION, "output.frameGeneration",
                 Tier.EXPERT, ChangeEffect.LIVE, "target fps");
@@ -320,7 +332,8 @@ public final class SettingsCatalog {
             DLSS_QUALITY, DLSS_PRESET, HDR_ENABLED, HDR_TONEMAPPER, HDR_PAPER_WHITE,
             HDR_PEAK, HDR_UI_BRIGHTNESS, SDR_TONEMAPPER, FG_MODE, FG_MULTIPLIER, FG_REFLEX, FG_VSYNC,
             EXPOSURE_MODE, MANUAL_EV, EXPOSURE_COMPENSATION, TORCH_INTENSITY, ENTITIES, PARTICLES,
-            WATER_WAVES, FIRST_PERSON_ENABLED, SHARC_ENABLED, FG_QUEUE, FG_OUTPUT_TARGET,
+            WATER_WAVES, FIRST_PERSON_ENABLED, SHARC_ENABLED, FG_QUEUE, FG_PRESENTATION_POLICY,
+            FG_PACING_TARGET, FG_MULTIPLIER_POLICY, FG_MINIMUM_SOURCE_FPS, FG_OUTPUT_TARGET,
             FG_UI_RECOMPOSITION, FG_FULLSCREEN_MENU, DLSS_PATH_GUIDE, DLSS_SUBPIXEL_DETAIL,
             TRANSPARENCY_TRANSPORT, PARTICLE_HISTORY, NRD_DENOISER, NRD_SH, NRD_UPSCALE_MODE,
             NRD_RENDER_SCALE, NRD_UPSCALE_FILTER, NRD_SHARPNESS, SUNLIGHT, MOONLIGHT, RIS_CANDIDATES,
