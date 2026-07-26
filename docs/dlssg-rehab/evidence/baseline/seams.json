@@ -1,0 +1,18 @@
+{
+  "minecraftLimiter": {
+    "ownerClass": "net.minecraft.client.Minecraft",
+    "ownerMethod": "renderFrame",
+    "descriptor": "(Z)V",
+    "invocationOwner": "com.mojang.blaze3d.platform.FramerateLimitTracker",
+    "invocationName": "getFramerateLimit",
+    "invocationDescriptor": "()I",
+    "mixinTechnique": "Redirect",
+    "evidence": "Frozen MinecraftMixin.java target; actual sleep owner requires mapped/runtime confirmation"
+  },
+  "eventPoll": {"ownerClass": "UNRESOLVED", "evidence": "No guessed descriptor"},
+  "inputAccumulatorDrain": {"ownerClass": "UNRESOLVED", "evidence": "No guessed descriptor"},
+  "cameraConsume": {"ownerClass": "UNRESOLVED", "evidence": "No guessed descriptor"},
+  "firstApplicationSubmit": {"ownerClass": "UNRESOLVED", "evidence": "Instrument proxy boundary first"},
+  "lastApplicationSubmit": {"ownerClass": "UNRESOLVED", "evidence": "Instrument proxy boundary first"},
+  "present": {"ownerClass": "native/streamline_bridge/streamline_bridge.cpp", "ownerMethod": "slbridge_vk_queue_present"}
+}

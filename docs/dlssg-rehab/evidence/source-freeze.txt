@@ -1,0 +1,9 @@
+42ca9b8ef5d9a9aa4d5fbd7f48479e4ab060b4ad
+UTC capture: 2026-07-25; local zone: America/Chicago
+branch: rehab/dlssg-streamline
+remote: https://github.com/PEQHUB/Caustica.git
+Streamline headers: 2.12.0 (C:\Users\Administrator\Documents\Caustica-deps\streamline-sdk\include)
+JDK: Temurin OpenJDK 25.0.1+8
+Vulkan SDK: C:\VulkanSDK\1.4.341.1
+Slang: C:\Users\Administrator\Documents\Caustica-deps\slang-2026.13\bin\slangc.exe
+Initial frozen worktree status: clean before implementation
