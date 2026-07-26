@@ -100,8 +100,6 @@ static SharcRWPtr<uint> sharcStats;
 [[vk::binding(9, 0)]] [format("r16f")]    RWTexture2D<float>  gPrimarySkyMask; // primary sky miss classification
 [[vk::binding(10, 0)]] [format("r16f")] RWTexture2D<float> gAnimatedGuide; // animated-surface / particle temporal responsivity
 [[vk::binding(13, 0)]] [format("rgba16f")] RWTexture2D<float4> gDiffuseRayDirectionHitDistance;
-[[vk::binding(20, 0)]] [format("rgba16f")] RWTexture2D<float4> gColorBeforeTransparency;
-[[vk::binding(21, 0)]] [format("rgba16f")] RWTexture2D<float4> gTransparencyLayer;
 #if CAUSTICA_NRD
 [[vk::binding(14, 0)]] [format("rgba16f")] RWTexture2D<float4> gNrdSh1;
 [[vk::binding(15, 0)]] [format("r32f")] RWTexture2D<float> gNrdViewZ;
@@ -307,8 +305,6 @@ static const uint OPTICAL_GUIDE_FAILURE_BUDGET = 2u;
 static const uint OPTICAL_GUIDE_FAILURE_UNSUPPORTED = 3u;
 static uint gv_opticalGuideFailure;
 static float gv_animatedGuide;
-static float3 gv_portalLayerColor;
-static float gv_portalLayerOpacity;
 // Optional DLSSD B-mode guide: normalized world-space direction of the first diffuse continuation
 // and the world-space distance to its first hit. Zero means that the primary path chose no diffuse ray.
 static float4 gv_diffuseRayDirectionHitDistance;
@@ -384,6 +380,18 @@ static const float INV_PI = 0.31830988618;
 // unscaled scene-linear transport; neither reconstruction path owns an exposure transform.
 static const float EMISSIVE_BASE_RADIANCE = 0.1953125; // 200 * 2^-10 scene radiance
 static const float EMISSIVE_MAX_MULTIPLIER = 10.0; // torch-family peak: 2000 cd/m^2 at control 1
+
+// This branch still carries normalized material emission and applies its
+// calibrated scene-radiance scale in raygen. Keep that normalization isolated
+// here so the later upstream port can use upstream's already-full-HDR payload
+// emission without touching portal ownership or transport.
+float3 netherPortalEmissionRadiance(
+        float3 textureColor,
+        float normalizedEmission) {
+    return textureColor
+            * max(normalizedEmission, 0.0)
+            * EMISSIVE_BASE_RADIANCE;
+}
 // Terrain instances are continuously rebased around the player, so trace coordinates stay within a few
 // hundred blocks even at enormous world positions. A fixed four-ULP-or-better displacement at that bound
 // is both robust and smaller than voxel feature gaps; the generic bit-offset recipe would grow to ~0.016
@@ -2048,64 +2056,70 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread,
             break;
         }
 
-        // Vanilla Nether portal presentation is deterministic source-over, not a dielectric or a
-        // stochastic translucent material. The effective entering face composites once; the paired
-        // exit face is transport-only. A primary ray beginning inside still composites its first face.
+        // Nether portal: terminal atlas-authored emission.
+        //
+        // There is deliberately no source-over scene layer here. A camera,
+        // reflection, or indirect ray that reaches the portal sees emitted
+        // portal radiance and terminates at the portal plane.
         if (payloadNetherPortal()) {
 #if CAUSTICA_SHARC_QUERY
             sharcPathEligible = false;
 #endif
-            bool effectiveFace = payloadInterfaceEntering() || segment == 0;
-            if (effectiveFace) {
-                float alpha = clamp(payloadSss(), 0.0, 1.0);
-#if !CAUSTICA_OFFLINE
-                bool gatePortalEmitter = risOn && payloadEmitterInList();
-#else
-                bool gatePortalEmitter = false;
-#endif
-                if (!gatePortalEmitter || showCelestial) {
-                    float3 contribution = throughput * payload.albedo * alpha;
-                    L += contribution;
-#if CAUSTICA_NRD
-                    addNrdContribution(
-                            contribution,
-                            scatteringDepth == 0 ? 0 : nrdPrimaryLobe,
-                            nrdDiffuseRadiance,
-                            nrdSpecularRadiance
-                    );
-#endif
-                }
-                throughput *= 1.0 - alpha;
+            float emission = max(payloadEmission(), 0.0);
+            float3 portalRadiance = netherPortalEmissionRadiance(
+                    payload.albedo,
+                    emission
+            );
 
-                if (captureGuides && segment == 0) {
-                    gv_normal = n;
-                    gv_geometricNormal = geometricNormal;
-                    gv_albedo = float3(0.0);
-                    gv_specAlb = float3(0.0);
-                    gv_rough = 1.0;
-                    gv_hitCamRel = hitPos - pc.camOffset;
-                    gv_motionHitCamRel = gv_hitCamRel;
-                    gv_motionUseRefracted = false;
-                    gv_motionObjDisp = payload.motionPrev;
-                    gv_animatedGuide = 1.0;
-                    gv_portalLayerColor = payload.albedo;
-                    gv_portalLayerOpacity = alpha;
-                }
+            if (captureGuides && segment == 0) {
+                gv_normal = n;
+                gv_geometricNormal = geometricNormal;
+
+                // This is emitted radiance, not reflected diffuse material.
+                // Depth and motion belong exclusively to the portal plane.
+                gv_albedo = float3(0.0);
+                gv_specAlb = float3(0.0);
+                gv_rough = 1.0;
+                gv_hitCamRel = hitPos - pc.camOffset;
+                gv_motionHitCamRel = gv_hitCamRel;
+                gv_motionUseRefracted = false;
+                gv_motionObjDisp = payload.motionPrev;
+
+                // The plane is static, but the atlas frame changes. Force
+                // current animated texels without dilating the portal mask
+                // into the neighbouring obsidian.
+                gv_animatedGuide = 1.0;
             }
-#if CAUSTICA_SHARC_UPDATE
-            SharcUpdateMiss(sharcParameters, sharcState, float3(0.0));
-            sharcStatAdd(SHARC_STAT_UPDATE_MISSES, 1u);
-            break;
+
+            if (!primaryOnly && emission > 0.0) {
+                float3 contribution = throughput * portalRadiance;
+                L += contribution;
+#if CAUSTICA_NRD
+                addNrdContribution(
+                        contribution,
+                        scatteringDepth == 0 ? 0 : nrdPrimaryLobe,
+                        nrdDiffuseRadiance,
+                        nrdSpecularRadiance
+                );
 #endif
-            if (primaryOnly || max(throughput.r, max(throughput.g, throughput.b)) <= 1.0e-5) {
-                break;
             }
-            if (opticalInterfaceDepth >= MAX_OPTICAL_INTERFACE_DEPTH) {
-                break;
-            }
-            ++opticalInterfaceDepth;
-            ro = hitPos + rd * GLASS_TRANSMIT_BIAS;
-            continue;
+
+#if CAUSTICA_SHARC_UPDATE
+            // Do not store the moving texture pattern as stable directional
+            // cache data. Ordinary live path hits still see the emission.
+            SharcUpdateMiss(
+                    sharcParameters,
+                    sharcState,
+                    float3(0.0)
+            );
+            sharcStatAdd(SHARC_STAT_UPDATE_MISSES, 1u);
+#endif
+
+            // Critical ownership rule:
+            //   no throughput preservation,
+            //   no origin advancement,
+            //   no continuation to the paired portal face.
+            break;
         }
 
         bool translucentSurface = material == MATERIAL_GLASS
@@ -3375,8 +3389,6 @@ void main() {
     gv_opticalGuideFailure = OPTICAL_GUIDE_FAILURE_NONE;
     gv_opticalGuideTransmissionFilter = float3(1.0, 1.0, 1.0);
     gv_animatedGuide = 0.0;
-    gv_portalLayerColor = float3(0.0);
-    gv_portalLayerOpacity = 0.0;
     gv_primarySky = false;
     gv_diffuseRayDirectionHitDistance = float4(0.0, 0.0, 0.0, 0.0);
     gv_diffuseGuidePending = false;
@@ -3748,19 +3760,6 @@ void main() {
         gNrdViewDirection[pix] = float4(normalize(-gv_hitCamRel), specSurfaceRoughness);
     }
 #endif
-    if (writeRrGuides) {
-        float opacity = clamp(gv_portalLayerOpacity, 0.0, 1.0);
-        float transmission = 1.0 - opacity;
-        float3 premultipliedPortal = gv_portalLayerColor * opacity;
-        float3 colorBefore = transmission > 1.0e-4
-                ? max((frameRadiance - premultipliedPortal) / transmission, float3(0.0))
-                : float3(0.0);
-        gColorBeforeTransparency[pix] = float4(
-                opacity > 0.0 ? colorBefore : frameRadiance, 1.0);
-        // Streamline's single-texture transparency-overlay contract is premultiplied RGBA.
-        // Zero alpha outside the portal is essential: alpha=1 with zero RGB is an opaque black layer.
-        gTransparencyLayer[pix] = float4(premultipliedPortal, opacity);
-    }
     outImage[pix] = float4(frameRadiance, 1.0);
 #endif // CAUSTICA_OFFLINE
 #endif

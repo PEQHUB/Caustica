@@ -42,7 +42,6 @@ final class RtLightCollector {
 
     /** {@code TerrainPrim.flags} bit 2: this emissive quad is in the light buffer (NEE membership). */
     static final int PRIM_FLAG_IN_LIGHT_BUFFER = 1 << 2;
-    static final int PRIM_FLAG_NETHER_PORTAL = 1 << 3;
 
     /** Block-light levels below this are non-emissive (smallest real level is 1/15). */
     private static final float EMISSION_EPS = 0.5f / 255f;
@@ -205,11 +204,7 @@ final class RtLightCollector {
             // is the material's final HDR strength (EMISSIVE_STRENGTH baseline * any JSON multiplier,
             // baked in RtMaterialRegistry) — the single knob shared with world.rchit's direct-hit shading.
             float tintR = p[pb + 4], tintG = p[pb + 5], tintB = p[pb + 6];
-            int primitiveFlags = Float.floatToRawIntBits(p[pb + PRIM_FLAGS_LANE]);
-            boolean netherPortal = (primitiveFlags & PRIM_FLAG_NETHER_PORTAL) != 0;
-            float radianceStrength = netherPortal ? 1.0f : desc.emissionStrength();
-            float vertexAlpha = netherPortal ? Math.max(0.0f, Math.min(1.0f, p[pb + 7])) : 1.0f;
-            float scale = factor * radianceStrength * vertexAlpha / rectSamples;
+            float scale = factor * desc.emissionStrength() / rectSamples;
             float leR = sumR * scale * tintR;
             float leG = sumG * scale * tintG;
             float leB = sumB * scale * tintB;

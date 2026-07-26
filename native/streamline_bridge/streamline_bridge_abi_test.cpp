@@ -112,17 +112,24 @@ int main() {
     assert(slbridge::detail::isSupportedDlssdResourceCount(15));
     assert(!slbridge::detail::isSupportedDlssdResourceCount(9));
     assert(!slbridge::detail::isSupportedDlssdResourceCount(16));
+    assert(!slbridge::detail::dlssdResourceCountRequiresDiffusePath(10));
+    assert(slbridge::detail::dlssdResourceCountRequiresDiffusePath(11));
+    assert(!slbridge::detail::dlssdResourceCountRequiresDiffusePath(13));
+    assert(slbridge::detail::dlssdResourceCountRequiresDiffusePath(14));
+    assert(!slbridge::detail::dlssdResourceCountRequiresTransparencyLayer(10));
+    assert(!slbridge::detail::dlssdResourceCountRequiresTransparencyLayer(11));
+    assert(slbridge::detail::dlssdResourceCountRequiresTransparencyLayer(13));
+    assert(slbridge::detail::dlssdResourceCountRequiresTransparencyLayer(14));
     assert(slbridge::detail::hasExpectedDlssdOptionalResources(10, false, false, false, false, false));
     assert(slbridge::detail::hasExpectedDlssdOptionalResources(11, false, true, false, false, false));
     assert(slbridge::detail::hasExpectedDlssdOptionalResources(11, true, false, false, false, false));
     assert(slbridge::detail::hasExpectedDlssdOptionalResources(12, true, true, false, false, false));
-    assert(slbridge::detail::hasExpectedDlssdOptionalResources(11, false, false, false, true, false));
-    assert(slbridge::detail::hasExpectedDlssdOptionalResources(12, false, false, true, true, false));
     assert(slbridge::detail::hasExpectedDlssdOptionalResources(13, false, false, true, true, true));
     assert(slbridge::detail::hasExpectedDlssdOptionalResources(15, true, true, true, true, true));
     assert(!slbridge::detail::hasExpectedDlssdOptionalResources(10, true, false, false, false, false));
+    assert(!slbridge::detail::hasExpectedDlssdOptionalResources(13, false, false, true, true, false));
     assert(!slbridge::detail::hasExpectedDlssdOptionalResources(13, false, false, true, false, true));
-    assert(!slbridge::detail::hasExpectedDlssdOptionalResources(11, false, false, false, false, true));
+    assert(!slbridge::detail::hasExpectedDlssdOptionalResources(13, false, false, false, true, true));
 
     sl::Resource resource{};
     sl::Extent extent{0u, 0u, 3840u, 2160u};

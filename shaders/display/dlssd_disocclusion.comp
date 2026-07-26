@@ -29,12 +29,6 @@ bool finiteValue(float value) {
     return !isnan(value) && !isinf(value);
 }
 
-float animatedAt(ivec2 pixel) {
-    if (pixel.x < 0 || pixel.y < 0 || pixel.x >= int(pc.width) || pixel.y >= int(pc.height)) return 0.0;
-    float guide = imageLoad(animatedGuideImage, pixel).x;
-    return finiteValue(guide) ? clamp(guide, 0.0, 1.0) : 1.0;
-}
-
 #if CAUSTICA_PARTICLE_TEMPORAL_HISTORY
 float particleAt(ivec2 pixel) {
     if (pixel.x < 0 || pixel.y < 0 || pixel.x >= int(pc.width) || pixel.y >= int(pc.height)) return 0.0;
@@ -89,17 +83,6 @@ void main() {
     float rawGuide = imageLoad(animatedGuideImage, pixel).x;
     if (!finiteValue(rawGuide)) rawGuide = 1.0;
     float animated = clamp(rawGuide, 0.0, 1.0);
-    float portalSilhouette = animated >= 0.999 ? 1.0 : 0.0;
-    for (int y = -1; y <= 1 && portalSilhouette < 1.0; y++) {
-        for (int x = -1; x <= 1; x++) {
-            portalSilhouette = max(portalSilhouette,
-                    animatedAt(pixel + ivec2(x, y)) >= 0.999 ? 1.0 : 0.0);
-        }
-    }
-    // A source-over portal mixes two independently moving surfaces into one color. Until the
-    // layered-transparency resources carry those signals separately, reject history for the portal
-    // and its one-pixel silhouette so the depth neighborhood cannot import bright portal history.
-    disocclusion = max(disocclusion, portalSilhouette);
 #if CAUSTICA_PARTICLE_TEMPORAL_HISTORY
     float particle = rawGuide >= 1.5 ? 1.0 : 0.0;
     imageStore(currentTemporalGuideHistory, pixel, vec4(particle));

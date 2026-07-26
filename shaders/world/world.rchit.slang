@@ -135,6 +135,39 @@ float4 materialAlbedoBounds(MaterialHeader header) {
     return float4(header.albedoUv.xy, header.albedoUv.xy + extent);
 }
 
+// Clamp a filtered atlas lookup far enough inside the sprite rectangle for
+// both mip levels participating in a trilinear lookup. The portal must never
+// sample an adjacent block-atlas sprite at its obsidian boundary.
+float2 clampAtlasUvForLod(
+        Sampler2D textureSampler,
+        float2 uv,
+        float lod,
+        float4 uvBounds) {
+    uint width;
+    uint height;
+    uint levelCount;
+    textureSampler.GetDimensions(0u, width, height, levelCount);
+
+    float maxLevel = float(max(levelCount, 1u) - 1u);
+    uint clampLevel = uint(ceil(clamp(lod, 0.0, maxLevel)));
+
+    uint levelWidth;
+    uint levelHeight;
+    uint ignoredLevelCount;
+    textureSampler.GetDimensions(
+            clampLevel,
+            levelWidth,
+            levelHeight,
+            ignoredLevelCount
+    );
+
+    return clampTexelCenterToBounds(
+            uv,
+            float2(max(levelWidth, 1u), max(levelHeight, 1u)),
+            uvBounds
+    );
+}
+
 // LabPBR _n decode (shared): rotate the tangent-space normal into world space via a TBN built from the
 // hit triangle's vertex positions (VK_KHR_ray_tracing_position_fetch) + UVs. `n` must already be
 // oriented toward the viewer (`vdir`). Clamps the result above the horizon so grazing perturbations
@@ -577,27 +610,77 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
     }
     float3 geometricNormal = n;
 
-    // Nether portals are vanilla alpha-blended presentation surfaces. They retain their real
-    // translucent-bucket geometry and animated atlas sample, but never enter the dielectric path.
+    // Nether portal: a closed, animated, texture-authored emissive curtain.
+    //
+    // It intentionally remains in the translucent geometry bucket because
+    // that is Minecraft's real model/render-layer ownership. It is not a
+    // dielectric and does not expose the scene behind it. Texture alpha is a
+    // linear emitted-energy mask over a closed surface, never transmission.
     if ((pr.flags & TERRAIN_PRIM_NETHER_PORTAL) != 0u) {
-        float4 portalTexel = blockAlbedoAtlas.SampleLevel(uv, blockLod);
-        float3 portal709 = srgbToLinear(portalTexel.rgb) * srgbToLinear(tint);
+        float4 portalBounds = materialAlbedoBounds(materialHeader);
+        float2 portalUv = clampAtlasUvForLod(
+                blockAlbedoAtlas,
+                uv,
+                blockLod,
+                portalBounds
+        );
+
+        float4 portalTexel =
+                blockAlbedoAtlas.SampleLevel(portalUv, blockLod);
+
+        // Decode the atlas and authored vertex tint independently from sRGB.
+        // Multiplication happens in linear BT.709 before the existing Caustica
+        // conversion into its linear BT.2020 transport basis.
+        float3 portal709 = sampleSrgbLinearTrilinear(
+                blockAlbedoAtlas,
+                portalUv,
+                blockLod,
+                portalBounds,
+                true,
+                highQuality
+        ) * srgbToLinear(tint);
+
+        float alpha = clamp(
+                portalTexel.a * pr.tint.a,
+                0.0,
+                1.0
+        );
+
+        // normal.w carries normalized state emission plus the +2 non-solid
+        // marker. RtTerrainMesher explicitly assigns portals fullbright 1.0.
+        float encodedEmission = pr.normal.w;
+        float stateEmission = encodedEmission >= 1.5
+                ? encodedEmission - 2.0
+                : encodedEmission;
+
+        // Alpha changes luminance only. It cannot introduce a replacement hue
+        // and it cannot reveal a second surface.
+        float portalEmission = clamp(
+                stateEmission * alpha,
+                0.0,
+                1.0
+        );
+
         payload.albedo = bt709ToBt2020(portal709);
         payload.normal = n;
         payload.geometricNormal = geometricNormal;
         payload.hitT = RayTCurrent();
         payload.motionPrev = float3(0.0);
         payload.f0 = float3(0.0);
-        float alpha = clamp(portalTexel.a * pr.tint.a, 0.0, 1.0);
-        payloadSetPacked(payload, MATERIAL_OPAQUE, 1.0, 0.0, 0.0,
-                alpha, 1.0, 0.0, EMISSION_SOURCE_NONE);
+
+        payloadSetPacked(
+                payload,
+                MATERIAL_OPAQUE,
+                1.0,
+                0.0,
+                portalEmission,
+                0.0,
+                1.0,
+                0.0,
+                EMISSION_SOURCE_UNIFORM
+        );
+
         payload.flags |= PAYLOAD_NETHER_PORTAL;
-        if (entering) {
-            payload.flags |= PAYLOAD_INTERFACE_ENTERING;
-        }
-        if ((pr.flags & TERRAIN_PRIM_IN_LIGHT_BUFFER) != 0u) {
-            payload.flags |= PAYLOAD_EMITTER_IN_LIST;
-        }
         return;
     }
 

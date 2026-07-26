@@ -142,11 +142,6 @@ final class RtTerrainMesher {
             collectLights(collected, mesh.opaque, materials, minFill);
             collectLights(collected, mesh.cutout, materials, minFill);
 
-            // Ordinary glass has no emission and is ignored by RtLightCollector. This adds
-            // emissive translucent surfaces such as Nether portals without turning every
-            // translucent quad into a light.
-            collectLights(collected, mesh.translucent, materials, minFill);
-
             if (!collected.isEmpty()) {
                 lights = collected.toFloatArray();
             }
@@ -534,7 +529,13 @@ final class RtTerrainMesher {
             }
             q.tr = tr; q.tg = tg; q.tb = tb; q.ta = sa / 1020f;
 
-            q.emission = quad.emissive() ? 1f : (state != null ? state.getLightEmission() / 15f : 0f);
+            q.emission = isNetherPortal(state)
+                    ? 1.0f
+                    : (quad.emissive()
+                            ? 1.0f
+                            : (state != null
+                                    ? state.getLightEmission() / 15.0f
+                                    : 0.0f));
             q.torch = state != null && state.getBlock() instanceof BaseTorchBlock;
             TextureAtlasSprite sprite = spriteFinder.find(quad);
             q.sprite = sprite;

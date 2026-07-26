@@ -5,7 +5,7 @@ import world_common;
 
 // Set 0 bindings 3..19 are the superset of reconstruction guide images. Keep the shared miss ABI
 // above that range for every raygen variant so enabling NRD never changes where miss shaders read the sky.
-[[vk::binding(24, 0)]] [format("rgba32f")] RWTexture2D<float4> skyViewLut;
+[[vk::binding(21, 0)]] [format("rgba32f")] RWTexture2D<float4> skyViewLut;
 
 static const float SKY_VIEW_PI = 3.14159265359;
 public static const float3 SKY_AIRGLOW_ZENITH = float3(0.00000060, 0.00000078, 0.00000120);
