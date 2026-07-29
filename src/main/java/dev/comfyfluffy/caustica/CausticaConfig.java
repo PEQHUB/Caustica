@@ -59,7 +59,8 @@ public final class CausticaConfig {
         Object[] touch = {
             Rt.ENABLED, Rt.Composite.SPP, Rt.Composite.MAX_BOUNCES, Rt.Terrain.ASYNC_DISPATCH_PER_PASS, Rt.Omm.ENABLED,
             Rt.Entities.ENABLED, Rt.Entities.GLOW_ENABLED, Rt.EntityTextures.MAX_TEXTURES, Rt.DlssRr.ENABLED, Rt.Fg.ENABLED,
-            Rt.Reflex.ENABLED, Rt.Exposure.MODE, Rt.FrameStats.ENABLED,
+            Rt.Reflex.ENABLED, Rt.Exposure.MODE, Rt.Exposure.LOW_PERCENTILE, Rt.Exposure.HIGH_PERCENTILE,
+            Rt.FrameStats.ENABLED,
             Rt.Sdr.TONE_MAPPER,
             Rt.Hdr.ENABLED, Rt.Hdr.TONE_MAPPER, Ngx.PATH,
         };
@@ -712,6 +713,10 @@ public final class CausticaConfig {
                     exposureScale("caustica.rt.exposure.adaptUp", "exposure.adapt-up", 0.12f);
             public static final FloatSetting ADAPT_DOWN =
                     exposureScale("caustica.rt.exposure.adaptDown", "exposure.adapt-down", 0.35f);
+            public static final FloatSetting LOW_PERCENTILE =
+                    percentile("caustica.rt.exposure.lowPercentile", "exposure.low-percentile", 0.50f);
+            public static final FloatSetting HIGH_PERCENTILE =
+                    percentile("caustica.rt.exposure.highPercentile", "exposure.high-percentile", 0.95f);
 
             private Exposure() {
             }
@@ -871,6 +876,10 @@ public final class CausticaConfig {
 
     private static FloatSetting exposureScale(String key, String tomlPath, float fallback) {
         return new FloatSetting(key, tomlPath, fallback, v -> v, v -> v, v -> Math.clamp(v, 1.0e-4, 1.0e4));
+    }
+
+    private static FloatSetting percentile(String key, String tomlPath, float fallback) {
+        return new FloatSetting(key, tomlPath, fallback, v -> v, v -> v, v -> Math.clamp(v, 0.0, 1.0));
     }
 
     private static FloatSetting clampedFloat(String key, String tomlPath, float fallback, float min, float max) {

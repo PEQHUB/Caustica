@@ -20,6 +20,8 @@ layout(push_constant) uniform Push {
     float adaptDown;
     float frameTimeSeconds;
     float evBias;
+    float lowPercentile;
+    float highPercentile;
 } pc;
 
 const float LOG_MIN = -12.0;
@@ -32,8 +34,9 @@ float binCenter(uint bin) {
 
 void main() {
     uint total = max(pc.pixelCount, 1u);
-    uint lowCount = uint(floor(float(total) * 0.50));
-    uint highCount = max(lowCount + 1u, uint(ceil(float(total) * 0.95)));
+    uint lowCount = uint(floor(float(total) * clamp(pc.lowPercentile, 0.0, 1.0)));
+    uint highCount = max(lowCount + 1u, uint(ceil(float(total) * clamp(pc.highPercentile, 0.0, 1.0))));
+    highCount = clamp(highCount, lowCount + 1u, total);
 
     uint cumulative = 0u;
     float weightedLogLum = 0.0;

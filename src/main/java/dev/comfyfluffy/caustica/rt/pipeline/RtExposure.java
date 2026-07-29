@@ -22,6 +22,7 @@ public final class RtExposure {
     private RtExposurePipeline pipeline;
     private boolean logged;
     private long lastFrameNanos;
+    private Mode previousMode;
 
     public RtImage image() {
         return image;
@@ -56,7 +57,12 @@ public final class RtExposure {
         if (image == null) {
             throw new IllegalStateException("RT exposure image not created");
         }
-        if (mode() == Mode.AUTO) {
+        Mode currentMode = mode();
+        if (previousMode != null && previousMode != currentMode && currentMode == Mode.AUTO) {
+            resetAutoHistory();
+        }
+        previousMode = currentMode;
+        if (currentMode == Mode.AUTO) {
             recordAuto(ctx, cmd, stack, traceColor);
             return;
         }
@@ -137,9 +143,10 @@ public final class RtExposure {
         String exposureText = mode == Mode.AUTO
                 ? "auto(key=" + autoConfig.key + ", minEv=" + autoConfig.minEv + ", maxEv=" + autoConfig.maxEv
                 + ", adaptUp=" + autoConfig.adaptUp + ", adaptDown=" + autoConfig.adaptDown
-                + ", evBias=" + autoConfig.evBias + ")"
+                + ", evBias=" + autoConfig.evBias
+                + ", lowPercentile=" + autoConfig.lowPercentile + ", highPercentile=" + autoConfig.highPercentile + ")"
                 : Float.toString(manualExposureScale());
-        CausticaMod.LOGGER.info("RT display exposure: mode={}, exposure={}, tonemap=agx, DLSS-RR exposure=NGX auto",
+        CausticaMod.LOGGER.info("RT display exposure: mode={}, exposure={}",
                 mode.configName, exposureText);
     }
 
@@ -151,17 +158,37 @@ public final class RtExposure {
         return CausticaConfig.Rt.Exposure.MANUAL_EV.value();
     }
 
+    private static float sanitizePercentile(float value, float fallback) {
+        if (!Double.isFinite(value)) {
+            return fallback;
+        }
+        return (float) Math.clamp(value, 0.0, 1.0);
+    }
+
     private static AutoConfig autoConfig() {
+        float low = sanitizePercentile(CausticaConfig.Rt.Exposure.LOW_PERCENTILE.value(), 0.50f);
+        float high = sanitizePercentile(CausticaConfig.Rt.Exposure.HIGH_PERCENTILE.value(), 0.95f);
+        if (high < low) {
+            float tmp = low;
+            low = high;
+            high = tmp;
+        }
+        if (high <= low) {
+            high = Math.min(low + 1.0f, 1.0f);
+        }
         return new AutoConfig(
                 CausticaConfig.Rt.Exposure.KEY.value(),
                 CausticaConfig.Rt.Exposure.minEv(),
                 CausticaConfig.Rt.Exposure.maxEv(),
                 CausticaConfig.Rt.Exposure.ADAPT_UP.value(),
                 CausticaConfig.Rt.Exposure.ADAPT_DOWN.value(),
-                manualEv());
+                manualEv(),
+                low,
+                high);
     }
 
-    record AutoConfig(float key, float minEv, float maxEv, float adaptUp, float adaptDown, float evBias) {
+    record AutoConfig(float key, float minEv, float maxEv, float adaptUp, float adaptDown, float evBias,
+                      float lowPercentile, float highPercentile) {
     }
 
     private enum Mode {
