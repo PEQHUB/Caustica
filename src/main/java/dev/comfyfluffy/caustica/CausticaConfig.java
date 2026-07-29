@@ -10,6 +10,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.function.DoubleUnaryOperator;
 import java.util.function.IntUnaryOperator;
 import java.util.function.UnaryOperator;
+import dev.comfyfluffy.caustica.rt.pipeline.RtToneMapping;
 import net.fabricmc.loader.api.FabricLoader;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -59,7 +60,8 @@ public final class CausticaConfig {
             Rt.ENABLED, Rt.Composite.SPP, Rt.Composite.MAX_BOUNCES, Rt.Terrain.ASYNC_DISPATCH_PER_PASS, Rt.Omm.ENABLED,
             Rt.Entities.ENABLED, Rt.Entities.GLOW_ENABLED, Rt.EntityTextures.MAX_TEXTURES, Rt.DlssRr.ENABLED, Rt.Fg.ENABLED,
             Rt.Reflex.ENABLED, Rt.Exposure.MODE, Rt.FrameStats.ENABLED,
-            Rt.Hdr.ENABLED, Ngx.PATH,
+            Rt.Sdr.TONE_MAPPER,
+            Rt.Hdr.ENABLED, Rt.Hdr.TONE_MAPPER, Ngx.PATH,
         };
     }
 
@@ -108,6 +110,10 @@ public final class CausticaConfig {
                 " HDR display output (ST.2084/PQ). When enabled the swapchain is created in PQ automatically\n"
                         + " (falls back to SDR if the surface doesn't advertise it). paper-white-nits / peak-nits\n"
                         + " drive the scene-HDR -> display mapping.");
+        FILE.setComment("sdr",
+                " SDR display tone mapping. tone-mapper selects the fixed reference operator applied to\n"
+                        + " exposed scene-linear BT.709 radiance: agx, pbr-neutral, reinhard, aces, lottes,\n"
+                        + " frostbite, uncharted2, gt, psychov11, psychov23, psychov24-experimental.");
     }
 
     private static Path resolveConfigPath() {
@@ -757,6 +763,25 @@ public final class CausticaConfig {
         }
 
         /**
+         * SDR display tone mapping. Selects the fixed reference operator applied to the exposed scene-linear
+         * BT.709 radiance before it is written to the main target. AgX is the default; other modes are
+         * pbr-neutral, reinhard, aces, lottes, frostbite, uncharted2, gt, psychov11, psychov23, and the
+         * experimental psychov24.
+         */
+        public static final class Sdr {
+            public static final StringSetting TONE_MAPPER =
+                    string("caustica.rt.sdr.toneMapper", "sdr.tone-mapper", "agx",
+                            Sdr::sanitizeToneMapper);
+
+            private Sdr() {
+            }
+
+            private static String sanitizeToneMapper(String value) {
+                return RtToneMapping.SdrMode.parse(value).canonicalName();
+            }
+        }
+
+        /**
          * HDR display output. When enabled the swapchain is created in PQ (ST.2084/HDR10 — the display-ready
          * encoding both HDR10 swapchains and DLSS Frame Generation require; whatever pixel format the surface
          * pairs with that color space, commonly a 10-bit UNORM), falling back to SDR if the surface doesn't
@@ -767,8 +792,11 @@ public final class CausticaConfig {
             public static final BooleanSetting ENABLED = bool("caustica.rt.hdr", "hdr.enabled", false);
             public static final FloatSetting PAPER_WHITE_NITS =
                     clampedFloat("caustica.rt.hdr.paperWhiteNits", "hdr.paper-white-nits", 200.0f, 80.0f, 500.0f);
-            public static final FloatSetting PEAK_NITS =
-                    clampedFloat("caustica.rt.hdr.peakNits", "hdr.peak-nits", 1000.0f, 80.0f, 5000.0f);
+             public static final FloatSetting PEAK_NITS =
+                     clampedFloat("caustica.rt.hdr.peakNits", "hdr.peak-nits", 1000.0f, 80.0f, 5000.0f);
+             public static final StringSetting TONE_MAPPER =
+                     string("caustica.rt.hdr.toneMapper", "hdr.tone-mapper", "caustica",
+                             Hdr::sanitizeToneMapper);
 
             // Snapshot of ENABLED as resolved at startup (system property / config file), before any
             // in-session edit from the options screen. The swapchain's pixel format (PQ vs SDR) is fixed
@@ -778,6 +806,10 @@ public final class CausticaConfig {
             private static final boolean ENABLED_AT_STARTUP = ENABLED.value();
 
             private Hdr() {
+            }
+
+            private static String sanitizeToneMapper(String value) {
+                return RtToneMapping.HdrMode.parse(value).canonicalName();
             }
 
             /** Whether the HDR display path (world HDR + PQ swapchain + UI overlay) is active this session. */

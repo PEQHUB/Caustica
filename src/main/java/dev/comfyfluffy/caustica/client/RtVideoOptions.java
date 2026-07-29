@@ -6,6 +6,7 @@ import dev.comfyfluffy.caustica.CausticaConfig.BooleanSetting;
 import dev.comfyfluffy.caustica.CausticaConfig.FloatSetting;
 import dev.comfyfluffy.caustica.CausticaConfig.IntSetting;
 import dev.comfyfluffy.caustica.CausticaConfig.StringSetting;
+import dev.comfyfluffy.caustica.rt.pipeline.RtToneMapping;
 import java.util.List;
 import java.util.Locale;
 import net.minecraft.client.OptionInstance;
@@ -34,6 +35,8 @@ public final class RtVideoOptions {
         return new OptionInstance<?>[] {
             exposureMode(),
             manualEv(),
+            sdrToneMapper(),
+            hdrToneMapper(),
             spp(),
             maxBounces(),
             sunSize(),
@@ -75,6 +78,37 @@ public final class RtVideoOptions {
             new OptionInstance.IntRange(-50, 50),
             Math.clamp(Math.round(setting.value() * 10.0f), -50, 50),
             tenths -> setting.set(tenths / 10.0f));
+    }
+
+    private static OptionInstance<String> sdrToneMapper() {
+        return toneMapper(
+                "caustica.options.rt.sdrToneMapper",
+                RtToneMapping.sdrConfigNames(),
+                CausticaConfig.Rt.Sdr.TONE_MAPPER);
+    }
+
+    private static OptionInstance<String> hdrToneMapper() {
+        return toneMapper(
+                "caustica.options.rt.hdrToneMapper",
+                RtToneMapping.hdrConfigNames(),
+                CausticaConfig.Rt.Hdr.TONE_MAPPER);
+    }
+
+    private static OptionInstance<String> toneMapper(
+            String captionKey,
+            List<String> values,
+            StringSetting setting) {
+        return new OptionInstance<>(
+                captionKey,
+                OptionInstance.cachedConstantTooltip(
+                        Component.translatable(captionKey + ".tooltip")),
+                // CycleButton (used for Enum values) already prepends "caption: " itself (DisplayState.
+                // NAME_AND_VALUE), so this must return only the value's text, not caption + value again.
+                (caption, value) -> Component.translatable(
+                        "caustica.options.rt.toneMapper." + value),
+                new OptionInstance.Enum<>(values, Codec.STRING),
+                setting.get(),
+                setting::set);
     }
 
     private static OptionInstance<Integer> spp() {

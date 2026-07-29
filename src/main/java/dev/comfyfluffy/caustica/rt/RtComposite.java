@@ -62,6 +62,7 @@ import dev.comfyfluffy.caustica.rt.pipeline.RtHdrCompositePipeline;
 import dev.comfyfluffy.caustica.rt.pipeline.RtSdrPresentPipeline;
 import dev.comfyfluffy.caustica.rt.pipeline.RtExposure;
 import dev.comfyfluffy.caustica.rt.pipeline.RtPipeline;
+import dev.comfyfluffy.caustica.rt.pipeline.RtToneMapping;
 import dev.comfyfluffy.caustica.rt.terrain.RtTerrain;
 
 import java.nio.ByteBuffer;
@@ -1003,10 +1004,9 @@ public final class RtComposite {
 
             try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "map RT to display");
                  RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.displayMap")) {
-                displayPipeline.dispatch(cmd, displayW, displayH, CausticaConfig.Rt.Hdr.enabled(),
-                        CausticaConfig.Rt.Hdr.paperWhiteNits(), CausticaConfig.Rt.Hdr.headroom());
+                displayPipeline.dispatch(cmd, displayW, displayH, RtToneMapping.current());
             }
-            hdrWrittenThisFrame = CausticaConfig.Rt.Hdr.enabled();
+            hdrWrittenThisFrame = RtToneMapping.current().hdrEnabled();
             VulkanCommandEncoder.memoryBarrier(cmd, stack);
 
             try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "copy composite to main target");

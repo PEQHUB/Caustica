@@ -9,6 +9,25 @@
 	"caustica.options.rt.manualEv": "Exposure EV",
 	"caustica.options.rt.manualEv.tooltip": "Exposure compensation in stops. In Manual, this is the fixed exposure. In Auto, this biases the auto exposure brighter or darker.",
 
+	"caustica.options.rt.sdrToneMapper": "SDR Tone Mapper",
+	"caustica.options.rt.sdrToneMapper.tooltip": "Selects the SDR display transform. Changes apply immediately.",
+	"caustica.options.rt.hdrToneMapper": "HDR Tone Mapper",
+	"caustica.options.rt.hdrToneMapper.tooltip": "Selects the HDR10/PQ display transform used while HDR Output is active. Changes apply immediately.",
+
+	"caustica.options.rt.toneMapper.agx": "AgX",
+	"caustica.options.rt.toneMapper.pbr-neutral": "PBR Neutral",
+	"caustica.options.rt.toneMapper.reinhard": "Reinhard",
+	"caustica.options.rt.toneMapper.aces": "ACES",
+	"caustica.options.rt.toneMapper.lottes": "Lottes",
+	"caustica.options.rt.toneMapper.frostbite": "Frostbite",
+	"caustica.options.rt.toneMapper.uncharted2": "Uncharted 2",
+	"caustica.options.rt.toneMapper.gt": "GT / Uchimura",
+	"caustica.options.rt.toneMapper.psychov11": "PsychoV11",
+	"caustica.options.rt.toneMapper.psychov23": "PsychoV23",
+	"caustica.options.rt.toneMapper.psychov24-experimental": "PsychoV24 (Experimental)",
+	"caustica.options.rt.toneMapper.caustica": "Caustica",
+	"caustica.options.rt.toneMapper.bt2390": "BT.2390",
+
 	"caustica.options.rt.spp": "Samples Per Pixel",
 	"caustica.options.rt.spp.tooltip": "Path-tracing samples taken per pixel each frame. Higher is cleaner but more demanding.",
 

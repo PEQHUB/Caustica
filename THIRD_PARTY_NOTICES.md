@@ -30,3 +30,31 @@ Bundled NVIDIA SDK runtime libraries may include files matching:
 
 Caustica's `ngxshim` native library is project-owned glue code and follows
 Caustica's project license unless otherwise noted.
+
+## PsychoV24 (RenoDX)
+
+The PsychoV24 tone mapping algorithm is adapted from the RenoDX project's
+`psycho_test24.hlsli` (commit `fc85b7b15585050442ba35412597ecefc9e04cea`).
+
+```
+Copyright (C) 2026 Carlos Lopez
+SPDX-License-Identifier: MIT
+```
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

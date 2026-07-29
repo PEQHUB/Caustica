@@ -31,8 +31,8 @@ import static dev.comfyfluffy.caustica.rt.RtContext.check;
 /** Compute pass that maps the display-res HDR RT image into an LDR image compatible with the main target. */
 public final class RtDisplayPipeline {
     private static final String SHADER_DIR = "/caustica/rt/";
-    /** Push constants: int hdrEnabled, float paperWhiteNits, float headroom. */
-    private static final int PUSH_BYTES = 3 * Integer.BYTES;
+    /** Push constants: int hdrEnabled, int sdrMode, int hdrMode, float paperWhiteNits, float headroom. */
+    private static final int PUSH_BYTES = 3 * Integer.BYTES + 2 * Float.BYTES;
 
     private final RtContext ctx;
     private final long descriptorSetLayout;
@@ -145,17 +145,19 @@ public final class RtDisplayPipeline {
     }
 
     /**
-     * Run the display mapping. The SDR AgX output is always written (binding 0). When {@code hdrEnabled}, the
-     * PQ-encoded HDR image (binding 3) is also written using the paper-white/headroom mapping.
+     * Run the display mapping. The SDR output is always written (binding 0). When {@code hdrEnabled}, the
+     * PQ-encoded HDR image (binding 3) is also written using the selected HDR mode.
      */
-    public void dispatch(VkCommandBuffer cmd, int width, int height, boolean hdrEnabled, float paperWhiteNits, float headroom) {
+    public void dispatch(VkCommandBuffer cmd, int width, int height, RtToneMapping.Settings settings) {
         try (MemoryStack stack = MemoryStack.stackPush(); RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "display compute")) {
             VK10.vkCmdBindPipeline(cmd, VK10.VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
             VK10.vkCmdBindDescriptorSets(cmd, VK10.VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayout, 0, stack.longs(descriptorSet), null);
             ByteBuffer push = stack.malloc(PUSH_BYTES);
-            push.putInt(0, hdrEnabled ? 1 : 0);
-            push.putFloat(4, paperWhiteNits);
-            push.putFloat(8, headroom);
+            push.putInt(0, settings.hdrEnabled() ? 1 : 0);
+            push.putInt(4, settings.sdrMode());
+            push.putInt(8, settings.hdrMode());
+            push.putFloat(12, settings.paperWhiteNits());
+            push.putFloat(16, settings.headroom());
             VK10.vkCmdPushConstants(cmd, pipelineLayout, VK10.VK_SHADER_STAGE_COMPUTE_BIT, 0, push);
             VK10.vkCmdDispatch(cmd, (width + 15) / 16, (height + 15) / 16, 1);
         }
