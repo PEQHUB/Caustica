@@ -3,9 +3,14 @@
 ## Windows
 
 1. Install the Vulkan SDK from <https://vulkan.lunarg.com/sdk/home>.
-   The installer sets `VULKAN_SDK` automatically.
+   The installer sets `VULKAN_SDK` automatically. Caustica requires Slang
+   2026.4 or newer for its raw-device-pointer layout declarations; on Windows,
+   Vulkan SDK 1.4.350.0 is a known-good baseline. `VULKAN_SDK` must point to
+   that compatible SDK so `slangc` and `spirv-val` come from the same install.
 2. Download the DLSS SDK from <https://github.com/NVIDIA/DLSS/releases>.
-   Extract it, then set `DLSS_SDK` to the folder you extracted.
+   Extract the pinned 310.7.0 checkout, then set `DLSS_SDK` to the folder you
+   extracted. The build validates the SDK commit, headers, static library, and
+   runtime libraries before packaging.
 
    To set it permanently for your Windows user account, run PowerShell with:
 

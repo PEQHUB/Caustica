@@ -2,6 +2,7 @@ import javax.inject.Inject
 import org.gradle.process.ExecOperations
 import dev.comfyfluffy.caustica.build.GenerateShaderRecords
 import dev.comfyfluffy.caustica.build.GenerateRtBindings
+import java.security.MessageDigest
 
 plugins {
 	id "fabric-loom" version "${loom_version}"
@@ -81,6 +82,71 @@ processResources {
 // spirv-val from the Vulkan SDK or PATH.
 def shaderGenRoot = layout.buildDirectory.dir("generated/shaders") // classpath root -> /caustica/shaders/*.spv
 
+// NVIDIA SHaRC is an optional, separately licensed shader input. The ordinary build remains stock when
+// SHARC_SDK is absent; an explicitly configured SDK must be the pinned 1.8.0.0 checkout so the shader ABI
+// cannot silently drift from the generated Java records and runtime cache layout.
+def sharcVersion = "1.8.0.0"
+def sharcCommit = "e19ccacd511f42a3df6f850052d508c13c9e9737"
+def sharcHashes = [
+		"include/SharcCommon.h": "26eb6dde98cc7a09a4b5db48204dd95cba419905d876e71b824651a834b624c4",
+		"include/SharcTypes.h": "f1f34c291c504dc818833b070c82209d1a76f2c2da7eabb417455d451f5f8d1e",
+		"include/HashGridCommon.h": "538dcadeb11b73846a2c1b54c1100b52b944a048a4553652b137f989b3390d7a",
+		"include/HashGridTypes.h": "bc94db024a26d1b40cdb0e6944f89b7af7b275999bce8bf057969f91fcf013a6",
+		"License.md": "8ff8a1723ee41b2647b5b5cd5ef961c7f58fa617803d6de3ea68f954f85ff419"
+]
+def configuredSharcSdk = (findProperty("sharcSdk") ?: System.getenv("SHARC_SDK"))?.toString()?.trim()
+def sharcLicenseAccepted = (findProperty("acceptSharcLicense")?.toString()?.toBoolean()
+		?: System.getenv("SHARC_LICENSE_ACCEPTED")?.toBoolean() ?: false)
+def sha256File = { File input ->
+	def digest = MessageDigest.getInstance("SHA-256")
+	input.withInputStream { stream ->
+		byte[] buffer = new byte[64 * 1024]
+		int read
+		while ((read = stream.read(buffer)) >= 0) {
+			if (read > 0) digest.update(buffer, 0, read)
+		}
+	}
+	digest.digest().collect { String.format("%02x", it & 0xff) }.join()
+}
+def sharcSdkRoot = configuredSharcSdk ? file(configuredSharcSdk) : null
+def validateSharcSdk = { File sdk ->
+	if (sdk == null) return
+	if (!sharcLicenseAccepted) {
+		throw new GradleException("SHARC_SDK is set, but the NVIDIA SHaRC 1.8 license was not explicitly accepted. "
+				+ "Pass -PacceptSharcLicense=true after reviewing ${new File(sdk, 'License.md')}")
+	}
+	if (!sdk.isDirectory() || !new File(sdk, ".git").isDirectory()) {
+		throw new GradleException("SHARC_SDK must point to the pinned git checkout ${sharcCommit}: ${sdk}")
+	}
+	def head = new ProcessBuilder("git", "-C", sdk.absolutePath, "rev-parse", "HEAD")
+			.redirectErrorStream(true).start()
+	def headText = head.inputStream.text.trim()
+	if (head.waitFor() != 0 || !headText.equalsIgnoreCase(sharcCommit)) {
+		throw new GradleException("SHARC_SDK HEAD ${headText} is not pinned to ${sharcCommit}")
+	}
+	def common = new File(sdk, "include/SharcCommon.h")
+	if (!common.isFile()) throw new GradleException("Missing pinned SHaRC header: ${common}")
+	def commonText = common.getText("UTF-8")
+	["SHARC_VERSION_MAJOR": "1", "SHARC_VERSION_MINOR": "8", "SHARC_VERSION_BUILD": "0",
+	 "SHARC_VERSION_REVISION": "0"].each { name, value ->
+		if (!(commonText =~ /#define\s+${name}\s+${value}(?:\s|$)/)) {
+			throw new GradleException("SHARC_SDK ${common} does not declare ${name}=${value}")
+		}
+	}
+	sharcHashes.each { relative, expected ->
+		def input = new File(sdk, relative)
+		if (!input.isFile()) throw new GradleException("Missing pinned SHaRC input: ${input}")
+		def actual = sha256File(input)
+		if (!actual.equalsIgnoreCase(expected)) {
+			throw new GradleException("SHARC_SDK hash mismatch for ${relative}: ${actual} != ${expected}")
+		}
+	}
+}
+validateSharcSdk(sharcSdkRoot)
+def sharcSdkContentFingerprint = sharcSdkRoot == null ? "" : sharcHashes.collect { relative, expected ->
+	"${relative}:${sha256File(new File(sharcSdkRoot, relative))}"
+}.join("|")
+
 def resolveVulkanTool = { String name ->
 	def exe = org.gradle.internal.os.OperatingSystem.current().windows ? ".exe" : ""
 	def sdk = System.getenv("VULKAN_SDK")
@@ -93,11 +159,110 @@ def resolveVulkanTool = { String name ->
 	return "${name}${exe}" // fall back to PATH; exec fails with a clear message if absent
 }
 
+def locateExecutable = { String command ->
+	def direct = file(command)
+	if (direct.isFile()) return direct
+	def windows = org.gradle.internal.os.OperatingSystem.current().windows
+	def names = windows && !command.toLowerCase(java.util.Locale.ROOT).endsWith(".exe")
+			? [command, "${command}.exe"] : [command]
+	def path = System.getenv("PATH") ?: ""
+	for (String entry : path.split(java.io.File.pathSeparator)) {
+		if (entry.isEmpty()) continue
+		for (String name : names) {
+			def candidate = new File(entry, name)
+			if (candidate.isFile()) return candidate
+		}
+	}
+	return null
+}
+
+def locateVulkanTool = { String command -> locateExecutable(command) }
+
+// Keep executable paths as task inputs for diagnostics, and hash their contents so replacing a
+// compiler or validator at the same path invalidates generated outputs.
+def toolContentFingerprint = { String command ->
+	def executable = locateVulkanTool(command)
+	if (executable == null) return "unresolved:${command}"
+	return "${executable.absolutePath}:${sha256File(executable)}"
+}
+
+def runIdentityCommand = { File executable, List<String> arguments ->
+	if (executable == null || !executable.isFile()) {
+		return [status: "missing", output: ""]
+	}
+	def commandLine = new ArrayList<String>()
+	commandLine.add(executable.absolutePath)
+	commandLine.addAll(arguments.collect { it.toString() })
+	def process = new ProcessBuilder(commandLine)
+			.redirectErrorStream(true).start()
+	def output = process.inputStream.getText("UTF-8").trim()
+	def exitCode = process.waitFor()
+	[status: exitCode == 0 ? "ok" : "failed-${exitCode}", output: output]
+}
+
+def normalizeIdentityOutput = { String output ->
+	(output ?: "").readLines().collect { it.trim() }.findAll { !it.isEmpty() }.join(" | ")
+}
+
+def gitHead = { File repository ->
+	if (repository == null || !repository.isDirectory()) return "unavailable"
+	def result = runIdentityCommand(locateExecutable("git"), ["-C", repository.absolutePath, "rev-parse", "HEAD"])
+	result.status == "ok" ? normalizeIdentityOutput(result.output) : "unavailable"
+}
+
+def receiptValue = { Object value ->
+	(value == null ? "" : value.toString())
+			.replace("\\", "/")
+			.replace("\r", " ")
+			.replace("\n", " | ")
+			.replace("=", "\\=")
+}
+
+def writeIdentityReceipt = { File output, Map<String, Object> entries ->
+	output.parentFile.mkdirs()
+	output.setText(entries.collect { key, value -> "${key}=${receiptValue(value)}" }.join("\n") + "\n", "UTF-8")
+}
+
+def slangcTool = resolveVulkanTool("slangc")
+def spirvValTool = resolveVulkanTool("spirv-val")
+def minimumSlangVersion = [2026, 4]
+def validateSlangCompiler = {
+	File executable = locateVulkanTool(slangcTool)
+	if (executable == null || !executable.isFile()) {
+		throw new GradleException("slangc was not found. Set VULKAN_SDK to a Vulkan SDK containing Slang ${minimumSlangVersion[0]}.${minimumSlangVersion[1]} or newer.")
+	}
+	def result = runIdentityCommand(executable, ["-version"])
+	if (result.status != "ok") {
+		throw new GradleException("Could not query slangc at ${executable}: ${result.output}")
+	}
+	def match = result.output =~ /(\d{4})\.(\d+)/
+	if (!match.find()) {
+		throw new GradleException("Could not parse slangc version from ${executable}: ${result.output}")
+	}
+	int major = match.group(1).toInteger()
+	int minor = match.group(2).toInteger()
+	if (major < minimumSlangVersion[0] || (major == minimumSlangVersion[0] && minor < minimumSlangVersion[1])) {
+		throw new GradleException("slangc ${major}.${minor} at ${executable} is too old; Caustica requires Slang ${minimumSlangVersion[0]}.${minimumSlangVersion[1]} or newer. "
+				+ "Point VULKAN_SDK at the compatible SDK so its slangc and spirv-val are selected together.")
+	}
+}
+def validateShaderToolchain = tasks.register("validateShaderToolchain") {
+	group = "verification"
+	description = "Checks that the selected Slang compiler supports Caustica's shader pointer layout syntax."
+	inputs.property("slangc", slangcTool)
+	inputs.property("slangcContentHash", toolContentFingerprint(slangcTool))
+	doLast { validateSlangCompiler() }
+}
+
 abstract class CompileShaders extends DefaultTask {
 	@InputDirectory abstract DirectoryProperty getSrcDir()
 	@OutputDirectory abstract DirectoryProperty getOutDir()
 	@Input abstract Property<String> getSpirvVal()
 	@Input abstract Property<String> getSlangc()
+	@Input abstract Property<String> getSpirvValContentHash()
+	@Input abstract Property<String> getSlangcContentHash()
+	@Input abstract Property<String> getSharcSdk()
+	@Input abstract Property<String> getSharcSdkContentHash()
 
 	@Inject abstract ExecOperations getExecOps()
 
@@ -136,6 +301,7 @@ abstract class CompileShaders extends DefaultTask {
 		}
 		def shaderFiles = srcDir.get().asFileTree.matching {
 			include stageIncludes
+			exclude "sharc/**"
 		}.files.sort { it.absolutePath }
 		def duplicateOutputs = shaderFiles
 				.groupBy { "${outBase(srcDir.get().asFile, it)}.spv" }
@@ -166,6 +332,45 @@ abstract class CompileShaders extends DefaultTask {
 				compileOneSlang(src, spv, [])
 			}
 		}
+		File sdk = sharcSdk.getOrElse("").trim() ? new File(sharcSdk.get()) : null
+		if (sdk != null) {
+			// The pinned SDK header has a false-return path whose out parameter is not initialized. Slang
+			// diagnoses that under warnings-as-errors. The source/header hashes above validate the original;
+			// this disposable copy only repairs the compiler warning and is never packaged.
+			File compilerInclude = new File(temporaryDir, "sharc-include")
+			project.copy { from(new File(sdk, "include")); into(compilerInclude) }
+			File common = new File(compilerInclude, "SharcCommon.h")
+			String commonText = common.getText("UTF-8")
+			int functionStart = commonText.indexOf("bool SharcGetCachedRadiance")
+			int functionBrace = functionStart >= 0 ? commonText.indexOf("{", functionStart) : -1
+			if (functionBrace < 0) throw new GradleException("Pinned SHaRC header lacks SharcGetCachedRadiance")
+			common.setText(commonText.substring(0, functionBrace + 1)
+					+ "\n    radiance = float3(0.0f, 0.0f, 0.0f);"
+					+ commonText.substring(functionBrace + 1), "UTF-8")
+			def sharcIncludes = ["-I", new File(srcDir.get().asFile, "pipelines/world").absolutePath,
+					"-I", new File(srcDir.get().asFile, "sharc").absolutePath,
+					"-I", compilerInclude.absolutePath]
+			def sharcCapabilities = ["-capability", "spvInt64Atomics"]
+			File indirectSource = new File(srcDir.get().asFile, "pipelines/world/indirect.rgen.slang")
+        def variantArgs = ["-DCAUSTICA_SHARC_VARIANT=1", "-DSHARC_ENABLE_SH_ENCODING=1"] + sharcCapabilities + sharcIncludes
+			compileOneSlang(indirectSource,
+					new File(scratchDir, "pipelines/world/indirect_sharc_query.rgen.spv"),
+					variantArgs + ["-DCAUSTICA_SHARC_QUERY=1"])
+			compileOneSlang(indirectSource,
+					new File(scratchDir, "pipelines/world/indirect_sharc_ser_query.rgen.spv"),
+					variantArgs + ["-DCAUSTICA_SHARC_QUERY=1", "-DCAUSTICA_ENABLE_EXT_SER",
+							"-capability", "spvShaderInvocationReorderEXT"])
+			compileOneSlang(indirectSource,
+					new File(scratchDir, "pipelines/world/indirect_sharc_update.rgen.spv"),
+					variantArgs + ["-DCAUSTICA_SHARC_UPDATE=1"])
+			compileOneSlang(indirectSource,
+					new File(scratchDir, "pipelines/world/indirect_sharc_ser_update.rgen.spv"),
+					variantArgs + ["-DCAUSTICA_SHARC_UPDATE=1", "-DCAUSTICA_ENABLE_EXT_SER",
+							"-capability", "spvShaderInvocationReorderEXT"])
+			compileOneSlang(new File(srcDir.get().asFile, "sharc/sharc_resolve.comp.slang"),
+					new File(scratchDir, "sharc/sharc_resolve.comp.spv"),
+					["-DSHARC_ENABLE_SH_ENCODING=1"] + sharcCapabilities + sharcIncludes)
+		}
 		if (outDirFile.exists() && !outDirFile.deleteDir()) {
 			throw new GradleException("failed to clear generated shaders under ${outDirFile}")
 		}
@@ -185,8 +390,13 @@ def compileShaders = tasks.register("compileShaders", CompileShaders) {
 	description = "Compiles shaders/** shader sources to SPIR-V and validates them."
 	srcDir = file("shaders")
 	outDir = layout.buildDirectory.dir("generated/shaders/caustica/shaders")
-	spirvVal = resolveVulkanTool("spirv-val")
-	slangc = resolveVulkanTool("slangc")
+	spirvVal = spirvValTool
+	spirvValContentHash = toolContentFingerprint(spirvValTool)
+	slangc = slangcTool
+	slangcContentHash = toolContentFingerprint(slangcTool)
+	sharcSdk = sharcSdkRoot?.absolutePath ?: ""
+	sharcSdkContentHash = sharcSdkContentFingerprint
+	dependsOn(validateShaderToolchain)
 }
 
 def generateShaderRecords = tasks.register("generateShaderRecords", GenerateShaderRecords) {
@@ -194,9 +404,12 @@ def generateShaderRecords = tasks.register("generateShaderRecords", GenerateShad
 	description = "Generates typed Java shader records and serializers from Slang reflection."
 	shaderRoot = file("shaders")
 	probeSource = file("shaders/layout/layout_probe.slang")
-	slangc = resolveVulkanTool("slangc")
-	spirvVal = resolveVulkanTool("spirv-val")
+	slangc = slangcTool
+	slangcContentHash = toolContentFingerprint(slangcTool)
+	spirvVal = spirvValTool
+	spirvValContentHash = toolContentFingerprint(spirvValTool)
 	outDir = layout.buildDirectory.dir("generated/sources/shaderRecords")
+	dependsOn(validateShaderToolchain)
 }
 
 def rtBindingsGenRoot = layout.buildDirectory.dir("generated/sources/rtBindings")
@@ -204,8 +417,10 @@ def generateRtBindings = tasks.register("generateRtBindings", GenerateRtBindings
 	group = "build"
 	description = "Generates Java descriptor bindings from Slang reflection."
 	shaderRoot = file("shaders")
-	slangc = resolveVulkanTool("slangc")
+	slangc = slangcTool
+	slangcContentHash = toolContentFingerprint(slangcTool)
 	outDir = rtBindingsGenRoot
+	dependsOn(validateShaderToolchain)
 }
 
 tasks.named("test", Test) {
@@ -218,6 +433,47 @@ sourceSets.main.java.srcDir(files(rtBindingsGenRoot).builtBy(generateRtBindings)
 // Emit the .spv into the main resources so they land in the jar / on the runClient classpath at the
 // same /caustica/shaders/ path the pipeline loaders read. builtBy wires the dependency.
 sourceSets.main.resources.srcDir(files(shaderGenRoot).builtBy(compileShaders))
+
+def sharcMetadataRoot = layout.buildDirectory.dir("generated/sharc-metadata")
+def generateSharcMetadata = tasks.register("generateSharcMetadata") {
+	group = "build"
+	description = "Publishes SHaRC 1.8 capability metadata only for an explicitly accepted SDK build."
+	inputs.property("sharcSdk", sharcSdkRoot?.absolutePath ?: "")
+	inputs.property("sharcCommit", sharcCommit)
+	inputs.property("sharcVersion", sharcVersion)
+	inputs.property("sharcHashes", sharcHashes.toString())
+	inputs.property("sharcSdkContentHash", sharcSdkContentFingerprint)
+	outputs.dir(sharcMetadataRoot)
+	doLast {
+		def root = sharcMetadataRoot.get().asFile
+		delete(root)
+		if (sharcSdkRoot == null) return
+		def metadata = new File(root, "caustica/sharc.properties")
+		metadata.parentFile.mkdirs()
+		metadata.setText("""version=${sharcVersion}
+commit=${sharcCommit}
+sharcCommonSha256=${sharcHashes['include/SharcCommon.h']}
+sharcTypesSha256=${sharcHashes['include/SharcTypes.h']}
+hashGridCommonSha256=${sharcHashes['include/HashGridCommon.h']}
+hashGridTypesSha256=${sharcHashes['include/HashGridTypes.h']}
+licenseSha256=${sharcHashes['License.md']}
+artifacts=true
+directionalSh=true
+queryVariants=ordinary,ext-ser
+updateVariants=ordinary,ext-ser
+resolveVariants=directional-sh
+shaderBufferInt64Atomics=true
+shaderFloat16=true
+storageBuffer16BitAccess=true
+""", "UTF-8")
+		copy {
+			from(new File(sharcSdkRoot, "License.md"))
+			into(new File(root, "META-INF/licenses/nvidia"))
+			rename { "NVIDIA-SHARC-SDK.txt" }
+		}
+	}
+}
+sourceSets.main.resources.srcDir(files(sharcMetadataRoot).builtBy(generateSharcMetadata))
 
 def ngxNativeGenRoot = layout.buildDirectory.dir("generated/ngx-natives")
 def requestedTaskNames = gradle.startParameter.taskNames.collect { it.toLowerCase(java.util.Locale.ROOT) }
@@ -301,9 +557,242 @@ if (requestedNgxPlatformsRaw.size() == 1 && requestedNgxPlatformsRaw[0].equalsIg
 def dlssSdkEnv = providers.environmentVariable("DLSS_SDK")
 def dlssSdkRootProvider = dlssSdkEnv.map { file(it) }
 
+def releaseToolchainReceipt = layout.buildDirectory.file("reproducibility/release-toolchain.properties")
+def releasePreflight = tasks.register("releasePreflight") {
+	group = "verification"
+	description = "Configures the NGX shim and records the exact release toolchain identities."
+	dependsOn(validateShaderToolchain)
+	outputs.file(releaseToolchainReceipt)
+	outputs.upToDateWhen { false }
+
+	doLast {
+		def entries = new LinkedHashMap<String, Object>()
+		def fail = { String message -> throw new GradleException("Release preflight: ${message}") }
+		def recordCommand = { String prefix, File executable, List<String> arguments ->
+			if (executable == null || !executable.isFile()) fail("missing ${prefix} executable")
+			def result = runIdentityCommand(executable, arguments)
+			if (result.status != "ok") fail("${prefix} identity command failed: ${result.output}")
+			entries["${prefix}.path"] = executable.absolutePath
+			entries["${prefix}.sha256"] = sha256File(executable)
+			entries["${prefix}.version"] = normalizeIdentityOutput(result.output)
+			result
+		}
+		def hashInput = { String key, File input ->
+			if (input == null || !input.isFile()) fail("missing ${key}: ${input}")
+			entries["${key}.path"] = input.absolutePath
+			entries["${key}.sha256"] = sha256File(input)
+		}
+		def resolveRuntimeFile = { File root, String baseName ->
+			File exact = new File(root, baseName)
+			if (exact.isFile()) return exact
+			List<File> versioned = (root.listFiles() ?: [])
+				.findAll { File candidate -> candidate.isFile() && candidate.name.startsWith(baseName + ".") }
+				.sort { File left, File right -> left.name <=> right.name }
+			if (versioned.size() == 1) return versioned[0]
+			if (versioned.size() > 1) {
+				fail("ambiguous ${baseName} runtime in ${root}: ${versioned*.name.join(', ')}")
+			}
+			return exact
+		}
+
+		entries.schema = "caustica-release-toolchain-v1"
+		entries.gradleVersion = gradle.gradleVersion
+		def gitExecutable = locateExecutable("git")
+		def sourceHead = runIdentityCommand(gitExecutable, ["rev-parse", "HEAD"])
+		if (sourceHead.status != "ok") fail("could not read source HEAD: ${sourceHead.output}")
+		def sourceStatus = runIdentityCommand(gitExecutable, ["status", "--porcelain", "--untracked-files=all"])
+		if (sourceStatus.status != "ok") fail("could not read source status: ${sourceStatus.output}")
+		if (sourceStatus.output.trim()) fail("source tree is dirty: ${sourceStatus.output}")
+		entries.sourceHead = normalizeIdentityOutput(sourceHead.output)
+		entries.sourceStatus = "clean"
+
+		def javaHome = file(System.getProperty("java.home"))
+		def javaExecutable = new File(javaHome, org.gradle.internal.os.OperatingSystem.current().windows
+				? "bin/java.exe" : "bin/java")
+		if (JavaVersion.current().majorVersion != "25") {
+			fail("JDK 25 is required; observed ${System.getProperty('java.version')}")
+		}
+		entries["jdk.home"] = javaHome.absolutePath
+		entries["jdk.vendor"] = System.getProperty("java.vendor")
+		entries["jdk.runtime"] = System.getProperty("java.runtime.version")
+		recordCommand("jdk.java", javaExecutable, ["--version"])
+
+		def slangResult = recordCommand("slangc", locateVulkanTool(slangcTool), ["-version"])
+		def spirvResult = recordCommand("spirvVal", locateVulkanTool(spirvValTool), ["--version"])
+		entries["slangc.identity"] = normalizeIdentityOutput(slangResult.output)
+		entries["spirvVal.identity"] = normalizeIdentityOutput(spirvResult.output)
+
+		def vulkanSdk = System.getenv("VULKAN_SDK") ? file(System.getenv("VULKAN_SDK")) : null
+		if (vulkanSdk == null || !vulkanSdk.isDirectory()) fail("VULKAN_SDK is not a directory")
+		def vulkanComponents = new File(vulkanSdk, "components.xml")
+		if (!vulkanComponents.isFile()) fail("Vulkan SDK components.xml is missing")
+		def vulkanText = vulkanComponents.getText("UTF-8")
+		def vulkanMatch = vulkanText =~ /<Version>([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)<\/Version>/
+		if (!vulkanMatch.find()) fail("Vulkan SDK version is not present in components.xml")
+		entries["vulkan.sdk.path"] = vulkanSdk.absolutePath
+		entries["vulkan.sdk.version"] = vulkanMatch.group(1)
+		entries["vulkan.components.sha256"] = sha256File(vulkanComponents)
+		hashInput("vulkan.coreHeader", new File(vulkanSdk, "include/vulkan/vulkan_core.h"))
+
+		def cmakeExecutable = locateExecutable((findProperty("releaseCmake") ?: "cmake").toString())
+		def cmakeResult = recordCommand("cmake", cmakeExecutable, ["--version"])
+		def cmakeMatch = normalizeIdentityOutput(cmakeResult.output) =~ /cmake version ([^ |]+)/
+		if (!cmakeMatch.find()) fail("CMake version could not be parsed")
+		def cmakeVersion = cmakeMatch.group(1)
+
+		File dlssSdk = dlssSdkRootProvider.orNull
+		if (dlssSdk == null || !dlssSdk.isDirectory()) fail("DLSS_SDK is not a directory")
+		def dlssCommit = gitHead(dlssSdk)
+		if (dlssCommit == "unavailable") fail("DLSS SDK git commit is unavailable")
+		entries["dlss.sdk.path"] = dlssSdk.absolutePath
+		entries["dlss.sdk.commit"] = dlssCommit
+		["include/nvsdk_ngx_defs.h", "include/nvsdk_ngx_defs_dlssd.h",
+		 "include/nvsdk_ngx_defs_dlssg.h", "include/nvsdk_ngx_defs_vk.h"].each { relative ->
+			hashInput("dlss.${relative.replace('/', '.')}", new File(dlssSdk, relative))
+		}
+		if (currentNgxPlatform == "windows-x64") {
+			hashInput("dlss.staticLibrary", new File(dlssSdk, "lib/Windows_x86_64/x64/nvsdk_ngx_d.lib"))
+			["nvngx_dlssd.dll", "nvngx_dlssg.dll"].each { name ->
+				hashInput("dlss.${name}", new File(dlssSdk, "lib/Windows_x86_64/${ngxVendorConfig}/${name}"))
+			}
+		} else if (currentNgxPlatform == "linux-x64") {
+			hashInput("dlss.staticLibrary", new File(dlssSdk, "lib/Linux_x86_64/libnvsdk_ngx.a"))
+			["libnvidia-ngx-dlssd.so", "libnvidia-ngx-dlssg.so"].each { name ->
+				hashInput("dlss.${name}", resolveRuntimeFile(
+					new File(dlssSdk, "lib/Linux_x86_64/${ngxVendorConfig}"), name))
+			}
+		} else {
+			fail("unsupported NGX platform")
+		}
+
+		entries["sharc.expectedVersion"] = sharcVersion
+		entries["sharc.expectedCommit"] = sharcCommit
+		entries["sharc.expectedHashes"] = sharcHashes.collect { relative, expected -> "${relative}:${expected}" }.join("|")
+		if (sharcSdkRoot == null) {
+			entries["sharc.status"] = "absent"
+			if ((findProperty("releaseRequireSharc") ?: "false").toString().toBoolean()) {
+				fail("SHARC_SDK is required by releaseRequireSharc=true")
+			}
+		} else {
+			entries["sharc.status"] = "validated"
+			entries["sharc.path"] = sharcSdkRoot.absolutePath
+			entries["sharc.commit"] = sharcCommit
+			entries["sharc.version"] = sharcVersion
+			entries["sharc.sourceHashes"] = sharcSdkContentFingerprint
+		}
+
+		def configureRoot = file("build/reproducibility/ngx-shim-configure-release")
+		def nativeReceipt = file("build/reproducibility/ngxshim-toolchain-release.properties")
+		def configureArgs = ["-S", file("native/ngx_shim").absolutePath, "-B", configureRoot.absolutePath,
+			"-DNGX_SHIM_REPRODUCIBILITY_STRICT=ON",
+			"-DNGX_SHIM_REPRODUCIBILITY_RECEIPT=${nativeReceipt.absolutePath}",
+			"-DNGX_DLSS_VENDOR_CONFIG=${ngxVendorConfig}",
+			"-DNGX_EXPECTED_CMAKE_VERSION=${cmakeVersion}",
+			"-DNGX_EXPECTED_VULKAN_SDK_VERSION=${vulkanMatch.group(1)}",
+			"-DNGX_EXPECTED_DLSS_SDK_COMMIT=${dlssCommit}"]
+		def requestedGenerator = (findProperty("releaseCmakeGenerator") ?: System.getenv("CMAKE_GENERATOR"))?.toString()?.trim()
+		if (!requestedGenerator && org.gradle.internal.os.OperatingSystem.current().windows) {
+			requestedGenerator = "Visual Studio 17 2022"
+			configureArgs += ["-G", requestedGenerator, "-A", "x64"]
+		} else if (requestedGenerator) {
+			configureArgs += ["-G", requestedGenerator]
+			if (org.gradle.internal.os.OperatingSystem.current().windows
+					&& requestedGenerator.toLowerCase(java.util.Locale.ROOT).startsWith("visual studio")) {
+				configureArgs += ["-A", "x64"]
+			}
+		}
+		def configure = runIdentityCommand(cmakeExecutable, configureArgs)
+		if (configure.status != "ok") fail("NGX CMake configure failed: ${configure.output}")
+		if (!nativeReceipt.isFile()) fail("NGX CMake receipt was not generated")
+		def nativeProperties = new Properties()
+		nativeReceipt.withInputStream { nativeProperties.load(it) }
+		["cmake.version", "cmake.sha256", "compiler.id", "compiler.version", "compiler.sha256",
+		 "vulkan.sdk.version", "dlss.sdk.commit", "dlss.staticLibrary.sha256",
+		 "dlss.dlssdRuntime.sha256", "dlss.dlssgRuntime.sha256"].each { key ->
+			if (!nativeProperties.getProperty(key)) fail("NGX receipt is missing ${key}")
+			entries[key] = nativeProperties.getProperty(key)
+		}
+		entries["cmake.nativeReceipt"] = nativeReceipt.absolutePath
+		writeIdentityReceipt(releaseToolchainReceipt.get().asFile, entries)
+		logger.lifecycle("Release preflight receipt: ${releaseToolchainReceipt.get().asFile}")
+	}
+}
+
+def ngxShimBuildType = ngxShimConfig == "debug" ? "Debug" : "Release"
+def ngxShimBuildRoot = file("build/reproducibility/ngx-shim-build-${ngxShimConfig}")
+def ngxShimBinaryName = currentNgxPlatform == "windows-x64" ? "ngxshim.dll" : "libngxshim.so"
+def ngxShimBinary = new File(ngxShimOutDir, ngxShimBinaryName)
+abstract class BuildNgxShim extends DefaultTask {
+	@InputDirectory abstract DirectoryProperty getSourceDir()
+	@Input abstract Property<String> getBuildRoot()
+	@Input abstract Property<String> getBuildType()
+	@Input abstract Property<String> getCmakeExecutable()
+	@Input abstract Property<String> getDlssSdk()
+	@Input abstract Property<String> getVulkanSdk()
+	@Input abstract ListProperty<String> getConfigureArgs()
+	@OutputFile abstract RegularFileProperty getOutputFile()
+
+	@Inject abstract ExecOperations getExecOps()
+
+	@TaskAction
+	void build() {
+		String dlssSdkPath = dlssSdk.get()
+		String vulkanSdkPath = vulkanSdk.get()
+		if (!dlssSdkPath || !new File(dlssSdkPath).isDirectory()) {
+			throw new GradleException("DLSS_SDK must point to the pinned SDK checkout before building the NGX shim.")
+		}
+		if (!vulkanSdkPath || !new File(vulkanSdkPath).isDirectory()) {
+			throw new GradleException("VULKAN_SDK must point to the Vulkan SDK before building the NGX shim.")
+		}
+		File buildRoot = new File(buildRoot.get())
+		if (buildRoot.exists() && !buildRoot.deleteDir()) {
+			throw new GradleException("Could not clear the NGX CMake build directory: ${buildRoot}")
+		}
+		String cmake = cmakeExecutable.get()
+		def configure = ["-S", sourceDir.get().asFile.absolutePath, "-B", buildRoot.absolutePath]
+		configure.addAll(configureArgs.get())
+		getExecOps().exec {
+			commandLine([cmake] + configure)
+			environment "DLSS_SDK", dlssSdkPath
+			environment "VULKAN_SDK", vulkanSdkPath
+		}
+		getExecOps().exec {
+			commandLine([cmake, "--build", buildRoot.absolutePath, "--config", buildType.get(), "--target", "ngxshim", "--parallel"])
+			environment "DLSS_SDK", dlssSdkPath
+			environment "VULKAN_SDK", vulkanSdkPath
+		}
+		File output = outputFile.get().asFile
+		if (!output.isFile()) {
+			throw new GradleException("NGX shim build succeeded but did not produce ${output}")
+		}
+	}
+}
+
+def cmakeForNgxShim = locateExecutable((findProperty("releaseCmake") ?: "cmake").toString())
+def buildNgxShim = tasks.register("buildNgxShim", BuildNgxShim) {
+	group = "build"
+	description = "Rebuilds the NGX shim from the current native source before packaging it."
+	sourceDir.set(layout.projectDirectory.dir("native/ngx_shim"))
+	buildRoot.set(ngxShimBuildRoot.absolutePath)
+	buildType.set(ngxShimBuildType)
+	cmakeExecutable.set(cmakeForNgxShim?.absolutePath ?: "cmake")
+	dlssSdk.set(dlssSdkRootProvider.map { it.absolutePath }.orElse(""))
+	vulkanSdk.set(providers.environmentVariable("VULKAN_SDK").orElse(""))
+	configureArgs.set([
+		"-DNGX_SHIM_REPRODUCIBILITY_STRICT=ON",
+		"-DNGX_SHIM_REPRODUCIBILITY_RECEIPT=${new File(ngxShimBuildRoot, "ngxshim-toolchain.properties").absolutePath}",
+		"-DNGX_DLSS_VENDOR_CONFIG=${ngxVendorConfig}"
+	] + (org.gradle.internal.os.OperatingSystem.current().windows
+			? ["-G", "Visual Studio 17 2022", "-A", "x64"]
+			: ["-DCMAKE_BUILD_TYPE=${ngxShimBuildType}"]))
+	outputFile.set(ngxShimBinary)
+	inputs.files(fileTree("native/ngx_shim"))
+}
+
 def bundleNgxNatives = tasks.register("bundleNgxNatives") {
 	group = "build"
 	description = "Bundles NGX shim and ${ngxVendorConfig} DLSS native libraries into the mod resources."
+	dependsOn(buildNgxShim)
 
 	inputs.property "ngxShimConfig", ngxShimConfig
 	inputs.property "ngxVendorConfig", ngxVendorConfig
