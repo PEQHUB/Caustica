@@ -53,4 +53,19 @@ final class RtExposurePercentileTest {
         assertEquals(0.50f, window.low(), 1.0e-6f);
         assertEquals(0.99f, window.high(), 1.0e-6f);
     }
+
+    @Test
+    void histogramDispatchGuardsStrideAndSmallOrOverflowingExtents() {
+        assertEquals(1, RtExposurePipeline.safeStride(0));
+        assertEquals(1, RtExposurePipeline.safeStride(-4));
+        assertEquals(1, RtExposurePipeline.sampledExtent(0, 0));
+        assertEquals(2, RtExposurePipeline.sampledExtent(16, 8));
+        assertEquals(3, RtExposurePipeline.sampledExtent(17, 8));
+        assertEquals(1, RtExposurePipeline.dispatchGroups(0, 0));
+        assertEquals(2, RtExposurePipeline.dispatchGroups(256, 8));
+        assertEquals(1, RtExposurePipeline.dispatchGroups(Integer.MAX_VALUE, Integer.MAX_VALUE));
+        assertEquals(1, RtExposurePipeline.effectiveStride(3840, 2160, 1));
+        assertEquals(2, RtExposurePipeline.effectiveStride(7680, 4320, 1));
+        assertEquals(2, RtExposurePipeline.effectiveStride(7680, 4320, 2));
+    }
 }

@@ -23,7 +23,7 @@ public final class RtToneMapping {
     private RtToneMapping() {
     }
 
-    /** Stable SDR tone-mapper modes. ID mirrors the GLSL constant in dispatch.glsl. */
+    /** Stable SDR tone-mapper modes. IDs mirror the display shader's mode switch. */
     public enum SdrMode {
         ACES_2_0(0, "aces2.0", "aces-2.0", "aces2"),
         AGX(1, "agx"),
@@ -63,6 +63,16 @@ public final class RtToneMapping {
 
         /** Case-insensitive parse with whitespace trimming; unknown values use the active PsychoV24 default. */
         public static SdrMode parse(String value) {
+            SdrMode known = find(value);
+            return known != null ? known : PSYCHOV24;
+        }
+
+        /** Returns whether the value is a canonical name or a committed compatibility alias. */
+        public static boolean isKnown(String value) {
+            return find(value) != null;
+        }
+
+        private static SdrMode find(String value) {
             if (value != null) {
                 String trimmed = value.trim();
                 for (SdrMode mode : values()) {
@@ -76,7 +86,7 @@ public final class RtToneMapping {
                     }
                 }
             }
-            return PSYCHOV24;
+            return null;
         }
     }
 
@@ -114,6 +124,16 @@ public final class RtToneMapping {
 
         /** Case-insensitive parse with whitespace trimming; unknown values use the active PsychoV24 default. */
         public static HdrMode parse(String value) {
+            HdrMode known = find(value);
+            return known != null ? known : PSYCHOV24;
+        }
+
+        /** Returns whether the value is a canonical name or a committed compatibility alias. */
+        public static boolean isKnown(String value) {
+            return find(value) != null;
+        }
+
+        private static HdrMode find(String value) {
             if (value != null) {
                 String trimmed = value.trim();
                 for (HdrMode mode : values()) {
@@ -127,7 +147,7 @@ public final class RtToneMapping {
                     }
                 }
             }
-            return PSYCHOV24;
+            return null;
         }
     }
 

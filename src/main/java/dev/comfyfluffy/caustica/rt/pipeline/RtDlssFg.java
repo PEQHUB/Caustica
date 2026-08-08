@@ -59,7 +59,16 @@ public final class RtDlssFg {
     /** Requested generated-frame count clamped to the driver maximum (>=1 once available). */
     public int effectiveMultiFrameCount() {
         int requested = CausticaConfig.Rt.Fg.MULTI_FRAME_COUNT.value();
-        return multiFrameCountMax > 0 ? Math.clamp(requested, 1, multiFrameCountMax) : requested;
+        return effectiveMultiFrameCount(requested, multiFrameCountMax, probed);
+    }
+
+    static int effectiveMultiFrameCount(int requested, int maximum, boolean maximumWasProbed) {
+        if (maximum > 0) {
+            return Math.clamp(requested, 1, maximum);
+        }
+        // The shim uses zero for an unknown/unsupported maximum. Once availability has been
+        // probed, fail closed to one generated frame rather than issuing an unbounded request.
+        return maximumWasProbed ? 1 : requested;
     }
 
     public boolean isReady() {

@@ -67,12 +67,50 @@ public final class RtGpuExecutor {
     RtGpuExecutor(RtContext ctx) {
         this.ctx = ctx;
         this.computeQueue = ctx.computeQueue();
-        this.buildTimeline = createTimeline("RT terrain build timeline");
-        this.graphicsTimeline = createTimeline("RT graphics-use timeline");
-        createCommandPool();
-        this.thread = new Thread(this::run, "Caustica GPU executor");
-        this.thread.setDaemon(true);
-        this.thread.start();
+        long createdBuildTimeline = 0L;
+        long createdGraphicsTimeline = 0L;
+        long createdCommandPool = 0L;
+        try {
+            createdBuildTimeline = createTimeline("RT terrain build timeline");
+            createdGraphicsTimeline = createTimeline("RT graphics-use timeline");
+            createdCommandPool = createCommandPool();
+            this.buildTimeline = createdBuildTimeline;
+            this.graphicsTimeline = createdGraphicsTimeline;
+            this.commandPool = createdCommandPool;
+            Thread worker = new Thread(this::run, "Caustica GPU executor");
+            worker.setDaemon(true);
+            this.thread = worker;
+            worker.start();
+        } catch (Throwable failure) {
+            if (createdCommandPool != 0L) {
+                try {
+                    VK10.vkDestroyCommandPool(ctx.vk(), createdCommandPool, null);
+                } catch (Throwable cleanupFailure) {
+                    failure.addSuppressed(cleanupFailure);
+                }
+            }
+            if (createdGraphicsTimeline != 0L) {
+                try {
+                    VK10.vkDestroySemaphore(ctx.vk(), createdGraphicsTimeline, null);
+                } catch (Throwable cleanupFailure) {
+                    failure.addSuppressed(cleanupFailure);
+                }
+            }
+            if (createdBuildTimeline != 0L) {
+                try {
+                    VK10.vkDestroySemaphore(ctx.vk(), createdBuildTimeline, null);
+                } catch (Throwable cleanupFailure) {
+                    failure.addSuppressed(cleanupFailure);
+                }
+            }
+            if (failure instanceof RuntimeException runtime) {
+                throw runtime;
+            }
+            if (failure instanceof Error error) {
+                throw error;
+            }
+            throw new IllegalStateException("RT GPU executor initialization failed", failure);
+        }
     }
 
     /**
@@ -124,10 +162,14 @@ public final class RtGpuExecutor {
     /** Signal the frame token after its final terrain, TLAS, entity, and overlay consumer. */
     public void endGraphicsUse(VulkanCommandEncoder encoder, GraphicsUse graphicsUse) {
         assertRenderThread();
+        if (graphicsUse.isTerminal()) {
+            return;
+        }
         if (!graphicsUse.isAccepted()) {
             throw new IllegalStateException("Cannot finish a graphics use before its command was accepted");
         }
         encoder.signalSemaphore(graphicsTimeline, graphicsUse.value, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT_KHR);
+        graphicsUse.markCompleted();
         latestGraphicsUseValue.accumulateAndGet(graphicsUse.value, Math::max);
         if (hasPendingDestroys()) {
             jobs.offer(WAKE);
@@ -145,6 +187,9 @@ public final class RtGpuExecutor {
     public void abortGraphicsUse(GraphicsUse graphicsUse) {
         assertRenderThread();
         if (graphicsUse == null) {
+            return;
+        }
+        if (graphicsUse.isTerminal()) {
             return;
         }
         if (graphicsUse.isAccepted()) {
@@ -166,6 +211,7 @@ public final class RtGpuExecutor {
                         "vkSignalSemaphore(RT graphics-use abort)");
             }
         }
+        graphicsUse.markAborted();
         if (hasPendingDestroys()) {
             jobs.offer(WAKE);
         }
@@ -466,6 +512,7 @@ public final class RtGpuExecutor {
         VkCommandBuffer cmd = null;
         boolean submitted = false;
         boolean completed = false;
+        Throwable failure = null;
         long signalValue = batch.get(batch.size() - 1).build.value;
         long firstValue = batch.get(0).build.value;
         VulkanDiagnostics.setInFlight("async-compute",
@@ -509,6 +556,9 @@ public final class RtGpuExecutor {
             waitTimeline(buildTimeline, signalValue);
             completed = true;
             VulkanDiagnostics.breadcrumb("async-compute completed buildTimeline=" + signalValue);
+        } catch (Throwable t) {
+            failure = t;
+            throw t;
         } finally {
             // Never retry a failed host wait while unwinding: propagate its original error. A command
             // buffer is safe to release here only if submission never happened or completion was observed.
@@ -516,6 +566,12 @@ public final class RtGpuExecutor {
             if (cmd != null && (!submitted || completed)) {
                 try (MemoryStack stack = MemoryStack.stackPush()) {
                     VK10.vkFreeCommandBuffers(ctx.vk(), commandPool, stack.pointers(cmd));
+                } catch (Throwable cleanupFailure) {
+                    if (failure != null) {
+                        failure.addSuppressed(cleanupFailure);
+                    } else {
+                        throwFailure(cleanupFailure);
+                    }
                 }
             }
             if (!submitted || completed) {
@@ -525,28 +581,61 @@ public final class RtGpuExecutor {
     }
 
     private long createTimeline(String label) {
+        long semaphore = 0L;
         try (MemoryStack stack = MemoryStack.stackPush()) {
             VkSemaphoreTypeCreateInfo type = VkSemaphoreTypeCreateInfo.calloc(stack).sType$Default()
                     .semaphoreType(VK12.VK_SEMAPHORE_TYPE_TIMELINE).initialValue(0L);
             VkSemaphoreCreateInfo ci = VkSemaphoreCreateInfo.calloc(stack).sType$Default().pNext(type);
             LongBuffer out = stack.mallocLong(1);
             RtContext.check(VK10.vkCreateSemaphore(ctx.vk(), ci, null, out), "vkCreateSemaphore(" + label + ")");
-            long semaphore = out.get(0);
+            semaphore = out.get(0);
             RtDebugLabels.name(this.ctx, VK10.VK_OBJECT_TYPE_SEMAPHORE, semaphore, label);
             return semaphore;
+        } catch (Throwable failure) {
+            if (semaphore != 0L) {
+                try {
+                    VK10.vkDestroySemaphore(ctx.vk(), semaphore, null);
+                } catch (Throwable cleanupFailure) {
+                    failure.addSuppressed(cleanupFailure);
+                }
+            }
+            throwFailure(failure);
+            return 0L;
         }
     }
 
-    private void createCommandPool() {
+    private long createCommandPool() {
+        long pool = 0L;
         try (MemoryStack stack = MemoryStack.stackPush()) {
             VkCommandPoolCreateInfo ci = VkCommandPoolCreateInfo.calloc(stack).sType$Default()
                     .flags(VK10.VK_COMMAND_POOL_CREATE_TRANSIENT_BIT)
                     .queueFamilyIndex(computeQueue.queueFamilyIndex());
             LongBuffer out = stack.mallocLong(1);
             RtContext.check(VK10.vkCreateCommandPool(ctx.vk(), ci, null, out), "vkCreateCommandPool(RT GPU executor)");
-            commandPool = out.get(0);
-            RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_COMMAND_POOL, commandPool, "RT GPU executor command pool");
+            pool = out.get(0);
+            RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_COMMAND_POOL, pool, "RT GPU executor command pool");
+            return pool;
+        } catch (Throwable failure) {
+            if (pool != 0L) {
+                try {
+                    VK10.vkDestroyCommandPool(ctx.vk(), pool, null);
+                } catch (Throwable cleanupFailure) {
+                    failure.addSuppressed(cleanupFailure);
+                }
+            }
+            throwFailure(failure);
+            return 0L;
         }
+    }
+
+    private static void throwFailure(Throwable failure) {
+        if (failure instanceof RuntimeException runtime) {
+            throw runtime;
+        }
+        if (failure instanceof Error error) {
+            throw error;
+        }
+        throw new IllegalStateException("RT GPU executor lifecycle failed", failure);
     }
 
     private long queryTimeline(long semaphore) {
@@ -597,17 +686,33 @@ public final class RtGpuExecutor {
     public static final class GraphicsUse {
         private final long value;
         private boolean accepted;
+        private boolean terminal;
 
         private GraphicsUse(long value) {
             this.value = value;
         }
 
         void markAccepted() {
+            if (terminal) {
+                throw new IllegalStateException("Graphics use is already terminal");
+            }
             accepted = true;
         }
 
         boolean isAccepted() {
             return accepted;
+        }
+
+        boolean isTerminal() {
+            return terminal;
+        }
+
+        void markCompleted() {
+            terminal = true;
+        }
+
+        void markAborted() {
+            terminal = true;
         }
     }
 

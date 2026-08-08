@@ -4,11 +4,18 @@ import com.electronwill.nightconfig.core.CommentedConfig;
 import com.electronwill.nightconfig.core.file.CommentedFileConfig;
 import com.electronwill.nightconfig.core.file.FileNotFoundAction;
 import com.electronwill.nightconfig.toml.TomlFormat;
+import com.electronwill.nightconfig.toml.TomlWriter;
+import java.io.Writer;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
+import java.nio.file.StandardOpenOption;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.function.DoubleUnaryOperator;
 import java.util.function.IntUnaryOperator;
+import java.util.function.Predicate;
 import java.util.function.UnaryOperator;
 import net.fabricmc.loader.api.FabricLoader;
 import org.slf4j.Logger;
@@ -17,9 +24,10 @@ import org.slf4j.LoggerFactory;
 /**
  * Central mutable runtime configuration. Each setting resolves its value, in order of precedence, from a
  * {@code -Dcaustica.*} system property, then the {@code config/caustica.toml} file, then a hardcoded
- * default. A profile version below {@value #DEFAULTS_PROFILE_VERSION} selects the hardcoded defaults for
- * its first load; system properties still take precedence. The settings UI and any other code call the
- * same {@code set(...)} methods, and {@link #save()} writes the current values back to the TOML file.
+ * default. A profile version below {@value #DEFAULTS_PROFILE_VERSION} requests a non-destructive
+ * per-setting migration when the file is saved; system properties still take precedence. The settings UI
+ * and any other code call the same {@code set(...)} methods, and {@link #save()} writes the current values
+ * back to the TOML file.
  *
  * <p>The system property namespace ({@code caustica.rt.foo}) and the TOML layout are independent: the file
  * uses real nested tables (e.g. {@code [omm]} with a {@code subdivision} key) grouped for readability, while
@@ -30,9 +38,9 @@ public final class CausticaConfig {
     private static final List<RuntimeSetting<?>> SETTINGS = new CopyOnWriteArrayList<>();
 
     private static final Path CONFIG_PATH = resolveConfigPath();
+    private static boolean fileLoadFailed;
     private static final CommentedFileConfig FILE = loadFile(CONFIG_PATH);
     static final int DEFAULTS_PROFILE_VERSION = 17;
-    private static final boolean FORCE_DEFAULTS_ON_FIRST_LOAD = shouldResetToDefaults();
 
     private CausticaConfig() {
     }
@@ -82,7 +90,7 @@ public final class CausticaConfig {
     /** Writes the default config file if it does not exist yet. */
     public static void saveIfMissing() {
         ensureRegistered();
-        if (FILE.valueMap().isEmpty() || FORCE_DEFAULTS_ON_FIRST_LOAD) {
+        if (!fileLoadFailed && (FILE.valueMap().isEmpty() || needsProfileMigration())) {
             save();
         }
     }
@@ -90,12 +98,16 @@ public final class CausticaConfig {
     /** Serializes all registered settings to the TOML config file. */
     public static synchronized void save() {
         ensureRegistered();
+        boolean migrating = !FILE.valueMap().isEmpty() && needsProfileMigration();
+        if (migrating) {
+            backupBeforeMigration();
+        }
         writeComments();
         FILE.set("config-version", profileVersionForSave());
         for (RuntimeSetting<?> setting : SETTINGS) {
             setting.writeToFile(FILE);
         }
-        FILE.save();
+        saveFileAtomically();
     }
 
     private static void writeComments() {
@@ -144,22 +156,68 @@ public final class CausticaConfig {
         try {
             config.load();
         } catch (Exception e) {
+            fileLoadFailed = true;
             LOGGER.warn("Failed to read Caustica config {}: {}", path, e.toString());
         }
         return config;
     }
 
-    private static boolean shouldResetToDefaults() {
-        return shouldResetToDefaults(FILE.contains("config-version") ? FILE.get("config-version") : null);
+    private static void backupBeforeMigration() {
+        if (!Files.isRegularFile(CONFIG_PATH)) {
+            return;
+        }
+        Path parent = CONFIG_PATH.toAbsolutePath().getParent();
+        Path backup;
+        try {
+            Files.createDirectories(parent);
+            backup = Files.createTempFile(parent, CONFIG_PATH.getFileName() + ".bak-", ".toml");
+            Files.copy(CONFIG_PATH, backup, StandardCopyOption.REPLACE_EXISTING,
+                    StandardCopyOption.COPY_ATTRIBUTES);
+            LOGGER.info("Backed up Caustica config before migration to {}", backup);
+        } catch (Exception e) {
+            throw new IllegalStateException("Could not back up Caustica config before migration", e);
+        }
     }
 
-    static boolean shouldResetToDefaults(Object version) {
+    private static void saveFileAtomically() {
+        Path temporary = null;
+        try {
+            Path parent = CONFIG_PATH.toAbsolutePath().getParent();
+            Files.createDirectories(parent);
+            temporary = Files.createTempFile(parent, CONFIG_PATH.getFileName() + ".tmp-", ".toml");
+            try (Writer writer = Files.newBufferedWriter(temporary, StandardCharsets.UTF_8,
+                    StandardOpenOption.TRUNCATE_EXISTING, StandardOpenOption.WRITE)) {
+                new TomlWriter().write(FILE, writer);
+            }
+            try {
+                Files.move(temporary, CONFIG_PATH, StandardCopyOption.ATOMIC_MOVE,
+                        StandardCopyOption.REPLACE_EXISTING);
+            } catch (java.nio.file.AtomicMoveNotSupportedException e) {
+                Files.move(temporary, CONFIG_PATH, StandardCopyOption.REPLACE_EXISTING);
+            }
+        } catch (Exception e) {
+            throw new IllegalStateException("Could not save Caustica config", e);
+        } finally {
+            if (temporary != null) {
+                try {
+                    Files.deleteIfExists(temporary);
+                } catch (Exception cleanupFailure) {
+                    LOGGER.warn("Could not remove temporary Caustica config {}: {}", temporary, cleanupFailure.toString());
+                }
+            }
+        }
+    }
+
+    private static boolean needsProfileMigration() {
+        return needsProfileMigration(fileValue("config-version"));
+    }
+
+    static boolean needsProfileMigration(Object version) {
         return !(version instanceof Number) || ((Number) version).intValue() < DEFAULTS_PROFILE_VERSION;
     }
 
     private static int profileVersionForSave() {
-        Object version = FILE.contains("config-version") ? FILE.get("config-version") : null;
-        return profileVersionForSave(version);
+        return profileVersionForSave(fileValue("config-version"));
     }
 
     static int profileVersionForSave(Object version) {
@@ -169,15 +227,40 @@ public final class CausticaConfig {
     }
 
     private static Boolean fileBoolean(String tomlPath) {
-        return FILE.contains(tomlPath) ? FILE.<Boolean>get(tomlPath) : null;
+        Object value = fileValue(tomlPath);
+        return value instanceof Boolean ? (Boolean) value : null;
     }
 
     private static Number fileNumber(String tomlPath) {
-        return FILE.contains(tomlPath) ? FILE.<Number>get(tomlPath) : null;
+        Object value = fileValue(tomlPath);
+        return value instanceof Number ? (Number) value : null;
     }
 
     private static String fileString(String tomlPath) {
-        return FILE.contains(tomlPath) ? FILE.<String>get(tomlPath) : null;
+        Object value = fileValue(tomlPath);
+        return value instanceof String ? (String) value : null;
+    }
+
+    private static Object fileValue(String path) {
+        return FILE.contains(path) ? FILE.get(path) : null;
+    }
+
+    static Boolean parseBooleanValue(String raw) {
+        if (raw == null) {
+            return null;
+        }
+        if ("true".equalsIgnoreCase(raw.trim())) {
+            return Boolean.TRUE;
+        }
+        if ("false".equalsIgnoreCase(raw.trim())) {
+            return Boolean.FALSE;
+        }
+        return null;
+    }
+
+    static boolean resolveBoolean(String property, Boolean file, boolean fallback) {
+        Boolean fromProperty = parseBooleanValue(property);
+        return fromProperty != null ? fromProperty : file != null ? file : fallback;
     }
 
     public interface RuntimeSetting<T> {
@@ -244,7 +327,7 @@ public final class CausticaConfig {
 
         @Override
         public void reloadFromSystemProperties() {
-            set(Boolean.parseBoolean(System.getProperty(key, Boolean.toString(defaultValue))));
+            this.value = resolveBoolean(System.getProperty(key), fileBoolean(tomlPath), defaultValue);
         }
 
         @Override
@@ -253,12 +336,7 @@ public final class CausticaConfig {
         }
 
         private boolean resolveInitial() {
-            String prop = System.getProperty(key);
-            if (prop != null) {
-                return Boolean.parseBoolean(prop.trim());
-            }
-            Boolean fromFile = FORCE_DEFAULTS_ON_FIRST_LOAD ? null : fileBoolean(tomlPath);
-            return fromFile != null ? fromFile : defaultValue;
+            return resolveBoolean(System.getProperty(key), fileBoolean(tomlPath), defaultValue);
         }
     }
 
@@ -310,15 +388,11 @@ public final class CausticaConfig {
         @Override
         public void reloadFromSystemProperties() {
             String prop = System.getProperty(key);
-            if (prop == null) {
-                this.value = defaultValue;
-                return;
-            }
-            try {
-                this.value = sanitize.applyAsInt(Integer.parseInt(prop.trim()));
-            } catch (NumberFormatException e) {
-                this.value = defaultValue;
-            }
+            Integer fromProperty = parseInteger(prop);
+            Integer fromFile = asInteger(fileNumber(tomlPath));
+            this.value = sanitize.applyAsInt(fromProperty != null
+                    ? fromProperty
+                    : fromFile != null ? fromFile : defaultValue);
         }
 
         @Override
@@ -327,16 +401,34 @@ public final class CausticaConfig {
         }
 
         private int resolveInitial() {
-            String prop = System.getProperty(key);
-            if (prop != null) {
-                try {
-                    return sanitize.applyAsInt(Integer.parseInt(prop.trim()));
-                } catch (NumberFormatException e) {
-                    return defaultValue;
-                }
+            Integer fromProperty = parseInteger(System.getProperty(key));
+            Integer fromFile = asInteger(fileNumber(tomlPath));
+            return sanitize.applyAsInt(fromProperty != null
+                    ? fromProperty
+                    : fromFile != null ? fromFile : defaultValue);
+        }
+
+        private static Integer parseInteger(String raw) {
+            if (raw == null) {
+                return null;
             }
-            Number fromFile = FORCE_DEFAULTS_ON_FIRST_LOAD ? null : fileNumber(tomlPath);
-            return fromFile != null ? sanitize.applyAsInt(fromFile.intValue()) : defaultValue;
+            try {
+                return Integer.parseInt(raw.trim());
+            } catch (NumberFormatException e) {
+                return null;
+            }
+        }
+
+        private static Integer asInteger(Number raw) {
+            if (raw == null) {
+                return null;
+            }
+            double value = raw.doubleValue();
+            if (!Double.isFinite(value) || value != Math.rint(value)
+                    || value < Integer.MIN_VALUE || value > Integer.MAX_VALUE) {
+                return null;
+            }
+            return raw.intValue();
         }
     }
 
@@ -362,7 +454,11 @@ public final class CausticaConfig {
             this.inputTransform = inputTransform;
             this.outputTransform = outputTransform;
             this.valueClamp = valueClamp;
-            this.defaultValue = (float) valueClamp.applyAsDouble(inputTransform.applyAsDouble(rawDefault));
+            Float sanitizedDefault = sanitizeValue(rawDefault);
+            if (sanitizedDefault == null) {
+                throw new IllegalArgumentException("Non-finite default for " + key);
+            }
+            this.defaultValue = sanitizedDefault;
             this.value = resolveInitial();
             SETTINGS.add(this);
         }
@@ -393,25 +489,15 @@ public final class CausticaConfig {
 
         @Override
         public void set(Float value) {
-            if (value == null) {
-                this.value = defaultValue;
-            } else {
-                this.value = (float) valueClamp.applyAsDouble(inputTransform.applyAsDouble(value));
-            }
+            Float sanitized = value == null ? null : sanitizeValue(value.doubleValue());
+            this.value = sanitized != null ? sanitized : defaultValue;
         }
 
         @Override
         public void reloadFromSystemProperties() {
-            String prop = System.getProperty(key);
-            if (prop == null) {
-                this.value = defaultValue;
-                return;
-            }
-            try {
-                this.value = (float) valueClamp.applyAsDouble(inputTransform.applyAsDouble(Double.parseDouble(prop.trim())));
-            } catch (NumberFormatException e) {
-                this.value = defaultValue;
-            }
+            Float fromProperty = parseProperty(System.getProperty(key));
+            Float fromFile = parseFile(fileNumber(tomlPath));
+            this.value = fromProperty != null ? fromProperty : fromFile != null ? fromFile : defaultValue;
         }
 
         @Override
@@ -424,19 +510,40 @@ public final class CausticaConfig {
         }
 
         private float resolveInitial() {
-            String prop = System.getProperty(key);
-            if (prop != null) {
-                try {
-                    return (float) valueClamp.applyAsDouble(inputTransform.applyAsDouble(Double.parseDouble(prop.trim())));
-                } catch (NumberFormatException e) {
-                    return defaultValue;
-                }
+            Float fromProperty = parseProperty(System.getProperty(key));
+            Float fromFile = parseFile(fileNumber(tomlPath));
+            return fromProperty != null ? fromProperty : fromFile != null ? fromFile : defaultValue;
+        }
+
+        private Float parseProperty(String raw) {
+            if (raw == null) {
+                return null;
             }
-            Number fromFile = FORCE_DEFAULTS_ON_FIRST_LOAD ? null : fileNumber(tomlPath);
-            if (fromFile == null) {
-                return defaultValue;
+            try {
+                return sanitizeValue(Double.parseDouble(raw.trim()));
+            } catch (NumberFormatException e) {
+                return null;
             }
-            return (float) valueClamp.applyAsDouble(inputTransform.applyAsDouble(fromFile.doubleValue()));
+        }
+
+        private Float parseFile(Number raw) {
+            return raw == null ? null : sanitizeValue(raw.doubleValue());
+        }
+
+        private Float sanitizeValue(double raw) {
+            if (!Double.isFinite(raw)) {
+                return null;
+            }
+            double transformed = inputTransform.applyAsDouble(raw);
+            if (!Double.isFinite(transformed)) {
+                return null;
+            }
+            double clamped = valueClamp.applyAsDouble(transformed);
+            if (!Double.isFinite(clamped)) {
+                return null;
+            }
+            float result = (float) clamped;
+            return Float.isFinite(result) ? result : null;
         }
     }
 
@@ -445,13 +552,24 @@ public final class CausticaConfig {
         private final String tomlPath;
         private final String defaultValue;
         private final UnaryOperator<String> sanitize;
+        private final Predicate<String> valid;
         private volatile String value;
 
         private StringSetting(String key, String tomlPath, String defaultValue, UnaryOperator<String> sanitize) {
+            this(key, tomlPath, defaultValue, sanitize, value -> true);
+        }
+
+        private StringSetting(String key, String tomlPath, String defaultValue, UnaryOperator<String> sanitize,
+                              Predicate<String> valid) {
             this.key = key;
             this.tomlPath = tomlPath;
-            this.defaultValue = sanitize.apply(defaultValue);
             this.sanitize = sanitize;
+            this.valid = valid;
+            String sanitizedDefault = sanitizeValue(defaultValue);
+            if (sanitizedDefault == null) {
+                throw new IllegalArgumentException("Invalid default for " + key);
+            }
+            this.defaultValue = sanitizedDefault;
             this.value = resolveInitial();
             SETTINGS.add(this);
         }
@@ -478,12 +596,13 @@ public final class CausticaConfig {
 
         @Override
         public void set(String value) {
-            this.value = sanitize.apply(value != null ? value : defaultValue);
+            String sanitized = sanitizeValue(value);
+            this.value = sanitized != null ? sanitized : defaultValue;
         }
 
         @Override
         public void reloadFromSystemProperties() {
-            set(System.getProperty(key, defaultValue));
+            this.value = resolveValue(System.getProperty(key), fileString(tomlPath));
         }
 
         @Override
@@ -492,12 +611,24 @@ public final class CausticaConfig {
         }
 
         private String resolveInitial() {
-            String prop = System.getProperty(key);
-            if (prop != null) {
-                return sanitize.apply(prop);
+            return resolveValue(System.getProperty(key), fileString(tomlPath));
+        }
+
+        private String resolveValue(String property, String file) {
+            String fromProperty = sanitizeValue(property);
+            if (fromProperty != null) {
+                return fromProperty;
             }
-            String fromFile = FORCE_DEFAULTS_ON_FIRST_LOAD ? null : fileString(tomlPath);
-            return sanitize.apply(fromFile != null ? fromFile : defaultValue);
+            String fromFile = sanitizeValue(file);
+            return fromFile != null ? fromFile : defaultValue;
+        }
+
+        private String sanitizeValue(String raw) {
+            if (raw == null || !valid.test(raw)) {
+                return null;
+            }
+            String sanitized = sanitize.apply(raw);
+            return sanitized == null ? null : sanitized;
         }
     }
 
@@ -540,7 +671,8 @@ public final class CausticaConfig {
 
         @Override
         public void reloadFromSystemProperties() {
-            this.value = System.getProperty(key);
+            String prop = System.getProperty(key);
+            this.value = prop != null ? prop : fileString(tomlPath);
         }
 
         @Override
@@ -554,7 +686,7 @@ public final class CausticaConfig {
 
         private String resolveInitial() {
             String prop = System.getProperty(key);
-            return prop != null ? prop : (FORCE_DEFAULTS_ON_FIRST_LOAD ? null : fileString(tomlPath));
+            return prop != null ? prop : fileString(tomlPath);
         }
     }
 
@@ -786,7 +918,8 @@ public final class CausticaConfig {
             // holds a low exposure when you step from noon sun into shade. That is a real limit of this
             // controller, not a tuning miss.
             public static final StringSetting MODE =
-                    string("caustica.rt.exposure.mode", "exposure.mode", "auto", Exposure::sanitizeMode);
+                    string("caustica.rt.exposure.mode", "exposure.mode", "auto", Exposure::sanitizeMode,
+                            Exposure::isValidMode);
             public static final FloatSetting MANUAL_EV =
                     clampedFloat("caustica.rt.exposure.manualEv", "exposure.manual-ev",
                             0.0f, -15.0f, 15.0f);
@@ -870,13 +1003,19 @@ public final class CausticaConfig {
             }
 
             private static String sanitizeMode(String value) {
-                if ("auto".equalsIgnoreCase(value)) {
+                String trimmed = value == null ? "" : value.trim();
+                if ("auto".equalsIgnoreCase(trimmed)) {
                     return "auto";
                 }
-                if ("manual".equalsIgnoreCase(value)) {
+                if ("manual".equalsIgnoreCase(trimmed)) {
                     return "manual";
                 }
                 return "auto";
+            }
+
+            private static boolean isValidMode(String value) {
+                String trimmed = value == null ? "" : value.trim();
+                return "auto".equalsIgnoreCase(trimmed) || "manual".equalsIgnoreCase(trimmed);
             }
 
         }
@@ -894,7 +1033,7 @@ public final class CausticaConfig {
         public static final class Sdr {
             public static final StringSetting TONE_MAPPER =
                     string("caustica.rt.sdr.toneMapper", "sdr.tone-mapper", "psychov24",
-                            Sdr::sanitizeToneMapper);
+                            Sdr::sanitizeToneMapper, Sdr::isValidToneMapper);
             public static final FloatSetting AGX_CONTRAST =
                     clampedFloat("caustica.rt.sdr.agx.contrast", "sdr.agx.contrast", 1.0f, 0.0f, 2.0f);
             public static final FloatSetting AGX_SATURATION =
@@ -975,6 +1114,10 @@ public final class CausticaConfig {
             private static String sanitizeToneMapper(String value) {
                 return dev.comfyfluffy.caustica.rt.pipeline.RtToneMapping.SdrMode.parse(value).canonicalName();
             }
+
+            private static boolean isValidToneMapper(String value) {
+                return dev.comfyfluffy.caustica.rt.pipeline.RtToneMapping.SdrMode.isKnown(value);
+            }
         }
 
         /** Render-frame timing + hitch logging. See {@code RtFrameStats}. */
@@ -1016,7 +1159,7 @@ public final class CausticaConfig {
                     clampedFloat("caustica.rt.hdr.paperWhiteNits", "hdr.paper-white-nits", 200.0f, 80.0f, 500.0f);
             public static final StringSetting TONE_MAPPER =
                     string("caustica.rt.hdr.toneMapper", "hdr.tone-mapper", "psychov24",
-                            Hdr::sanitizeToneMapper);
+                            Hdr::sanitizeToneMapper, Hdr::isValidToneMapper);
             public static final FloatSetting PSYCHOV24_COMPRESSION =
                     clampedFloat("caustica.rt.hdr.psychov24.compression",
                             "hdr.psychov24.compression", 0.0f, 0.0f, 8.0f);
@@ -1125,6 +1268,10 @@ public final class CausticaConfig {
                 return dev.comfyfluffy.caustica.rt.pipeline.RtToneMapping.HdrMode.parse(value).canonicalName();
             }
 
+            private static boolean isValidToneMapper(String value) {
+                return dev.comfyfluffy.caustica.rt.pipeline.RtToneMapping.HdrMode.isKnown(value);
+            }
+
         }
     }
 
@@ -1141,6 +1288,11 @@ public final class CausticaConfig {
 
     private static StringSetting string(String key, String tomlPath, String fallback, UnaryOperator<String> sanitize) {
         return new StringSetting(key, tomlPath, fallback, sanitize);
+    }
+
+    private static StringSetting string(String key, String tomlPath, String fallback, UnaryOperator<String> sanitize,
+                                        Predicate<String> valid) {
+        return new StringSetting(key, tomlPath, fallback, sanitize, valid);
     }
 
     private static OptionalStringSetting optionalString(String key, String tomlPath) {
