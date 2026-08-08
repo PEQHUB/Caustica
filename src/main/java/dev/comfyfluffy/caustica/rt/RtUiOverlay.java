@@ -222,13 +222,18 @@ public final class RtUiOverlay {
     }
 
     public static void destroy() {
-        RenderSystem.outputColorTextureOverride = null;
-        RenderSystem.outputDepthTextureOverride = null;
-        usedThisFrame = false;
-        overlayClearedThisFrame = false;
-        if (overlay != null) {
-            overlay.destroyBuffers();
+        TextureTarget oldOverlay = overlay;
+        try {
+            RenderSystem.outputColorTextureOverride = null;
+            RenderSystem.outputDepthTextureOverride = null;
+            if (oldOverlay != null) {
+                oldOverlay.destroyBuffers();
+            }
+        } finally {
             overlay = null;
+            usedThisFrame = false;
+            overlayClearedThisFrame = false;
+            compositeFailed = false;
         }
     }
 }

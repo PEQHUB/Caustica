@@ -72,6 +72,11 @@ public final class RtDebugPresentPipeline {
 
     public static RtDebugPresentPipeline create(RtContext ctx) {
         VkDevice vk = ctx.vk();
+        long dsl = 0L;
+        long pool = 0L;
+        long layout = 0L;
+        long module = 0L;
+        long pipeline = 0L;
         try (MemoryStack stack = MemoryStack.stackPush()) {
             // 0: output (SDR display target). 1..6: guide buffers. 7: post-RR scene image.
             // 8: same-frame display exposure. 9: exposure state, including the sky metering scale.
@@ -87,7 +92,7 @@ public final class RtDebugPresentPipeline {
             VkDescriptorSetLayoutCreateInfo dslci = VkDescriptorSetLayoutCreateInfo.calloc(stack).sType$Default().pBindings(binds);
             LongBuffer p = stack.mallocLong(1);
             check(VK10.vkCreateDescriptorSetLayout(vk, dslci, null, p), "vkCreateDescriptorSetLayout(rt debug present)");
-            long dsl = p.get(0);
+            dsl = p.get(0);
             RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT, dsl, "debug present descriptor set layout");
 
             VkDescriptorPoolSize.Buffer poolSizes = VkDescriptorPoolSize.calloc(2, stack);
@@ -95,7 +100,7 @@ public final class RtDebugPresentPipeline {
             poolSizes.get(1).type(VK10.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER).descriptorCount(1);
             VkDescriptorPoolCreateInfo dpci = VkDescriptorPoolCreateInfo.calloc(stack).sType$Default().maxSets(1).pPoolSizes(poolSizes);
             check(VK10.vkCreateDescriptorPool(vk, dpci, null, p), "vkCreateDescriptorPool(rt debug present)");
-            long pool = p.get(0);
+            pool = p.get(0);
             RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_DESCRIPTOR_POOL, pool, "debug present descriptor pool");
 
             VkDescriptorSetAllocateInfo dsai = VkDescriptorSetAllocateInfo.calloc(stack).sType$Default()
@@ -110,10 +115,10 @@ public final class RtDebugPresentPipeline {
             VkPipelineLayoutCreateInfo plci = VkPipelineLayoutCreateInfo.calloc(stack).sType$Default()
                     .pSetLayouts(stack.longs(dsl)).pPushConstantRanges(pushRange);
             check(VK10.vkCreatePipelineLayout(vk, plci, null, p), "vkCreatePipelineLayout(rt debug present)");
-            long layout = p.get(0);
+            layout = p.get(0);
             RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_PIPELINE_LAYOUT, layout, "debug present pipeline layout");
 
-            long module = loadModule(vk, stack, "main.comp.spv");
+            module = loadModule(vk, stack, "main.comp.spv");
             RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_SHADER_MODULE, module, "debug present shader module");
             VkPipelineShaderStageCreateInfo stage = VkPipelineShaderStageCreateInfo.calloc(stack).sType$Default()
                     .stage(VK10.VK_SHADER_STAGE_COMPUTE_BIT).module(module).pName(stack.UTF8("main"));
@@ -122,10 +127,19 @@ public final class RtDebugPresentPipeline {
             LongBuffer pPipeline = stack.mallocLong(1);
             check(VK10.vkCreateComputePipelines(vk, VK10.VK_NULL_HANDLE, cpci, null, pPipeline),
                     "vkCreateComputePipelines(rt debug present)");
-            RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_PIPELINE, pPipeline.get(0), "debug present compute pipeline");
+            pipeline = pPipeline.get(0);
+            RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_PIPELINE, pipeline, "debug present compute pipeline");
             VK10.vkDestroyShaderModule(vk, module, null);
+            module = 0L;
 
-            return new RtDebugPresentPipeline(ctx, dsl, pool, set, layout, pPipeline.get(0));
+            return new RtDebugPresentPipeline(ctx, dsl, pool, set, layout, pipeline);
+        } catch (Throwable t) {
+            if (module != 0L) VK10.vkDestroyShaderModule(vk, module, null);
+            if (pipeline != 0L) VK10.vkDestroyPipeline(vk, pipeline, null);
+            if (layout != 0L) VK10.vkDestroyPipelineLayout(vk, layout, null);
+            if (pool != 0L) VK10.vkDestroyDescriptorPool(vk, pool, null);
+            if (dsl != 0L) VK10.vkDestroyDescriptorSetLayout(vk, dsl, null);
+            throw t;
         }
     }
 

@@ -121,11 +121,18 @@ public final class RtWorldOverlay {
                     .build(ctx, "world overlay UI composite");
         }
         if (overlayImage == null || overlayImage.width != width || overlayImage.height != height) {
-            if (overlayImage != null) {
-                overlayImage.destroy();
-            }
-            overlayImage = ctx.createStorageImage(width, height, TARGET_FORMAT,
+            RtImage replacement = ctx.createStorageImage(width, height, TARGET_FORMAT,
                     "world overlay " + width + "x" + height, VK10.VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
+            try {
+                if (overlayImage != null) {
+                    framePool.awaitImageReplacementBoundary(ctx);
+                    overlayImage.destroy();
+                }
+                overlayImage = replacement;
+            } catch (Throwable t) {
+                replacement.destroy();
+                throw t;
+            }
         }
         uiCompositeSet.bind(ctx, overlayImage.view);
     }
@@ -164,21 +171,51 @@ public final class RtWorldOverlay {
 
     /** Teardown with the rest of the RT stack ({@code RtComposite.destroy}); the device is idle by then. */
     public void destroy() {
+        RtContext context = ctxRef;
+        Throwable failure = null;
+        failed = false;
         for (RtOverlayFeature f : features) {
-            f.destroy();
+            failure = teardownStep(failure, "overlay feature", f::destroy);
         }
-        if (uiCompositePipeline != null && ctxRef != null) {
-            uiCompositePipeline.destroy(ctxRef.vk());
-            uiCompositeSet.destroy(ctxRef.vk());
-        }
+        RtOverlayPipelines.Pipeline pipeline = uiCompositePipeline;
         uiCompositePipeline = null;
+        RtOverlayPipelines.ReadOnlyImageSet imageSet = uiCompositeSet;
         uiCompositeSet = null;
-        if (overlayImage != null) {
-            overlayImage.destroy();
-            overlayImage = null;
+        if (context != null) {
+            if (pipeline != null) {
+                failure = teardownStep(failure, "overlay composite pipeline", () -> pipeline.destroy(context.vk()));
+            }
+            if (imageSet != null) {
+                failure = teardownStep(failure, "overlay composite descriptor set", () -> imageSet.destroy(context.vk()));
+            }
+        } else if (pipeline != null || imageSet != null) {
+            failure = teardownStep(failure, "overlay composite context", () -> {
+                throw new IllegalStateException("Overlay resources outlived their Vulkan context");
+            });
+        }
+        RtImage image = overlayImage;
+        overlayImage = null;
+        if (image != null) {
+            failure = teardownStep(failure, "overlay image", image::destroy);
         }
         ctxRef = null;
-        framePool.destroy();
+        failure = teardownStep(failure, "overlay frame pool", framePool::destroy);
+        if (failure != null) {
+            throw new IllegalStateException("World overlay teardown failed", failure);
+        }
+    }
+
+    static Throwable teardownStep(Throwable failure, String name, Runnable action) {
+        try {
+            action.run();
+        } catch (Throwable t) {
+            IllegalStateException wrapped = new IllegalStateException("World overlay teardown failed during " + name, t);
+            if (failure == null) {
+                return wrapped;
+            }
+            failure.addSuppressed(wrapped);
+        }
+        return failure;
     }
 
     // ---- Recording helpers shared by features ----

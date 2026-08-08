@@ -193,6 +193,10 @@ public final class RtOverlayPipelines {
 
     private static Pipeline createGraphics(RtContext ctx, Spec spec, String label) {
         VkDevice vk = ctx.vk();
+        long layout = 0L;
+        long vertModule = 0L;
+        long fragModule = 0L;
+        long handle = 0L;
         try (MemoryStack stack = MemoryStack.stackPush()) {
             LongBuffer p = stack.mallocLong(1);
 
@@ -206,11 +210,11 @@ public final class RtOverlayPipelines {
                 layoutCi.pSetLayouts(stack.longs(spec.descriptorSetLayout));
             }
             check(VK10.vkCreatePipelineLayout(vk, layoutCi, null, p), "vkCreatePipelineLayout(" + label + ")");
-            long layout = p.get(0);
+            layout = p.get(0);
             RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_PIPELINE_LAYOUT, layout, label + " pipeline layout");
 
-            long vertModule = loadModule(vk, stack, spec.vertSpv);
-            long fragModule = loadModule(vk, stack, spec.fragSpv);
+            vertModule = loadModule(vk, stack, spec.vertSpv);
+            fragModule = loadModule(vk, stack, spec.fragSpv);
             VkPipelineShaderStageCreateInfo.Buffer stages = VkPipelineShaderStageCreateInfo.calloc(2, stack);
             stages.get(0).sType$Default().stage(VK10.VK_SHADER_STAGE_VERTEX_BIT).module(vertModule).pName(stack.UTF8("main"));
             stages.get(1).sType$Default().stage(VK10.VK_SHADER_STAGE_FRAGMENT_BIT).module(fragModule).pName(stack.UTF8("main"));
@@ -294,11 +298,30 @@ public final class RtOverlayPipelines {
             LongBuffer pPipeline = stack.mallocLong(1);
             check(VK10.vkCreateGraphicsPipelines(vk, VK10.VK_NULL_HANDLE, gpci, null, pPipeline),
                     "vkCreateGraphicsPipelines(" + label + ")");
-            long handle = pPipeline.get(0);
+            handle = pPipeline.get(0);
             RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_PIPELINE, handle, label + " pipeline");
             VK10.vkDestroyShaderModule(vk, vertModule, null);
+            vertModule = 0L;
             VK10.vkDestroyShaderModule(vk, fragModule, null);
-            return new Pipeline(layout, handle);
+            fragModule = 0L;
+            Pipeline result = new Pipeline(layout, handle);
+            layout = 0L;
+            handle = 0L;
+            return result;
+        } catch (RuntimeException | Error failure) {
+            if (handle != 0L) {
+                VK10.vkDestroyPipeline(vk, handle, null);
+            }
+            if (fragModule != 0L) {
+                VK10.vkDestroyShaderModule(vk, fragModule, null);
+            }
+            if (vertModule != 0L) {
+                VK10.vkDestroyShaderModule(vk, vertModule, null);
+            }
+            if (layout != 0L) {
+                VK10.vkDestroyPipelineLayout(vk, layout, null);
+            }
+            throw failure;
         }
     }
 
@@ -367,6 +390,8 @@ public final class RtOverlayPipelines {
 
     public static ReadOnlyImageSet readOnlyImageSet(RtContext ctx, int stageFlags, String label) {
         VkDevice vk = ctx.vk();
+        long dsl = 0L;
+        long pool = 0L;
         try (MemoryStack stack = MemoryStack.stackPush()) {
             LongBuffer p = stack.mallocLong(1);
             VkDescriptorSetLayoutBinding.Buffer binds = VkDescriptorSetLayoutBinding.calloc(1, stack);
@@ -374,14 +399,14 @@ public final class RtOverlayPipelines {
                     .descriptorCount(1).stageFlags(stageFlags);
             VkDescriptorSetLayoutCreateInfo dslci = VkDescriptorSetLayoutCreateInfo.calloc(stack).sType$Default().pBindings(binds);
             check(VK10.vkCreateDescriptorSetLayout(vk, dslci, null, p), "vkCreateDescriptorSetLayout(" + label + ")");
-            long dsl = p.get(0);
+            dsl = p.get(0);
             RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT, dsl, label + " descriptor set layout");
 
             VkDescriptorPoolSize.Buffer poolSizes = VkDescriptorPoolSize.calloc(1, stack);
             poolSizes.get(0).type(VK10.VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE).descriptorCount(1);
             VkDescriptorPoolCreateInfo dpci = VkDescriptorPoolCreateInfo.calloc(stack).sType$Default().maxSets(1).pPoolSizes(poolSizes);
             check(VK10.vkCreateDescriptorPool(vk, dpci, null, p), "vkCreateDescriptorPool(" + label + ")");
-            long pool = p.get(0);
+            pool = p.get(0);
             RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_DESCRIPTOR_POOL, pool, label + " descriptor pool");
 
             VkDescriptorSetAllocateInfo dsai = VkDescriptorSetAllocateInfo.calloc(stack).sType$Default()
@@ -390,7 +415,13 @@ public final class RtOverlayPipelines {
             check(VK10.vkAllocateDescriptorSets(vk, dsai, pSet), "vkAllocateDescriptorSets(" + label + ")");
             long set = pSet.get(0);
             RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_DESCRIPTOR_SET, set, label + " descriptor set");
-            return new ReadOnlyImageSet(dsl, pool, set);
+            ReadOnlyImageSet result = new ReadOnlyImageSet(dsl, pool, set);
+            dsl = 0L;
+            pool = 0L;
+            return result;
+        } catch (RuntimeException | Error failure) {
+            destroyDescriptorParts(vk, pool, dsl);
+            throw failure;
         }
     }
 
@@ -437,6 +468,8 @@ public final class RtOverlayPipelines {
 
     public static SampledImageSet sampledImageSet(RtContext ctx, int stageFlags, String label) {
         VkDevice vk = ctx.vk();
+        long dsl = 0L;
+        long pool = 0L;
         try (MemoryStack stack = MemoryStack.stackPush()) {
             LongBuffer p = stack.mallocLong(1);
             VkDescriptorSetLayoutBinding.Buffer binds = VkDescriptorSetLayoutBinding.calloc(1, stack);
@@ -444,14 +477,14 @@ public final class RtOverlayPipelines {
                     .descriptorCount(1).stageFlags(stageFlags);
             VkDescriptorSetLayoutCreateInfo dslci = VkDescriptorSetLayoutCreateInfo.calloc(stack).sType$Default().pBindings(binds);
             check(VK10.vkCreateDescriptorSetLayout(vk, dslci, null, p), "vkCreateDescriptorSetLayout(" + label + ")");
-            long dsl = p.get(0);
+            dsl = p.get(0);
             RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT, dsl, label + " descriptor set layout");
 
             VkDescriptorPoolSize.Buffer poolSizes = VkDescriptorPoolSize.calloc(1, stack);
             poolSizes.get(0).type(VK10.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER).descriptorCount(1);
             VkDescriptorPoolCreateInfo dpci = VkDescriptorPoolCreateInfo.calloc(stack).sType$Default().maxSets(1).pPoolSizes(poolSizes);
             check(VK10.vkCreateDescriptorPool(vk, dpci, null, p), "vkCreateDescriptorPool(" + label + ")");
-            long pool = p.get(0);
+            pool = p.get(0);
             RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_DESCRIPTOR_POOL, pool, label + " descriptor pool");
 
             VkDescriptorSetAllocateInfo dsai = VkDescriptorSetAllocateInfo.calloc(stack).sType$Default()
@@ -460,7 +493,13 @@ public final class RtOverlayPipelines {
             check(VK10.vkAllocateDescriptorSets(vk, dsai, pSet), "vkAllocateDescriptorSets(" + label + ")");
             long set = pSet.get(0);
             RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_DESCRIPTOR_SET, set, label + " descriptor set");
-            return new SampledImageSet(dsl, pool, set);
+            SampledImageSet result = new SampledImageSet(dsl, pool, set);
+            dsl = 0L;
+            pool = 0L;
+            return result;
+        } catch (RuntimeException | Error failure) {
+            destroyDescriptorParts(vk, pool, dsl);
+            throw failure;
         }
     }
 
@@ -516,6 +555,8 @@ public final class RtOverlayPipelines {
 
     public static SampledImageSetPool sampledImageSetPool(RtContext ctx, int stageFlags, int maxSets, String label) {
         VkDevice vk = ctx.vk();
+        long dsl = 0L;
+        long pool = 0L;
         try (MemoryStack stack = MemoryStack.stackPush()) {
             LongBuffer p = stack.mallocLong(1);
             VkDescriptorSetLayoutBinding.Buffer binds = VkDescriptorSetLayoutBinding.calloc(1, stack);
@@ -523,17 +564,23 @@ public final class RtOverlayPipelines {
                     .descriptorCount(1).stageFlags(stageFlags);
             VkDescriptorSetLayoutCreateInfo dslci = VkDescriptorSetLayoutCreateInfo.calloc(stack).sType$Default().pBindings(binds);
             check(VK10.vkCreateDescriptorSetLayout(vk, dslci, null, p), "vkCreateDescriptorSetLayout(" + label + ")");
-            long dsl = p.get(0);
+            dsl = p.get(0);
             RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT, dsl, label + " descriptor set layout");
 
             VkDescriptorPoolSize.Buffer poolSizes = VkDescriptorPoolSize.calloc(1, stack);
             poolSizes.get(0).type(VK10.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER).descriptorCount(maxSets);
             VkDescriptorPoolCreateInfo dpci = VkDescriptorPoolCreateInfo.calloc(stack).sType$Default().maxSets(maxSets).pPoolSizes(poolSizes);
             check(VK10.vkCreateDescriptorPool(vk, dpci, null, p), "vkCreateDescriptorPool(" + label + ")");
-            long pool = p.get(0);
+            pool = p.get(0);
             RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_DESCRIPTOR_POOL, pool, label + " descriptor pool");
 
-            return new SampledImageSetPool(dsl, pool);
+            SampledImageSetPool result = new SampledImageSetPool(dsl, pool);
+            dsl = 0L;
+            pool = 0L;
+            return result;
+        } catch (RuntimeException | Error failure) {
+            destroyDescriptorParts(vk, pool, dsl);
+            throw failure;
         }
     }
 
@@ -592,6 +639,8 @@ public final class RtOverlayPipelines {
 
     public static AccelStructureSet accelStructureSet(RtContext ctx, int stageFlags, String label) {
         VkDevice vk = ctx.vk();
+        long dsl = 0L;
+        long pool = 0L;
         try (MemoryStack stack = MemoryStack.stackPush()) {
             LongBuffer p = stack.mallocLong(1);
             VkDescriptorSetLayoutBinding.Buffer binds = VkDescriptorSetLayoutBinding.calloc(1, stack);
@@ -599,7 +648,7 @@ public final class RtOverlayPipelines {
                     .descriptorCount(1).stageFlags(stageFlags);
             VkDescriptorSetLayoutCreateInfo dslci = VkDescriptorSetLayoutCreateInfo.calloc(stack).sType$Default().pBindings(binds);
             check(VK10.vkCreateDescriptorSetLayout(vk, dslci, null, p), "vkCreateDescriptorSetLayout(" + label + ")");
-            long dsl = p.get(0);
+            dsl = p.get(0);
             RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT, dsl, label + " descriptor set layout");
 
             int ring = AccelStructureSet.RING;
@@ -607,7 +656,7 @@ public final class RtOverlayPipelines {
             poolSizes.get(0).type(KHRAccelerationStructure.VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR).descriptorCount(ring);
             VkDescriptorPoolCreateInfo dpci = VkDescriptorPoolCreateInfo.calloc(stack).sType$Default().maxSets(ring).pPoolSizes(poolSizes);
             check(VK10.vkCreateDescriptorPool(vk, dpci, null, p), "vkCreateDescriptorPool(" + label + ")");
-            long pool = p.get(0);
+            pool = p.get(0);
             RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_DESCRIPTOR_POOL, pool, label + " descriptor pool");
 
             LongBuffer dsls = stack.mallocLong(ring);
@@ -623,12 +672,19 @@ public final class RtOverlayPipelines {
                 sets[i] = pSets.get(i);
                 RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_DESCRIPTOR_SET, sets[i], label + " descriptor set " + i);
             }
-            return new AccelStructureSet(dsl, pool, sets);
+            AccelStructureSet result = new AccelStructureSet(dsl, pool, sets);
+            dsl = 0L;
+            pool = 0L;
+            return result;
+        } catch (RuntimeException | Error failure) {
+            destroyDescriptorParts(vk, pool, dsl);
+            throw failure;
         }
     }
 
     /** A shared nearest/clamp sampler, for overlay passes sampling a real texture (e.g. a font atlas). */
     public static long createNearestClampSampler(RtContext ctx, String label) {
+        long sampler = 0L;
         try (MemoryStack stack = MemoryStack.stackPush()) {
             VkSamplerCreateInfo sci = VkSamplerCreateInfo.calloc(stack).sType$Default()
                     .magFilter(VK10.VK_FILTER_NEAREST).minFilter(VK10.VK_FILTER_NEAREST)
@@ -638,9 +694,14 @@ public final class RtOverlayPipelines {
                     .addressModeW(VK10.VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
             LongBuffer p = stack.mallocLong(1);
             check(VK10.vkCreateSampler(ctx.vk(), sci, null, p), "vkCreateSampler(" + label + ")");
-            long sampler = p.get(0);
+            sampler = p.get(0);
             RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_SAMPLER, sampler, label + " sampler");
             return sampler;
+        } catch (RuntimeException | Error failure) {
+            if (sampler != 0L) {
+                VK10.vkDestroySampler(ctx.vk(), sampler, null);
+            }
+            throw failure;
         }
     }
 
@@ -664,5 +725,10 @@ public final class RtOverlayPipelines {
         } finally {
             MemoryUtil.memFree(code);
         }
+    }
+
+    private static void destroyDescriptorParts(VkDevice vk, long pool, long layout) {
+        if (pool != 0L) VK10.vkDestroyDescriptorPool(vk, pool, null);
+        if (layout != 0L) VK10.vkDestroyDescriptorSetLayout(vk, layout, null);
     }
 }

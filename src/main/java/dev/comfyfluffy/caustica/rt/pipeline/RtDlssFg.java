@@ -19,9 +19,8 @@ import java.lang.foreign.ValueLayout;
 
 /**
  * DLSS Frame Generation (DLSSG) backend. Shares the NGX instance with DLSS-RR via {@link NgxRuntime};
- * owns only the DLSSG feature handle. This turn provides availability detection and the feature
- * create/destroy lifecycle — the per-frame {@code evaluate} + the multi-present loop that consumes it land
- * with the present-path refactor. Gated by {@code caustica.rt.fg} (default off) and hardware/driver support.
+ * owns only the DLSSG feature handle, availability state, and per-frame evaluation entry point. Gated by
+ * {@code caustica.rt.fg} (default off) and hardware/driver support.
  */
 public final class RtDlssFg {
     public static final RtDlssFg INSTANCE = new RtDlssFg();
@@ -32,6 +31,7 @@ public final class RtDlssFg {
 
     private NgxLibrary lib;
     private MemorySegment feature = MemorySegment.NULL;
+    private VulkanDevice featureDevice;
     private boolean initialized;
     private boolean failed;
     private boolean probed;
@@ -126,7 +126,7 @@ public final class RtDlssFg {
             }
             if (featureWidth != width || featureHeight != height
                     || featureRenderWidth != renderWidth || featureRenderHeight != renderHeight
-                    || featureBackbufferFormat != backbufferFormat || isNull(feature)) {
+                    || featureBackbufferFormat != backbufferFormat || featureDevice != device || isNull(feature)) {
                 releaseFeature(device);
                 feature = lib.createDlssg(cmd, width, height, renderWidth, renderHeight, backbufferFormat);
                 if (isNull(feature)) {
@@ -138,6 +138,7 @@ public final class RtDlssFg {
                 featureRenderWidth = renderWidth;
                 featureRenderHeight = renderHeight;
                 featureBackbufferFormat = backbufferFormat;
+                featureDevice = device;
                 initialized = true;
                 CausticaMod.LOGGER.info("DLSS-FG feature created: {}x{} (render {}x{}, backbuffer format {})",
                         width, height, renderWidth, renderHeight, backbufferFormat);
@@ -227,11 +228,52 @@ public final class RtDlssFg {
 
     /** Release the FG feature. NGX itself is shut down by {@link NgxRuntime} at device teardown. */
     public void destroy() {
-        if (((GpuDeviceAccessor) RenderSystem.getDevice()).caustica$getBackend() instanceof VulkanDevice device) {
-            releaseFeature(device);
+        Throwable failure = null;
+        try {
+            if (!isNull(feature)) {
+                VulkanDevice device = featureDevice != null ? featureDevice : currentDeviceOrNull();
+                if (device == null) {
+                    throw new IllegalStateException("DLSS-FG feature owner device is unavailable");
+                }
+                releaseFeature(device);
+            }
+        } catch (Throwable t) {
+            failure = new IllegalStateException("DLSS-FG teardown failed", t);
+        } finally {
+            initialized = false;
+            if (isNull(feature)) {
+                failed = false;
+                probed = false;
+                available = false;
+                multiFrameCountMax = 0;
+                featureWidth = -1;
+                featureHeight = -1;
+                featureRenderWidth = -1;
+                featureRenderHeight = -1;
+                featureBackbufferFormat = Integer.MIN_VALUE;
+                featureDevice = null;
+                lib = null;
+            } else {
+                // Keep the native handle and owning device for a retry rather than silently losing a
+                // live feature when teardown is invoked before the Vulkan device is available.
+                failed = true;
+            }
         }
-        initialized = false;
-        lib = null;
+        if (failure != null) {
+            throw (RuntimeException) failure;
+        }
+    }
+
+    private static VulkanDevice currentDeviceOrNull() {
+        RtContext ctx = RtContext.currentOrNull();
+        if (ctx != null) {
+            return ctx.device();
+        }
+        if (RenderSystem.getDevice() instanceof GpuDeviceAccessor accessor
+                && accessor.caustica$getBackend() instanceof VulkanDevice device) {
+            return device;
+        }
+        return null;
     }
 
     private void releaseFeature(VulkanDevice device) {
@@ -245,6 +287,7 @@ public final class RtDlssFg {
             lib.release(feature);
         }
         feature = MemorySegment.NULL;
+        featureDevice = null;
         featureWidth = -1;
         featureHeight = -1;
         featureRenderWidth = -1;

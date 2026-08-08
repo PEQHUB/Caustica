@@ -13,6 +13,7 @@ import org.lwjgl.vulkan.VkCommandBufferBeginInfo;
 import org.lwjgl.vulkan.VkCommandPoolCreateInfo;
 import org.lwjgl.vulkan.VkCommandBufferSubmitInfo;
 import org.lwjgl.vulkan.VkSemaphoreCreateInfo;
+import org.lwjgl.vulkan.VkSemaphoreSignalInfo;
 import org.lwjgl.vulkan.VkSemaphoreSubmitInfo;
 import org.lwjgl.vulkan.VkSemaphoreTypeCreateInfo;
 import org.lwjgl.vulkan.VkSemaphoreWaitInfo;
@@ -123,8 +124,48 @@ public final class RtGpuExecutor {
     /** Signal the frame token after its final terrain, TLAS, entity, and overlay consumer. */
     public void endGraphicsUse(VulkanCommandEncoder encoder, GraphicsUse graphicsUse) {
         assertRenderThread();
+        if (!graphicsUse.isAccepted()) {
+            throw new IllegalStateException("Cannot finish a graphics use before its command was accepted");
+        }
         encoder.signalSemaphore(graphicsTimeline, graphicsUse.value, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT_KHR);
         latestGraphicsUseValue.accumulateAndGet(graphicsUse.value, Math::max);
+        if (hasPendingDestroys()) {
+            jobs.offer(WAKE);
+        }
+    }
+
+    /**
+     * Close a graphics-use reservation whose command buffer was never accepted by the graphics submission.
+     *
+     * <p>The graphics timeline is monotonic, and a reservation is made only on the render thread. A failed
+     * recording therefore leaves this value as the next unsignaled value; host-signaling that exact value
+     * closes the reservation without pretending that a frame was submitted. Never enqueue retirement against
+     * the reservation itself: an unsignaled timeline value would leave the retirement permanently pending.</p>
+     */
+    public void abortGraphicsUse(GraphicsUse graphicsUse) {
+        assertRenderThread();
+        if (graphicsUse == null) {
+            return;
+        }
+        if (graphicsUse.isAccepted()) {
+            throw new IllegalStateException("Cannot abort an accepted graphics use");
+        }
+        long completed = queryTimeline(graphicsTimeline);
+        if (completed < graphicsUse.value) {
+            // A previous frame may still have its lower signal queued on the graphics queue. Wait for
+            // that predecessor before host-signaling this value; otherwise the device signal could
+            // execute after the host signal and attempt to move the timeline backwards.
+            long predecessor = graphicsUse.value - 1L;
+            if (predecessor > completed) {
+                waitTimeline(graphicsTimeline, predecessor);
+            }
+            try (MemoryStack stack = MemoryStack.stackPush()) {
+                VkSemaphoreSignalInfo signal = VkSemaphoreSignalInfo.calloc(stack).sType$Default()
+                        .semaphore(graphicsTimeline).value(graphicsUse.value);
+                RtContext.check(VK12.vkSignalSemaphore(ctx.vk(), signal),
+                        "vkSignalSemaphore(RT graphics-use abort)");
+            }
+        }
         if (hasPendingDestroys()) {
             jobs.offer(WAKE);
         }
@@ -200,35 +241,74 @@ public final class RtGpuExecutor {
         }
     }
 
-    public synchronized void shutdown() {
-        if (closed) {
-            return;
+    public void shutdown() {
+        synchronized (this) {
+            if (closed) {
+                return;
+            }
+            closed = true;
+            jobs.add(STOP);
         }
-        closed = true;
-        jobs.add(STOP);
-        try {
-            thread.join();
-        } catch (InterruptedException e) {
+        Throwable failure = null;
+        boolean interrupted = false;
+        while (thread.isAlive()) {
+            try {
+                thread.join();
+            } catch (InterruptedException e) {
+                interrupted = true;
+                if (failure == null) {
+                    failure = new IllegalStateException("Interrupted while stopping RT GPU executor", e);
+                } else {
+                    failure.addSuppressed(e);
+                }
+            }
+        }
+        if (interrupted) {
             Thread.currentThread().interrupt();
-            throw new IllegalStateException("Interrupted while stopping RT GPU executor", e);
         }
         // Stop and join first: waiting idle before the executor stops leaves a race where it can
         // submit immediately after vkDeviceWaitIdle returns. The idle wait also makes graphics-side
         // timeline semaphore use complete before those semaphores are destroyed below.
-        ctx.waitIdle();
-        Throwable failure = null;
+        try {
+            ctx.waitIdle();
+        } catch (Throwable t) {
+            failure = appendFailure(failure, "RT GPU executor device idle", t);
+        }
         try {
             flushDestroysAfterDeviceIdle();
         } catch (Throwable t) {
-            failure = t;
+            failure = appendFailure(failure, "RT GPU executor deferred destruction", t);
         }
-        VK10.vkDestroyCommandPool(ctx.vk(), commandPool, null);
+        long pool = commandPool;
         commandPool = 0L;
-        VK10.vkDestroySemaphore(ctx.vk(), graphicsTimeline, null);
-        VK10.vkDestroySemaphore(ctx.vk(), buildTimeline, null);
+        if (pool != 0L) {
+            try {
+                VK10.vkDestroyCommandPool(ctx.vk(), pool, null);
+            } catch (Throwable t) {
+                failure = appendFailure(failure, "RT GPU executor command pool", t);
+            }
+        }
+        try {
+            VK10.vkDestroySemaphore(ctx.vk(), graphicsTimeline, null);
+        } catch (Throwable t) {
+            failure = appendFailure(failure, "RT GPU executor graphics timeline", t);
+        }
+        try {
+            VK10.vkDestroySemaphore(ctx.vk(), buildTimeline, null);
+        } catch (Throwable t) {
+            failure = appendFailure(failure, "RT GPU executor build timeline", t);
+        }
         if (failure != null) {
             throw new IllegalStateException("RT GPU executor shutdown failed", failure);
         }
+    }
+
+    private static Throwable appendFailure(Throwable failure, String name, Throwable cause) {
+        if (failure == null) {
+            return new IllegalStateException(name + " failed", cause);
+        }
+        failure.addSuppressed(cause);
+        return failure;
     }
 
     private void run() {
@@ -513,12 +593,21 @@ public final class RtGpuExecutor {
         }
     }
 
-    /** Immutable reservation for one graphics frame's completion on the shared RT graphics timeline. */
+    /** Render-thread reservation for one graphics frame's completion on the shared RT graphics timeline. */
     public static final class GraphicsUse {
         private final long value;
+        private boolean accepted;
 
         private GraphicsUse(long value) {
             this.value = value;
+        }
+
+        void markAccepted() {
+            accepted = true;
+        }
+
+        boolean isAccepted() {
+            return accepted;
         }
     }
 

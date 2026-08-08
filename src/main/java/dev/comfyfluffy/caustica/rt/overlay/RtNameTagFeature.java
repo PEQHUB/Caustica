@@ -192,23 +192,32 @@ final class RtNameTagFeature implements RtOverlayFeature {
 
     @Override
     public void destroy() {
-        if (ctx == null) {
+        RtContext context = ctx;
+        ctx = null;
+        if (context == null) {
             return;
         }
-        if (pipeline != null) {
-            pipeline.destroy(ctx.vk());
-            pipeline = null;
+        Throwable failure = null;
+        RtOverlayPipelines.Pipeline currentPipeline = pipeline;
+        pipeline = null;
+        if (currentPipeline != null) {
+            failure = RtWorldOverlay.teardownStep(failure, "name-tag pipeline", () -> currentPipeline.destroy(context.vk()));
         }
-        if (imageSetPool != null) {
-            imageSetPool.destroy(ctx.vk());
-            imageSetPool = null;
+        RtOverlayPipelines.SampledImageSetPool currentPool = imageSetPool;
+        imageSetPool = null;
+        if (currentPool != null) {
+            failure = RtWorldOverlay.teardownStep(failure, "name-tag descriptor pool", () -> currentPool.destroy(context.vk()));
         }
         pageSets.clear();
-        if (sampler != 0L) {
-            VK10.vkDestroySampler(ctx.vk(), sampler, null);
-            sampler = 0L;
+        long currentSampler = sampler;
+        sampler = 0L;
+        if (currentSampler != 0L) {
+            failure = RtWorldOverlay.teardownStep(failure, "name-tag sampler",
+                    () -> VK10.vkDestroySampler(context.vk(), currentSampler, null));
         }
-        ctx = null;
+        if (failure != null) {
+            throw new IllegalStateException("Name-tag teardown failed", failure);
+        }
     }
 
     private static long vkImageView(GpuTextureView view) {

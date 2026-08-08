@@ -81,6 +81,12 @@ public final class RtBloomPipeline {
 
     public static RtBloomPipeline create(RtContext ctx) {
         VkDevice vk = ctx.vk();
+        long descriptorSetLayout = 0L;
+        long descriptorPool = 0L;
+        long pipelineLayout = 0L;
+        long module = 0L;
+        long pipeline = 0L;
+        long sampler = 0L;
         try (MemoryStack stack = MemoryStack.stackPush()) {
             VkDescriptorSetLayoutBinding.Buffer bindings =
                     VkDescriptorSetLayoutBinding.calloc(BLOOM_BINDING_COUNT, stack);
@@ -102,7 +108,7 @@ public final class RtBloomPipeline {
                     VkDescriptorSetLayoutCreateInfo.calloc(stack).sType$Default().pBindings(bindings);
             check(VK10.vkCreateDescriptorSetLayout(vk, layoutInfo, null, handle),
                     "vkCreateDescriptorSetLayout(rt bloom)");
-            long descriptorSetLayout = handle.get(0);
+            descriptorSetLayout = handle.get(0);
             RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT,
                     descriptorSetLayout, "bloom descriptor set layout");
 
@@ -113,7 +119,7 @@ public final class RtBloomPipeline {
                     .sType$Default().maxSets(SET_COUNT).pPoolSizes(poolSize);
             check(VK10.vkCreateDescriptorPool(vk, poolInfo, null, handle),
                     "vkCreateDescriptorPool(rt bloom)");
-            long descriptorPool = handle.get(0);
+            descriptorPool = handle.get(0);
             RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_DESCRIPTOR_POOL,
                     descriptorPool, "bloom descriptor pool");
 
@@ -141,11 +147,11 @@ public final class RtBloomPipeline {
                     .pPushConstantRanges(pushRange);
             check(VK10.vkCreatePipelineLayout(vk, pipelineLayoutInfo, null, handle),
                     "vkCreatePipelineLayout(rt bloom)");
-            long pipelineLayout = handle.get(0);
+            pipelineLayout = handle.get(0);
             RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_PIPELINE_LAYOUT,
                     pipelineLayout, "bloom pipeline layout");
 
-            long module = loadModule(vk, stack);
+            module = loadModule(vk, stack);
             RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_SHADER_MODULE, module, "bloom shader module");
             VkPipelineShaderStageCreateInfo stage = VkPipelineShaderStageCreateInfo.calloc(stack)
                     .sType$Default().stage(VK10.VK_SHADER_STAGE_COMPUTE_BIT)
@@ -156,9 +162,11 @@ public final class RtBloomPipeline {
             LongBuffer pipelineHandle = stack.mallocLong(1);
             check(VK10.vkCreateComputePipelines(vk, VK10.VK_NULL_HANDLE,
                     pipelineInfo, null, pipelineHandle), "vkCreateComputePipelines(rt bloom)");
+            pipeline = pipelineHandle.get(0);
             VK10.vkDestroyShaderModule(vk, module, null);
+            module = 0L;
             RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_PIPELINE,
-                    pipelineHandle.get(0), "bloom compute pipeline");
+                    pipeline, "bloom compute pipeline");
 
             // CLAMP_TO_EDGE, not border: a highlight touching the frame edge should bleed along the edge
             // like a real lens, not fade into a black border that reads as a dark seam.
@@ -173,11 +181,19 @@ public final class RtBloomPipeline {
                     .maxLod(0.0f);
             check(VK10.vkCreateSampler(vk, samplerInfo, null, handle),
                     "vkCreateSampler(rt bloom)");
-            long sampler = handle.get(0);
+            sampler = handle.get(0);
             RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_SAMPLER, sampler, "bloom linear sampler");
 
             return new RtBloomPipeline(ctx, descriptorSetLayout, descriptorPool, descriptorSets,
-                    pipelineLayout, pipelineHandle.get(0), sampler);
+                    pipelineLayout, pipeline, sampler);
+        } catch (Throwable t) {
+            if (module != 0L) VK10.vkDestroyShaderModule(vk, module, null);
+            if (sampler != 0L) VK10.vkDestroySampler(vk, sampler, null);
+            if (pipeline != 0L) VK10.vkDestroyPipeline(vk, pipeline, null);
+            if (pipelineLayout != 0L) VK10.vkDestroyPipelineLayout(vk, pipelineLayout, null);
+            if (descriptorPool != 0L) VK10.vkDestroyDescriptorPool(vk, descriptorPool, null);
+            if (descriptorSetLayout != 0L) VK10.vkDestroyDescriptorSetLayout(vk, descriptorSetLayout, null);
+            throw t;
         }
     }
 
