@@ -77,6 +77,16 @@ final class RtExposurePipeline {
 
     static RtExposurePipeline create(RtContext ctx) {
         VkDevice vk = ctx.vk();
+        long histDsl = 0L;
+        long histPool = 0L;
+        long histLayout = 0L;
+        long histPipeline = 0L;
+        long histModule = 0L;
+        long resolveDsl = 0L;
+        long resolvePool = 0L;
+        long resolveLayout = 0L;
+        long resolvePipeline = 0L;
+        long resolveModule = 0L;
         try (MemoryStack stack = MemoryStack.stackPush()) {
             LongBuffer p = stack.mallocLong(1);
 
@@ -92,19 +102,20 @@ final class RtExposurePipeline {
             VkDescriptorSetLayoutCreateInfo histDslci = VkDescriptorSetLayoutCreateInfo.calloc(stack)
                     .sType$Default().pBindings(histBinds);
             check(VK10.vkCreateDescriptorSetLayout(vk, histDslci, null, p), "vkCreateDescriptorSetLayout(rt exposure hist)");
-            long histDsl = p.get(0);
+            histDsl = p.get(0);
             RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT, histDsl, "exposure histogram descriptor set layout");
-            long histPool = createPool(vk, stack, 3, 1, "hist");
+            histPool = createPool(vk, stack, 3, 1, "hist");
             RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_DESCRIPTOR_POOL, histPool, "exposure histogram descriptor pool");
             long histSet = allocateSet(vk, stack, histPool, histDsl, "hist");
             RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_DESCRIPTOR_SET, histSet, "exposure histogram descriptor set");
-            long histLayout = createPipelineLayout(vk, stack, histDsl, ExposureHistPushData.BYTE_SIZE, "hist");
+            histLayout = createPipelineLayout(vk, stack, histDsl, ExposureHistPushData.BYTE_SIZE, "hist");
             RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_PIPELINE_LAYOUT, histLayout, "exposure histogram pipeline layout");
-            long histModule = loadModule(vk, stack, "exposure_hist/main.comp.spv");
+            histModule = loadModule(vk, stack, "exposure_hist/main.comp.spv");
             RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_SHADER_MODULE, histModule, "exposure histogram shader module");
-            long histPipeline = createComputePipeline(vk, stack, histLayout, histModule, "hist");
+            histPipeline = createComputePipeline(vk, stack, histLayout, histModule, "hist");
             RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_PIPELINE, histPipeline, "exposure histogram pipeline");
             VK10.vkDestroyShaderModule(vk, histModule, null);
+            histModule = 0L;
 
             VkDescriptorSetLayoutBinding.Buffer resolveBinds = VkDescriptorSetLayoutBinding.calloc(EXPOSURE_RESOLVE_BINDING_COUNT, stack);
             resolveBinds.get(EXPOSURE_RESOLVE_HIST_BINS).binding(EXPOSURE_RESOLVE_HIST_BINS).descriptorType(VK10.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER)
@@ -116,22 +127,35 @@ final class RtExposurePipeline {
             VkDescriptorSetLayoutCreateInfo resolveDslci = VkDescriptorSetLayoutCreateInfo.calloc(stack)
                     .sType$Default().pBindings(resolveBinds);
             check(VK10.vkCreateDescriptorSetLayout(vk, resolveDslci, null, p), "vkCreateDescriptorSetLayout(rt exposure resolve)");
-            long resolveDsl = p.get(0);
+            resolveDsl = p.get(0);
             RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT, resolveDsl, "exposure resolve descriptor set layout");
-            long resolvePool = createPool(vk, stack, 1, 2, "resolve");
+            resolvePool = createPool(vk, stack, 1, 2, "resolve");
             RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_DESCRIPTOR_POOL, resolvePool, "exposure resolve descriptor pool");
             long resolveSet = allocateSet(vk, stack, resolvePool, resolveDsl, "resolve");
             RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_DESCRIPTOR_SET, resolveSet, "exposure resolve descriptor set");
-            long resolveLayout = createPipelineLayout(vk, stack, resolveDsl, ExposureResolvePushData.BYTE_SIZE, "resolve");
+            resolveLayout = createPipelineLayout(vk, stack, resolveDsl, ExposureResolvePushData.BYTE_SIZE, "resolve");
             RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_PIPELINE_LAYOUT, resolveLayout, "exposure resolve pipeline layout");
-            long resolveModule = loadModule(vk, stack, "exposure_resolve/main.comp.spv");
+            resolveModule = loadModule(vk, stack, "exposure_resolve/main.comp.spv");
             RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_SHADER_MODULE, resolveModule, "exposure resolve shader module");
-            long resolvePipeline = createComputePipeline(vk, stack, resolveLayout, resolveModule, "resolve");
+            resolvePipeline = createComputePipeline(vk, stack, resolveLayout, resolveModule, "resolve");
             RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_PIPELINE, resolvePipeline, "exposure resolve pipeline");
             VK10.vkDestroyShaderModule(vk, resolveModule, null);
+            resolveModule = 0L;
 
             return new RtExposurePipeline(ctx, histDsl, histPool, histSet, histLayout, histPipeline,
                     resolveDsl, resolvePool, resolveSet, resolveLayout, resolvePipeline);
+        } catch (Throwable t) {
+            if (resolveModule != 0L) VK10.vkDestroyShaderModule(vk, resolveModule, null);
+            if (histModule != 0L) VK10.vkDestroyShaderModule(vk, histModule, null);
+            if (resolvePipeline != 0L) VK10.vkDestroyPipeline(vk, resolvePipeline, null);
+            if (resolveLayout != 0L) VK10.vkDestroyPipelineLayout(vk, resolveLayout, null);
+            if (resolvePool != 0L) VK10.vkDestroyDescriptorPool(vk, resolvePool, null);
+            if (resolveDsl != 0L) VK10.vkDestroyDescriptorSetLayout(vk, resolveDsl, null);
+            if (histPipeline != 0L) VK10.vkDestroyPipeline(vk, histPipeline, null);
+            if (histLayout != 0L) VK10.vkDestroyPipelineLayout(vk, histLayout, null);
+            if (histPool != 0L) VK10.vkDestroyDescriptorPool(vk, histPool, null);
+            if (histDsl != 0L) VK10.vkDestroyDescriptorSetLayout(vk, histDsl, null);
+            throw t;
         }
     }
 
