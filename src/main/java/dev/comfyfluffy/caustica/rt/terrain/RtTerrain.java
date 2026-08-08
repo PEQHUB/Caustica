@@ -1389,12 +1389,20 @@ public final class RtTerrain {
     }
 
     private void cancelAllDirtyGroups() {
+        cancelAllDirtyGroups(null);
+    }
+
+    private void cancelAllDirtyGroups(List<PreparedSection> deferredPrepared) {
         if (dirtyGroups.isEmpty()) {
             return;
         }
         for (DirtyGroup group : dirtyGroups.values()) {
             for (PreparedSection ps : group.prepared) {
-                destroyPreparedSection(ps);
+                if (deferredPrepared != null) {
+                    deferredPrepared.add(ps);
+                } else {
+                    destroyPreparedSection(ps);
+                }
             }
         }
         dirtyGroups.clear();
@@ -1643,28 +1651,40 @@ public final class RtTerrain {
                 () -> table.recycleGeneration(generation));
     }
 
-    /** Join outstanding worker/GPU tasks and destroy every unpublished terminal result. */
-    private void drainTasksForClear(RtContext ctx) {
-        // A dead executor cannot make further task progress. Throw on the render thread before waiting;
-        // its failure path has already terminally failed every accepted queued build.
-        ctx.gpuExecutor().throwIfFailed();
-        awaitActiveTasks();
-        lightGrid.awaitIdle();
+    /** Join outstanding worker/GPU tasks and collect every unpublished terminal result for post-idle cleanup. */
+    private Throwable drainTasksForClear(RtContext ctx, List<PreparedSection> deferredPrepared) {
         Throwable failure = null;
+        // A dead executor has already terminally failed accepted queued builds. Record that failure but
+        // still join task barriers and collect their native results before the device-idle boundary.
+        try {
+            ctx.gpuExecutor().throwIfFailed();
+        } catch (Throwable t) {
+            failure = teardownFailure(failure, "GPU executor", t);
+        }
+        try {
+            awaitActiveTasks();
+        } catch (Throwable t) {
+            failure = teardownFailure(failure, "terrain task barrier", t);
+        }
+        try {
+            lightGrid.awaitIdle();
+        } catch (Throwable t) {
+            failure = teardownFailure(failure, "light task barrier", t);
+        }
         SectionResult result;
         while ((result = completedBuilds.poll()) != null) {
             if (result.prepared() != null) {
-                destroyPreparedSection(result.prepared());
+                // Do not enqueue an unpublished destroy on a failed executor. The caller destroys these
+                // directly after the device-idle wait, alongside the normal terrain teardown.
+                deferredPrepared.add(result.prepared());
             }
-            if (result.failure() != null && failure == null) {
-                failure = result.failure();
+            if (result.failure() != null) {
+                failure = teardownFailure(failure, "terrain worker/build", result.failure());
             }
         }
         inFlight.clear();
         inFlightDirtyGroup.clear();
-        if (failure != null) {
-            throw new RuntimeException("RT terrain worker/build failed during teardown", failure);
-        }
+        return failure;
     }
 
     /** Full teardown (world exit / shutdown): drain the GPU, then free everything incl. an in-flight build. */
@@ -1677,12 +1697,24 @@ public final class RtTerrain {
         // Device teardown is the one path that must prove every worker and GPU callback has relinquished
         // its resources before the executor, allocator, and VkDevice disappear.
         terrainEpoch++;
-        lightGrid.cancelPending();
-        drainTasksForClear(ctx);
-        cancelAllDirtyGroups();
-        ctx.waitIdle();
-        ctx.gpuExecutor().flushDestroysAfterDeviceIdle();
-        table.destroyRecycledGenerations();
+        Throwable failure = null;
+        List<PreparedSection> deferredPrepared = new ArrayList<>();
+        failure = teardownStep(failure, "light task cancellation", lightGrid::cancelPending);
+        Throwable drainFailure = drainTasksForClear(ctx, deferredPrepared);
+        if (drainFailure != null) {
+            failure = failure == null ? drainFailure : mergeFailure(failure, drainFailure);
+        }
+        failure = teardownStep(failure, "dirty group cancellation",
+                () -> cancelAllDirtyGroups(deferredPrepared));
+        failure = teardownStep(failure, "device idle wait", ctx::waitIdle);
+        failure = teardownStep(failure, "GPU executor deferred destruction",
+                () -> ctx.gpuExecutor().flushDestroysAfterDeviceIdle());
+        for (PreparedSection prepared : deferredPrepared) {
+            failure = teardownStep(failure, "unpublished terrain result destruction",
+                    () -> RtSectionBuilder.destroy(prepared));
+        }
+        failure = teardownStep(failure, "recycled section-table destruction",
+                table::destroyRecycledGenerations);
         snapshots.clear();
         synchronized (dirtyLock) {
             dirty.clear(); // any pending re-extract keys refer to the old world/coords — drop them
@@ -1700,7 +1732,8 @@ public final class RtTerrain {
         reextract.clear();
         queuedReextract.clear();
         windowValid = false;
-        lightGrid.destroyAfterDeviceIdle();
+        failure = teardownStep(failure, "light hierarchy destruction",
+                lightGrid::destroyAfterDeviceIdle);
         lightSections.clear();
         lightHierarchyDirty = false;
         lastLightHierarchyRequestNanos = 0L;
@@ -1716,36 +1749,68 @@ public final class RtTerrain {
             removed.clear();
             prepared.clear();
             ready = false;
-            return;
+        } else {
+            Generation currentGeneration = table.detachGeneration();
+            if (currentGeneration != null) {
+                failure = teardownStep(failure, "current section-table destruction",
+                        currentGeneration.buffer()::destroy);
+            }
+            table.capacity = 0;
+            table.nextSlot = 0;
+            table.freeSlots.clear();
+            table.slots.clear();
+            table.instanceList.clear();
+            lightSections.clear();
+            for (SectionGeom g : resident.values()) {
+                failure = teardownStep(failure, "resident section destruction", g::destroy);
+            }
+            resident.clear();
+            empty.clear();
+            table.instances = null;
+            published.clear();
+            // The accumulators can hold evicted-but-not-yet-retired geometry (window sync fills `removed`
+            // between streaming passes) and built-but-not-yet-published sections; the GPU is idle here, free them.
+            for (SectionGeom g : removed) {
+                failure = teardownStep(failure, "removed section destruction", g::destroy);
+            }
+            removed.clear();
+            for (PreparedSection ps : prepared) {
+                failure = teardownStep(failure, "prepared section destruction",
+                        () -> RtSectionBuilder.destroy(ps));
+            }
+            prepared.clear();
+            ready = false;
         }
-        Generation currentGeneration = table.detachGeneration();
-        if (currentGeneration != null) {
-            currentGeneration.buffer().destroy();
+        if (failure != null) {
+            throw (RuntimeException) failure;
         }
-        table.capacity = 0;
-        table.nextSlot = 0;
-        table.freeSlots.clear();
-        table.slots.clear();
-        table.instanceList.clear();
-        lightSections.clear();
-        for (SectionGeom g : resident.values()) {
-            g.destroy();
+    }
+
+    private static Throwable teardownStep(Throwable failure, String name, Runnable action) {
+        try {
+            action.run();
+        } catch (Throwable t) {
+            return teardownFailure(failure, name, t);
         }
-        resident.clear();
-        empty.clear();
-        table.instances = null;
-        published.clear();
-        // The accumulators can hold evicted-but-not-yet-retired geometry (window sync fills `removed`
-        // between streaming passes) and built-but-not-yet-published sections; the GPU is idle here, free them.
-        for (SectionGeom g : removed) {
-            g.destroy();
+        return failure;
+    }
+
+    private static Throwable teardownFailure(Throwable failure, String name, Throwable cause) {
+        if (failure == null) {
+            return new IllegalStateException("RT terrain teardown failed during " + name, cause);
         }
-        removed.clear();
-        for (PreparedSection ps : prepared) {
-            RtSectionBuilder.destroy(ps);
+        failure.addSuppressed(cause);
+        return failure;
+    }
+
+    private static Throwable mergeFailure(Throwable failure, Throwable additional) {
+        if (failure == null) {
+            return additional;
         }
-        prepared.clear();
-        ready = false;
+        if (failure != additional) {
+            failure.addSuppressed(additional);
+        }
+        return failure;
     }
 
     /**
