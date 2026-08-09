@@ -90,8 +90,8 @@ public float3 evalSampleContrib(float3 sp, float3 lnrm, float3 le, float area, f
 }
 
 // Select one light from the emitted-power distribution in O(1).
-public void selectGlobalLight(inout uint proposalSeed, out uint lightIndex) {
-    float aliasSample = rndf(proposalSeed) * float(worldPush.lightCount);
+public void selectGlobalLight(in PathSampler risSampler, uint dimension, out uint lightIndex) {
+    float aliasSample = pathSample(risSampler, dimension) * float(worldPush.lightCount);
     uint column = min(uint(aliasSample), worldPush.lightCount - 1u);
     if (pc.lightAliasAddr != 0) {
         LightAlias a = ConstPtr<LightAlias>(pc.lightAliasAddr)[column];
@@ -120,9 +120,9 @@ public bool findLightGridCell(float3 p, out LightGridCell cell, out int3 cellCoo
     return cell.spanCount > 0u;
 }
 
-public void selectSectionLight(uint firstLight, uint lightCount, inout uint proposalSeed,
+public void selectSectionLight(uint firstLight, uint lightCount, in PathSampler risSampler, uint dimension,
                         out uint lightIndex) {
-    float aliasSample = rndf(proposalSeed) * float(lightCount);
+    float aliasSample = pathSample(risSampler, dimension) * float(lightCount);
     uint column = min(uint(aliasSample), lightCount - 1u);
     LightAlias alias = ConstPtr<LightAlias>(pc.lightLocalAliasAddr)[firstLight + column];
     bool self = aliasSample - float(column) < alias.accept;
@@ -194,17 +194,17 @@ public float proposalPdf(Light light, float3 le, LightGridCell cell, int3 cellCo
     return localProbability * localPdf + (1.0 - localProbability) * globalPdf;
 }
 
-public void selectLightGridSpanLight(LightGridCell cell, inout uint proposalSeed,
+public void selectLightGridSpanLight(LightGridCell cell, in PathSampler risSampler, uint dimension,
                               out uint lightIndex) {
     ConstPtr<LightGridSpan> spans = ConstPtr<LightGridSpan>(pc.lightGridSpanAddr);
-    float aliasSample = rndf(proposalSeed) * float(cell.spanCount);
+    float aliasSample = pathSample(risSampler, dimension) * float(cell.spanCount);
     uint column = min(uint(aliasSample), cell.spanCount - 1u);
     LightGridSpan span = spans[cell.spanOffset + column];
     bool self = aliasSample - float(column) < span.accept;
     uint firstLight = self ? span.firstLight : span.aliasFirstLight;
     uint lightCount = self ? (span.packedLightCounts & 0xffffu)
             : (span.packedLightCounts >> 16u);
-    selectSectionLight(firstLight, lightCount, proposalSeed, lightIndex);
+    selectSectionLight(firstLight, lightCount, risSampler, dimension + 1u, lightIndex);
 }
 
 // Sample the exact mixture q = alpha*qCell + (1-alpha)*qGlobal. qCell first selects a nearby section
@@ -212,12 +212,12 @@ public void selectLightGridSpanLight(LightGridCell cell, inout uint proposalSeed
 // the neighborhood is represented without a fixed cap; qGlobal gives distant lights full support.
 // Alias spans make weighted local selection O(1). The mixture PDF is reconstructed after the single
 // Light48 load: section power cancels with the section-local light PDF.
-public void selectLightGridLight(LightGridCell cell, bool useLocal, inout uint proposalSeed,
-                          out uint lightIndex) {
+public void selectLightGridLight(LightGridCell cell, bool useLocal, in PathSampler risSampler,
+                          uint dimension, out uint lightIndex) {
     if (useLocal) {
-        selectLightGridSpanLight(cell, proposalSeed, lightIndex);
+        selectLightGridSpanLight(cell, risSampler, dimension, lightIndex);
     } else {
-        selectGlobalLight(proposalSeed, lightIndex);
+        selectGlobalLight(risSampler, dimension, lightIndex);
     }
 }
 
@@ -228,12 +228,12 @@ public void selectLightGridLight(LightGridCell cell, bool useLocal, inout uint p
 // ~1.1ms at the primary hit, and forcing coherent selection recovered at most 1.3ms of it. So the cost
 // was chasing depth, not divergence, and it lived at secondary vertices. A presampled candidate pool
 // would attack the same 5.9ms structurally, but see the note on
-// proposalSeed in tracePath for why it should share the pool rather than the seed.
+// RIS stream in tracePath for why it should share the pool rather than the main sample stream.
 
 // Initial RIS over M power-weighted candidates -> one resampled sample, no shadow ray yet. The chosen
 // sample's W = wSum / (M * p-hat); M counts every candidate, including zero-weight ones.
 public Reservoir risInitial(float3 hitPos, float3 n, float3 v, float3 rd, float3 diffAlb, float3 F0,
-                     float rough, bool twoSided, float sss, inout uint seed, inout uint proposalSeed) {
+                     float rough, bool twoSided, float sss, in PathSampler risSampler) {
     Reservoir r = resEmpty();
     LightGridCell gridCell;
     int3 gridCellCoord;
@@ -241,7 +241,7 @@ public Reservoir risInitial(float3 hitPos, float3 n, float3 v, float3 rd, float3
     if (pc.lightGridCellAddr != 0) {
         // Stochastically blend across hard section boundaries. Every cell proposal retains full global
         // support, so conditioning on this independently jittered lookup remains unbiased.
-        gridLookup += (float3(rndf(proposalSeed), rndf(proposalSeed), rndf(proposalSeed)) - 0.5)
+        gridLookup += (pathSample3(risSampler, PATH_DIM_RIS_GRID_X) - 0.5)
                 * worldPush.lightGridOrigin.w;
     }
     bool hasGridCell = findLightGridCell(gridLookup, gridCell, gridCellCoord);
@@ -257,14 +257,20 @@ public Reservoir risInitial(float3 hitPos, float3 n, float3 v, float3 rd, float3
     float localProbability = float(localCandidateCount) / float(candidateCount);
     for (uint c = 0u; c < candidateCount; c++) {
         uint li;
+        // Proposal/replacement and rectangle sampling use two independently shuffled low-dimensional
+        // groups. Candidate identity is part of each substream key, so no candidate aliases another.
+        PathSampler candidateSampler = pathSamplerWithGroup(risSampler,
+                PATH_GROUP_RIS_CANDIDATE_FIRST + c * 2u);
         uint globalsBefore = (c * globalCandidateCount) / candidateCount;
         uint globalsAfter = ((c + 1u) * globalCandidateCount) / candidateCount;
         bool useLocal = hasGridCell && globalsAfter == globalsBefore;
-        selectLightGridLight(gridCell, useLocal, proposalSeed, li);
+        selectLightGridLight(gridCell, useLocal, candidateSampler, PATH_DIM_RIS_SELECT, li);
         Light lg = ConstPtr<Light>(pc.lightBufAddr)[li];
         // Soft shadows: uniform point on the emitter rectangle ((s,t) in [-1,1]^2, pdf 1/area).
-        float s = rndf(seed) * 2.0 - 1.0;
-        float t = rndf(seed) * 2.0 - 1.0;
+        candidateSampler = pathSamplerWithGroup(risSampler,
+                PATH_GROUP_RIS_CANDIDATE_FIRST + c * 2u + 1u);
+        float s = pathSample(candidateSampler, PATH_DIM_RIS_LIGHT_U) * 2.0 - 1.0;
+        float t = pathSample(candidateSampler, PATH_DIM_RIS_LIGHT_V) * 2.0 - 1.0;
         float3 sp = lg.pos + worldPush.lightRebase.xyz
                 + s * lightHalfU(lg) + t * lightHalfV(lg);
         float3 le = lightRadiance(lg);
@@ -279,7 +285,9 @@ public Reservoir risInitial(float3 hitPos, float3 n, float3 v, float3 rd, float3
         float sourcePdf = proposalPdf(lg, le, gridCell, gridCellCoord, localProbability);
         float w = phat / max(sourcePdf, 1.0e-20);
         r.wSum += w;
-        if (rndf(seed) * r.wSum < w) { // weighted reservoir update
+        candidateSampler = pathSamplerWithGroup(risSampler,
+                PATH_GROUP_RIS_CANDIDATE_FIRST + c * 2u);
+        if (pathSample(candidateSampler, PATH_DIM_RIS_REPLACE) * r.wSum < w) { // weighted reservoir update
             r.pos = sp;
             r.lnrm = lightNormal;
             r.le = le;

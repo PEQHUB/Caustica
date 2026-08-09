@@ -64,7 +64,7 @@ final class RtGlowOutlineFeature implements RtOverlayFeature {
         if (batches.isEmpty()) {
             return false;
         }
-        ensureResources(ctx, width, height);
+        ensureResources(ctx, pool, width, height);
 
         // Merge every glowing entity's mesh into one vertex/index pair (indices rebased onto the merged
         // vertex buffer); one draw per entity so each can push its own outline colour.
@@ -117,7 +117,7 @@ final class RtGlowOutlineFeature implements RtOverlayFeature {
         return true;
     }
 
-    private void ensureResources(RtContext ctx, int width, int height) {
+    private void ensureResources(RtContext ctx, RtOverlayFramePool pool, int width, int height) {
         this.ctx = ctx;
         if (maskPipeline == null) {
             maskPipeline = new RtOverlayPipelines.Spec("entity_glow/vertex.vert.spv", "entity_glow/fragment.frag.spv")
@@ -133,11 +133,18 @@ final class RtGlowOutlineFeature implements RtOverlayFeature {
                     .build(ctx, "glow composite");
         }
         if (maskImage == null || maskImage.width != width || maskImage.height != height) {
-            if (maskImage != null) {
-                maskImage.destroy();
-            }
-            maskImage = ctx.createStorageImage(width, height, MASK_FORMAT,
+            RtImage replacement = ctx.createStorageImage(width, height, MASK_FORMAT,
                     "glow outline mask " + width + "x" + height, VK10.VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
+            try {
+                if (maskImage != null) {
+                    pool.awaitImageReplacementBoundary(ctx);
+                    maskImage.destroy();
+                }
+                maskImage = replacement;
+            } catch (Throwable t) {
+                replacement.destroy();
+                throw t;
+            }
         }
         compositeSet.bind(ctx, maskImage.view);
     }
@@ -178,25 +185,34 @@ final class RtGlowOutlineFeature implements RtOverlayFeature {
 
     @Override
     public void destroy() {
-        if (ctx == null) {
+        RtContext context = ctx;
+        ctx = null;
+        if (context == null) {
             return;
         }
-        if (maskPipeline != null) {
-            maskPipeline.destroy(ctx.vk());
-            maskPipeline = null;
+        Throwable failure = null;
+        RtOverlayPipelines.Pipeline mask = maskPipeline;
+        maskPipeline = null;
+        if (mask != null) {
+            failure = RtWorldOverlay.teardownStep(failure, "glow mask pipeline", () -> mask.destroy(context.vk()));
         }
-        if (compositePipeline != null) {
-            compositePipeline.destroy(ctx.vk());
-            compositePipeline = null;
+        RtOverlayPipelines.Pipeline composite = compositePipeline;
+        compositePipeline = null;
+        if (composite != null) {
+            failure = RtWorldOverlay.teardownStep(failure, "glow composite pipeline", () -> composite.destroy(context.vk()));
         }
-        if (compositeSet != null) {
-            compositeSet.destroy(ctx.vk());
-            compositeSet = null;
+        RtOverlayPipelines.ReadOnlyImageSet imageSet = compositeSet;
+        compositeSet = null;
+        if (imageSet != null) {
+            failure = RtWorldOverlay.teardownStep(failure, "glow composite descriptor set", () -> imageSet.destroy(context.vk()));
         }
-        if (maskImage != null) {
-            maskImage.destroy();
-            maskImage = null;
+        RtImage image = maskImage;
+        maskImage = null;
+        if (image != null) {
+            failure = RtWorldOverlay.teardownStep(failure, "glow mask image", image::destroy);
         }
-        ctx = null;
+        if (failure != null) {
+            throw new IllegalStateException("Glow outline teardown failed", failure);
+        }
     }
 }

@@ -5,14 +5,18 @@ import com.mojang.blaze3d.systems.RenderSystem;
 import com.mojang.blaze3d.textures.GpuTexture;
 import com.mojang.blaze3d.textures.GpuTextureView;
 import com.mojang.blaze3d.vulkan.VulkanCommandEncoder;
+import com.mojang.blaze3d.vulkan.VulkanGpuSampler;
 import com.mojang.blaze3d.vulkan.VulkanGpuTexture;
 import com.mojang.blaze3d.vulkan.VulkanGpuTextureView;
 import dev.comfyfluffy.caustica.CausticaConfig;
 import dev.comfyfluffy.caustica.CausticaMod;
 import dev.comfyfluffy.caustica.client.CausticaJitter;
+import dev.comfyfluffy.caustica.client.CaptureSession;
+import dev.comfyfluffy.caustica.client.UltraScreenshot;
 import dev.comfyfluffy.caustica.mixin.CommandEncoderAccessor;
 import dev.comfyfluffy.caustica.rt.gen.WorldPushConstantsData;
 import dev.comfyfluffy.caustica.rt.gen.WorldPushData;
+import dev.comfyfluffy.caustica.rt.gen.SharcPushConstantsData;
 import dev.comfyfluffy.caustica.rt.gen.WorldPushData.BreakEntry;
 import dev.comfyfluffy.caustica.rt.gen.WorldPushData.Float2;
 import dev.comfyfluffy.caustica.rt.gen.WorldPushData.Float3;
@@ -20,6 +24,9 @@ import dev.comfyfluffy.caustica.rt.gen.WorldPushData.Float4;
 import dev.comfyfluffy.caustica.rt.gen.WorldPushData.Int4;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.BiomeColors;
+import net.minecraft.client.renderer.EndFlashState;
+import net.minecraft.client.renderer.fog.FogData;
+import net.minecraft.client.renderer.texture.AbstractTexture;
 import net.minecraft.client.renderer.texture.TextureAtlas;
 import net.minecraft.client.renderer.texture.TextureAtlasSprite;
 import net.minecraft.client.resources.model.ModelBakery;
@@ -30,6 +37,7 @@ import net.minecraft.tags.FluidTags;
 import net.minecraft.util.Mth;
 import net.minecraft.world.attribute.EnvironmentAttributes;
 import net.minecraft.world.level.MoonPhase;
+import net.minecraft.world.level.dimension.DimensionType;
 import net.minecraft.world.level.material.FluidState;
 import org.joml.Matrix4f;
 import org.joml.Matrix4fc;
@@ -68,7 +76,10 @@ import dev.comfyfluffy.caustica.rt.pipeline.RtHdrCompositePipeline;
 import dev.comfyfluffy.caustica.rt.pipeline.RtSdrPresentPipeline;
 import dev.comfyfluffy.caustica.rt.pipeline.RtExposure;
 import dev.comfyfluffy.caustica.rt.pipeline.RtPipeline;
+import dev.comfyfluffy.caustica.rt.pipeline.RtPathSamplerData;
 import dev.comfyfluffy.caustica.rt.pipeline.RtToneLut;
+import dev.comfyfluffy.caustica.rt.pipeline.RtSharcResolvePipeline;
+import dev.comfyfluffy.caustica.rt.pipeline.RtToneMapping;
 import dev.comfyfluffy.caustica.rt.terrain.RtTerrain;
 
 import java.nio.ByteBuffer;
@@ -92,6 +103,8 @@ import java.util.Objects;
  */
 public final class RtComposite {
     public static final RtComposite INSTANCE = new RtComposite();
+    /** Debug value that exposes the path-traced image before DLSS-RR/reconstruction. */
+    public static final int RAW_DEBUG_VIEW = CausticaConfig.Rt.Composite.RAW_DEBUG_VIEW;
 
     public static boolean enabled() {
         return CausticaConfig.Rt.ENABLED.value();
@@ -105,12 +118,19 @@ public final class RtComposite {
     // generated from the same Slang module and owns this second ABI as well. debugView is no longer
     // part of it -- no world shader reads it anymore; debug views are a downstream compute pass.
     private static final long PATH_RECORD_BYTES = 48L;
+    private static final int PATH_SEGMENTS_PER_PIXEL = RtPathSamplerData.PATH_BRANCH_COUNT;
+    private static final int PATH_PIXEL_AXIS_LIMIT = 1 << 16;
+    private static final long PATH_SAMPLE_INDEX_LIMIT = 1L << Integer.SIZE;
     private static int debugView() {
         return CausticaConfig.Rt.Composite.DEBUG_VIEW.value();
     }
 
+    private static boolean rawDebugView() {
+        return debugView() == RAW_DEBUG_VIEW;
+    }
+
     private static int spp() {
-        return CausticaConfig.Rt.Composite.SPP.value();
+        return CaptureSession.effectiveSpp(CausticaConfig.Rt.Composite.SPP.value());
     }
 
     private static int maxBounces() {
@@ -133,6 +153,8 @@ public final class RtComposite {
     // package's angular radii, which only jitter the shadow ray and so only set penumbra softness.
     private static final RtLookPackage LOOK = RtLookPackage.current();
     private static final Identifier SUN_ID = Identifier.withDefaultNamespace("sun");
+    private static final Identifier END_FLASH_ID = Identifier.withDefaultNamespace("end_flash");
+    private static final Identifier END_SKY_ID = Identifier.withDefaultNamespace("textures/environment/end_sky.png");
     private static final Identifier[] MOON_IDS = createMoonIds();
     // Sign of the sub-pixel jitter as reported to DLSS-RR + applied to the primary ray, mirroring the
     // validated DLSS-SR convention (Vulkan flipped clip space wants Y negated).
@@ -152,6 +174,26 @@ public final class RtComposite {
     }
 
     private RtPipeline worldPipeline;
+    private RtPipeline sharcQueryPipeline;
+    private RtPipeline sharcUpdatePipeline;
+    private RtSharcResolvePipeline sharcResolvePipeline;
+    private RtSharcCache sharcCache;
+    private int sharcResourceExponent = -1;
+    private boolean sharcUsesSer;
+    private Object sharcWorldIdentity;
+    private Object sharcDimensionIdentity;
+    private int sharcTerrainX;
+    private int sharcTerrainY;
+    private int sharcTerrainZ;
+    private long sharcMaterialEpoch = -1L;
+    private long sharcSettingsSignature = Long.MIN_VALUE;
+    private int sharcRenderWidth = -1;
+    private int sharcRenderHeight = -1;
+    private double sharcLastCameraX;
+    private double sharcLastCameraY;
+    private double sharcLastCameraZ;
+    private boolean sharcLastCameraValid;
+    private SharcSkyState sharcLastSkyState;
     // Set at the HEAD of Minecraft.reloadResourcePacks() (mixin): a resource reload recreates the block
     // atlas + entity textures. We tear down the world pipeline there (drops all descriptor references) and
     // rebuild it once the NEW atlas is in place — detected by the atlas view handle changing away from
@@ -186,6 +228,11 @@ public final class RtComposite {
     // Packed primary -> indirect continuations. Pass A is fixed at one sample and owns two records per
     // render pixel (base + optional transmission); Pass B resamples them at the configured SPP.
     private RtBuffer continuationQueue;
+    private RtPathSamplerData pathSamplerData;
+    private long pathSampleCursor;
+    private int pathSampleEpoch;
+    private boolean pathSamplerResetPending = true;
+    private long pathSamplingPolicySignature = Long.MIN_VALUE;
     private RtImage displayImage;
     // Bloom pyramid, finest first: level 0 is half display resolution and each level halves again. The
     // display mapper reads level 0, which the upsample sweep leaves holding the sum of every band.
@@ -219,6 +266,102 @@ public final class RtComposite {
             this.buffer = buffer;
         }
     }
+
+    /** All size-dependent RT resources, kept together so a replacement can be built before publication. */
+    private static final class OutputResources {
+        final int displayW;
+        final int displayH;
+        final int renderW;
+        final int renderH;
+        RtImage output;
+        RtBuffer continuationQueue;
+        RtImage displayImage;
+        RtImage hdrDisplayImage;
+        RtImage[] bloomLevels = new RtImage[0];
+        RtImage gNormal;
+        RtImage gAlbedo;
+        RtImage gDepth;
+        RtImage gMotion;
+        RtImage gSpecAlbedo;
+        RtImage gSpecMotion;
+        RtImage gResponsivity;
+        RtImage gParticleMask;
+        RtImage gSkyClassification;
+        RtImage rrOutput;
+
+        OutputResources(int displayW, int displayH, int renderW, int renderH) {
+            this.displayW = displayW;
+            this.displayH = displayH;
+            this.renderW = renderW;
+            this.renderH = renderH;
+        }
+
+        void destroy() {
+            Throwable failure = null;
+            RtImage image = output;
+            output = null;
+            if (image != null) failure = destroyOne(failure, image::destroy);
+            RtBuffer buffer = continuationQueue;
+            continuationQueue = null;
+            if (buffer != null) failure = destroyOne(failure, buffer::destroy);
+            image = displayImage;
+            displayImage = null;
+            if (image != null) failure = destroyOne(failure, image::destroy);
+            image = hdrDisplayImage;
+            hdrDisplayImage = null;
+            if (image != null) failure = destroyOne(failure, image::destroy);
+            RtImage[] levels = bloomLevels;
+            bloomLevels = new RtImage[0];
+            for (RtImage level : levels) {
+                if (level != null) failure = destroyOne(failure, level::destroy);
+            }
+            image = gNormal;
+            gNormal = null;
+            if (image != null) failure = destroyOne(failure, image::destroy);
+            image = gAlbedo;
+            gAlbedo = null;
+            if (image != null) failure = destroyOne(failure, image::destroy);
+            image = gDepth;
+            gDepth = null;
+            if (image != null) failure = destroyOne(failure, image::destroy);
+            image = gMotion;
+            gMotion = null;
+            if (image != null) failure = destroyOne(failure, image::destroy);
+            image = gSpecAlbedo;
+            gSpecAlbedo = null;
+            if (image != null) failure = destroyOne(failure, image::destroy);
+            image = gSpecMotion;
+            gSpecMotion = null;
+            if (image != null) failure = destroyOne(failure, image::destroy);
+            image = gResponsivity;
+            gResponsivity = null;
+            if (image != null) failure = destroyOne(failure, image::destroy);
+            image = gParticleMask;
+            gParticleMask = null;
+            if (image != null) failure = destroyOne(failure, image::destroy);
+            image = gSkyClassification;
+            gSkyClassification = null;
+            if (image != null) failure = destroyOne(failure, image::destroy);
+            image = rrOutput;
+            rrOutput = null;
+            if (image != null) failure = destroyOne(failure, image::destroy);
+            if (failure != null) {
+                throw new IllegalStateException("RT output-resource teardown failed", failure);
+            }
+        }
+
+        private static Throwable destroyOne(Throwable failure, Runnable destroy) {
+            try {
+                destroy.run();
+            } catch (Throwable t) {
+                if (failure == null) {
+                    return t;
+                }
+                failure.addSuppressed(t);
+            }
+            return failure;
+        }
+    }
     // Menu/non-RT present: converts the SDR main target (sRGB) to PQ-encoded at paper white so menus,
     // the title panorama and the loading screen present correctly to the PQ swapchain instead of being
     // raw-copied (misdisplayed). Lazily created; the image is sized to the swapchain.
@@ -237,13 +380,17 @@ public final class RtComposite {
     private final Matrix4f fgPrevToClip = new Matrix4f();
     private final Matrix4f fgMatTmp = new Matrix4f();
     // Guide buffers (first-hit attributes for DLSS-RR): normal+roughness, albedo, depth, motion,
-    // specular albedo, and reflection motion.
+    // specular albedo, reflection motion, DLSSD responsivity, primary-sky display classification,
+    // and particle classification.
     private RtImage gNormal;
     private RtImage gAlbedo;
     private RtImage gDepth;
     private RtImage gMotion;
     private RtImage gSpecAlbedo;
     private RtImage gSpecMotion;
+    private RtImage gResponsivity;
+    private RtImage gParticleMask;
+    private RtImage gSkyClassification;
     // Display-res RT image the display mapper reads: DLSS-RR writes it (render -> display denoise+upscale), or a
     // linear blit of `output` fills it when RR is off/unavailable (the no-RR reference / fallback).
     private RtImage rrOutput;
@@ -286,6 +433,17 @@ public final class RtComposite {
     private double camY;
     private double camZ;
     private boolean frameCaptured;
+    private boolean captureCameraFrozen;
+    private boolean captureWorldPushFrozen;
+    private int captureFlags;
+    private Float4 captureWaterParams;
+    private Float4 captureWaterAnchor;
+    private BreakEntry[] captureBreaking;
+    private SkyPush captureSky;
+    private RtAccel.PreparedTlas captureTlas;
+    private boolean freshRtFrame;
+    private boolean freshDlssRrFrame;
+    private int jitterPhaseCount;
     private long celestialUvAtlasHandle;
     private int celestialUvMoonPhase = -1;
     private float sunU0;
@@ -296,6 +454,18 @@ public final class RtComposite {
     private float moonV0;
     private float moonU1 = 1f;
     private float moonV1 = 1f;
+    private float endFlashU0;
+    private float endFlashV0;
+    private float endFlashU1 = 1f;
+    private float endFlashV1 = 1f;
+    private int frameSkyboxMode = RtSkyMath.SKYBOX_OVERWORLD;
+    private boolean frameSkyboxValid;
+    private float frameSkyColorR;
+    private float frameSkyColorG;
+    private float frameSkyColorB;
+    private float frameSkyColorA = 1.0f;
+    private boolean endFlashStateValid;
+    private boolean previousEndFlashActive;
 
     // Per-frame TLAS resources, rebuilt in place from a small ring of persistent slots (see
     // RtAccel.TlasRing — replaces the old create-and-defer-destroy-per-frame churn whose VMA slow path
@@ -337,14 +507,10 @@ public final class RtComposite {
     }
 
     /**
-     * Export the latest RT scene image at the exact input seam of the Look/LMT stage.
+     * Export the latest RT scene image at the input seam of the authored Look/LMT stage.
      *
-     * <p>The GPU image stores {@code sceneLinear * preExposure} in fp16. This readback multiplies RGB by
-     * the display shader's current 1x1 {@code residualExposure}, in float32, then quantizes the resulting
-     * exposure-adjusted scene-linear image to fp16 EXR. Metadata keeps both factors so the original scene-linear
-     * values can be reconstructed with {@code RGB / (preExposure * residualExposure)}.
-     *
-     * @return {@code true} when a current RT frame was available and written
+     * <p>The GPU image stores {@code sceneLinear * preExposure} in fp16. The readback multiplies RGB by
+     * the display shader's current residual exposure before writing scene-linear ACEScg half values.
      */
     public boolean exportLatestResidualExposureExr(Path outputPath) throws java.io.IOException {
         RenderSystem.assertOnRenderThread();
@@ -362,8 +528,6 @@ public final class RtComposite {
                     + displayW + "x" + displayH);
         }
 
-        // All ordinary frame commands have been submitted before the F2 key is handled. Drain them before
-        // a private one-shot copy so rrOutput and the exposure image describe the same completed frame.
         ctx.waitIdle();
         RtBuffer readback = ctx.createReadbackBuffer(totalBytes, "residual-exposure EXR readback");
         try {
@@ -371,7 +535,7 @@ public final class RtComposite {
             readback.invalidate();
 
             float residualExposure = MemoryUtil.memGetFloat(readback.mapped + rgbaBytes);
-            RtExposure.CaptureMetadata exposureMetadata = exposure.captureMetadata(residualExposure);
+            RtExposure.CaptureMetadata metadata = exposure.captureMetadata(residualExposure);
             short[] exposedRgba = new short[Math.toIntExact(pixelCount * 4L)];
             for (int sample = 0; sample < exposedRgba.length; sample++) {
                 short storedHalf = MemoryUtil.memGetShort(readback.mapped + (long) sample * Short.BYTES);
@@ -379,23 +543,14 @@ public final class RtComposite {
                 if ((sample & 3) != 3) {
                     value *= residualExposure;
                 }
-                // Residual exposure is expected to keep this seam comfortably centred in fp16. Clamp only
-                // true outliers/infinities so a pathological light cannot poison a grading application.
-                value = Math.clamp(value, -65504.0f, 65504.0f);
-                exposedRgba[sample] = Float.floatToFloat16(value);
+                exposedRgba[sample] = Float.floatToFloat16(Math.clamp(value, -65504.0f, 65504.0f));
             }
 
             RtOpenExrWriter.write(outputPath, displayW, displayH, exposedRgba,
                     new RtOpenExrWriter.Metadata(
-                            exposureMetadata.preExposure(),
-                            exposureMetadata.residualExposure(),
-                            exposureMetadata.absoluteExposure(),
-                            exposureMetadata.mode(),
-                            exposureMetadata.evScene(),
-                            exposureMetadata.evTarget(),
-                            exposureMetadata.evApplied(),
-                            LOOK.id() + "@" + LOOK.packageVersion(),
-                            frameCounter));
+                            metadata.preExposure(), metadata.residualExposure(), metadata.absoluteExposure(),
+                            metadata.mode(), metadata.evScene(), metadata.evTarget(), metadata.evApplied(),
+                            LOOK.id() + "@" + LOOK.packageVersion(), frameCounter));
             return true;
         } finally {
             readback.destroy();
@@ -404,16 +559,14 @@ public final class RtComposite {
 
     private void recordExrReadback(RtContext ctx, VkCommandBuffer cmd, RtBuffer readback, long exposureOffset) {
         try (MemoryStack stack = MemoryStack.stackPush();
-             RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd,
-                     "residual-exposure EXR readback")) {
+             RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "residual-exposure EXR readback")) {
             VkImageMemoryBarrier.Buffer imageBarriers = VkImageMemoryBarrier.calloc(2, stack);
             imageBarriers.get(0).sType$Default()
                     .oldLayout(VK10.VK_IMAGE_LAYOUT_GENERAL).newLayout(VK10.VK_IMAGE_LAYOUT_GENERAL)
                     .srcAccessMask(VK10.VK_ACCESS_SHADER_WRITE_BIT | VK10.VK_ACCESS_TRANSFER_WRITE_BIT)
                     .dstAccessMask(VK10.VK_ACCESS_TRANSFER_READ_BIT)
                     .srcQueueFamilyIndex(VK10.VK_QUEUE_FAMILY_IGNORED)
-                    .dstQueueFamilyIndex(VK10.VK_QUEUE_FAMILY_IGNORED)
-                    .image(rrOutput.image);
+                    .dstQueueFamilyIndex(VK10.VK_QUEUE_FAMILY_IGNORED).image(rrOutput.image);
             imageBarriers.get(0).subresourceRange().aspectMask(VK10.VK_IMAGE_ASPECT_COLOR_BIT)
                     .levelCount(1).layerCount(1);
             imageBarriers.get(1).sType$Default()
@@ -421,15 +574,13 @@ public final class RtComposite {
                     .srcAccessMask(VK10.VK_ACCESS_SHADER_WRITE_BIT | VK10.VK_ACCESS_TRANSFER_WRITE_BIT)
                     .dstAccessMask(VK10.VK_ACCESS_TRANSFER_READ_BIT)
                     .srcQueueFamilyIndex(VK10.VK_QUEUE_FAMILY_IGNORED)
-                    .dstQueueFamilyIndex(VK10.VK_QUEUE_FAMILY_IGNORED)
-                    .image(exposure.image().image);
+                    .dstQueueFamilyIndex(VK10.VK_QUEUE_FAMILY_IGNORED).image(exposure.image().image);
             imageBarriers.get(1).subresourceRange().aspectMask(VK10.VK_IMAGE_ASPECT_COLOR_BIT)
                     .levelCount(1).layerCount(1);
             VK10.vkCmdPipelineBarrier(cmd, VK10.VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
                     VK10.VK_PIPELINE_STAGE_TRANSFER_BIT, 0, null, null, imageBarriers);
 
             VkBufferImageCopy.Buffer sceneCopy = VkBufferImageCopy.calloc(1, stack);
-            sceneCopy.get(0).bufferOffset(0L);
             sceneCopy.get(0).imageSubresource().aspectMask(VK10.VK_IMAGE_ASPECT_COLOR_BIT).layerCount(1);
             sceneCopy.get(0).imageExtent().set(displayW, displayH, 1);
             VK10.vkCmdCopyImageToBuffer(cmd, rrOutput.image, VK10.VK_IMAGE_LAYOUT_GENERAL,
@@ -466,6 +617,10 @@ public final class RtComposite {
         if (worldPipeline == null || !materialBindingsReady) {
             return true;
         }
+        EndSkyBinding endSky = endSkyBinding();
+        if (endSky.view() == 0L || endSky.sampler() == 0L) {
+            return true;
+        }
         if (materialEpochTraceGate) {
             return true;
         }
@@ -489,21 +644,182 @@ public final class RtComposite {
             failed = false;
             CausticaMod.LOGGER.info("RT failure latch cleared by render-state invalidation; retrying RT");
         }
+        RtDlssRr.INSTANCE.resetFailureLatch();
     }
 
-    /** Capture the frame's camera for the next composite. Called from GameRendererMixin. */
-    public void captureFrame(Matrix4f projection, Matrix4fc viewRotation, double cameraX, double cameraY, double cameraZ) {
+    /** Capture one coherent camera, dimension-sky, and vanilla sky-color snapshot for the next composite. */
+    public void captureFrame(Matrix4f projection, Matrix4fc viewRotation, double cameraX, double cameraY, double cameraZ,
+                             FogData vanillaFogData) {
+        if (CaptureSession.active() && captureCameraFrozen) {
+            frameCaptured = true;
+            return;
+        }
         frameProjection.set(projection);
         frameViewRotation.set(viewRotation);
         camX = cameraX;
         camY = cameraY;
         camZ = cameraZ;
+        Minecraft mc = Minecraft.getInstance();
+        int skybox = RtSkyMath.skyboxMode(mc.level == null
+                ? DimensionType.Skybox.OVERWORLD : mc.level.dimensionType().skybox());
+        if (frameSkyboxValid && frameSkyboxMode != skybox) {
+            RtDlssRr.INSTANCE.requestHistoryReset();
+        }
+        frameSkyboxMode = skybox;
+        frameSkyboxValid = true;
+        captureSkyColor(vanillaFogData);
         frameCaptured = true;
+        captureCameraFrozen = CaptureSession.active();
+    }
+
+    /** Read vanilla's resolved sky color for End-sky compositing without modifying the fog pipeline. */
+    private void captureSkyColor(FogData vanillaFogData) {
+        float skyR = 0.0f;
+        float skyG = 0.0f;
+        float skyB = 0.0f;
+        float skyA = 1.0f;
+        if (vanillaFogData != null && vanillaFogData.color != null) {
+            var color = vanillaFogData.color;
+            skyR = RtSkyMath.srgbToLinear(finiteColor(color.x()));
+            skyG = RtSkyMath.srgbToLinear(finiteColor(color.y()));
+            skyB = RtSkyMath.srgbToLinear(finiteColor(color.z()));
+            skyA = finiteColor(color.w());
+        }
+        frameSkyColorR = skyR;
+        frameSkyColorG = skyG;
+        frameSkyColorB = skyB;
+        frameSkyColorA = skyA;
+    }
+
+    private static float finiteColor(float value) {
+        return Float.isFinite(value) ? Math.clamp(value, 0.0f, 1.0f) : 0.0f;
+    }
+
+    /** Freeze renderer-owned scene inputs for a finite multi-frame capture. */
+    public void beginCaptureSession() {
+        captureCameraFrozen = false;
+        captureWorldPushFrozen = false;
+        exposure.beginCapture();
+        captureBreaking = null;
+        captureSky = null;
+        captureTlas = null;
+    }
+
+    public void endCaptureSession() {
+        captureCameraFrozen = false;
+        captureWorldPushFrozen = false;
+        exposure.endCapture();
+        captureBreaking = null;
+        captureSky = null;
+        captureTlas = null;
+    }
+
+    public boolean producedFreshDlssRrFrame() {
+        return freshRtFrame && freshDlssRrFrame;
+    }
+
+    public int currentJitterPhaseCount() {
+        return jitterPhaseCount;
+    }
+
+    /** F4 may retain the current renderer only after a valid RT frame and exposure image exist. */
+    public boolean readyForUltraScreenshot() {
+        return freshRtFrame && !failed && worldPipeline != null && materialBindingsReady
+                && !reloadRebindRequested && output != null && continuationQueue != null
+                && pathSamplerData != null
+                && displayPipeline != null && displayImage != null && hdrDisplayImage != null
+                && rrOutput != null && exposure.ready() && RtTerrain.currentOrNull() != null;
     }
 
     /** Reset exposure filtering after an explicit render-state invalidation such as F3+A. */
     public void resetExposureHistory() {
-        exposure.requestReset();
+        requestTemporalReset();
+    }
+
+    /** Clear every temporal input before a controlled renderer comparison or explicit scene invalidation. */
+    public void requestTemporalReset() {
+        requestTemporalReset(true);
+    }
+
+    /** Reset reconstruction while optionally retaining the valid exposure image and latch. */
+    public void requestTemporalReset(boolean resetExposureHistory) {
+        pathSamplerResetPending = true;
+        resetTemporalConsumers(resetExposureHistory);
+    }
+
+    private void resetTemporalConsumers(boolean resetExposureHistory) {
+        CausticaJitter.INSTANCE.reset();
+        RtDlssRr.INSTANCE.requestHistoryReset();
+        if (resetExposureHistory) {
+            exposure.requestReset();
+        }
+        requestSharcReset();
+        mvHasPrev = false;
+        waterWaveTimeValid = false;
+        fgReset = true;
+    }
+
+    private void refreshPathSamplingPolicy(int frameSpp) {
+        long reservation = pathSamplesPerFrame(frameSpp);
+        long signature = pathSamplingPolicySignature(frameSpp);
+        if (pathSamplingPolicySignature != signature) {
+            pathSamplingPolicySignature = signature;
+            pathSamplerResetPending = true;
+            // SPP and estimator-shape changes invalidate reconstruction but not the exposure estimate.
+            resetTemporalConsumers(false);
+        }
+        if (!pathSamplerResetPending && pathSampleCursor > PATH_SAMPLE_INDEX_LIMIT - reservation) {
+            pathSamplerResetPending = true;
+            resetTemporalConsumers(false);
+        }
+        if (pathSamplerResetPending) {
+            pathSampleCursor = 0L;
+            pathSampleEpoch++;
+            if (pathSampleEpoch == 0) {
+                pathSampleEpoch = 1;
+            }
+            pathSamplerResetPending = false;
+        }
+    }
+
+    private long pathSamplingPolicySignature(int frameSpp) {
+        int bounceCount = maxBounces();
+        if (bounceCount < 0 || bounceCount > RtPathSamplerData.MAX_SUPPORTED_BOUNCE) {
+            throw new IllegalStateException("Path sampler does not support max-bounces=" + bounceCount);
+        }
+        int risCandidates = CausticaConfig.Rt.Lights.RIS_CANDIDATES.value();
+        if (risCandidates < 0 || risCandidates > RtPathSamplerData.MAX_RIS_CANDIDATES) {
+            throw new IllegalStateException("Path sampler does not support RIS candidates=" + risCandidates);
+        }
+
+        long signature = 17L;
+        signature = signature * 31L + RtPathSamplerData.ALGORITHM_VERSION;
+        signature = signature * 31L + frameSpp;
+        signature = signature * 31L + bounceCount;
+        signature = signature * 31L + risCandidates;
+        signature = signature * 31L + (CausticaConfig.Rt.Sharc.ENABLED.value() ? 1L : 0L);
+        return signature;
+    }
+
+    private static long pathSamplesPerFrame(int frameSpp) {
+        if (frameSpp < 1) {
+            throw new IllegalArgumentException("Path-tracing SPP must be positive: " + frameSpp);
+        }
+        long reservation = frameSpp;
+        if (reservation > PATH_SAMPLE_INDEX_LIMIT) {
+            throw new IllegalArgumentException("Path-tracing SPP exhausts the 32-bit sample domain: " + frameSpp);
+        }
+        return reservation;
+    }
+
+    private int reservePathSamples(int frameSpp) {
+        long reservation = pathSamplesPerFrame(frameSpp);
+        if (pathSampleCursor > PATH_SAMPLE_INDEX_LIMIT - reservation) {
+            throw new IllegalStateException("Path sample cursor was not reset before 32-bit exhaustion");
+        }
+        int base = (int) pathSampleCursor;
+        pathSampleCursor += reservation;
+        return base;
     }
 
     /**
@@ -530,6 +846,10 @@ public final class RtComposite {
         }
         RtFrameStats.FRAME.beginIfInactive();
         hdrWrittenThisFrame = false;
+        freshRtFrame = false;
+        freshDlssRrFrame = false;
+        jitterPhaseCount = 0;
+        UltraScreenshot.INSTANCE.beginFrame(Minecraft.getInstance());
     }
 
     /** This frame's completion token, valid until {@link #finishGraphicsUse()} signals it. */
@@ -545,13 +865,27 @@ public final class RtComposite {
             return;
         }
         RtContext ctx = RtContext.currentOrNull();
-        if (ctx == null) {
-            throw new IllegalStateException("RT context disappeared before graphics use completed");
+        try {
+            if (ctx == null) {
+                throw new IllegalStateException("RT context disappeared before graphics use completed");
+            }
+            var encoder = (VulkanCommandEncoder) ((CommandEncoderAccessor) RenderSystem.getDevice()
+                    .createCommandEncoder()).caustica$getBackend();
+            ctx.gpuExecutor().endGraphicsUse(encoder, graphicsUse);
+        } catch (RuntimeException | Error failure) {
+            if (!graphicsUse.isAccepted() && ctx != null) {
+                try {
+                    ctx.gpuExecutor().abortGraphicsUse(graphicsUse);
+                } catch (RuntimeException | Error abortFailure) {
+                    failure.addSuppressed(abortFailure);
+                }
+            }
+            throw failure;
+        } finally {
+            // Accepted GPU work may still consume every attached owner, so only an unaccepted reservation
+            // is eligible for host-side abort when the render-tail signal path fails.
+            pendingGraphicsUse = null;
         }
-        var encoder = (VulkanCommandEncoder) ((CommandEncoderAccessor) RenderSystem.getDevice()
-                .createCommandEncoder()).caustica$getBackend();
-        ctx.gpuExecutor().endGraphicsUse(encoder, graphicsUse);
-        pendingGraphicsUse = null;
     }
 
     public void endFrame() {
@@ -573,7 +907,9 @@ public final class RtComposite {
         // Count-bounded terrain streaming (dispatch/drain/build kick) runs here once per render frame — before
         // the ready gate below, because it is what MAKES terrain ready during the initial fill.
         try {
-            RtTerrain.frame(ctx);
+            if (!CaptureSession.active()) {
+                RtTerrain.frame(ctx);
+            }
         } catch (Throwable t) {
             ctx.gpuExecutor().throwIfFailed();
             failed = true;
@@ -606,10 +942,13 @@ public final class RtComposite {
             if (sdrToneLut == null) {
                 sdrToneLut = RtToneLut.load(ctx, "sdr_aces2_rec709.bin");
             }
-            // The mastering target is live, so track it each frame.
-            int wantedHdrNits = CausticaConfig.Rt.Hdr.PEAK_NITS.value();
-            if (hdrToneLut == null || loadedHdrLutNits != wantedHdrNits) {
-                RtToneLut newHdrLut = RtToneLut.load(ctx, "hdr_aces2_rec2020_" + wantedHdrNits + "nit.bin");
+            // The display peak is live. ACES 2.0 has four packaged mastering targets, so bind the
+            // nearest one; analytical HDR modes use the exact configured peak in their push constants.
+            int requestedHdrNits = CausticaConfig.Rt.Hdr.PEAK_NITS.value();
+            int wantedHdrLutNits = CausticaConfig.Rt.Hdr.nearestAcesLutNits(requestedHdrNits);
+            if (hdrToneLut == null || loadedHdrLutNits != wantedHdrLutNits) {
+                RtToneLut newHdrLut = RtToneLut.load(ctx,
+                        "hdr_aces2_rec2020_" + wantedHdrLutNits + "nit.bin");
                 if (newHdrLut.size != sdrToneLut.size) {
                     // display.comp's lutSize push constant is shared by both LUT samples (see
                     // lutTexCoord()); bake_display_lut.py currently always sizes both the same, but
@@ -623,7 +962,7 @@ public final class RtComposite {
                     hdrToneLut.destroy();
                 }
                 hdrToneLut = newHdrLut;
-                loadedHdrLutNits = wantedHdrNits;
+                loadedHdrLutNits = wantedHdrLutNits;
             }
             // The scene-referred LMT is part of the immutable versioned look package and shared by
             // both SDR and HDR output transforms. It cannot be switched independently from the
@@ -648,9 +987,17 @@ public final class RtComposite {
             // hdrToneLut/lookLut may have been hot-swapped just above; setImages is a no-op if the bound
             // views already match, so this is cheap on every other frame.
             RtToneLut boundLookLut = lookLut;
+            EndSkyBinding endSky = requireEndSkyBinding();
+            long fallbackAtlasView = blockAlbedoAtlasView();
+            long celestialsView = celestialsAtlasView();
+            long atlasSamplerHandle = atlasSampler(ctx);
             displayPipeline.setImages(displayImage.view, rrOutput.view, exposure.image().view, hdrDisplayImage.view,
                     sdrToneLut.view(), sdrToneLut.sampler(), hdrToneLut.view(), hdrToneLut.sampler(),
-                    boundLookLut.view(), boundLookLut.sampler(), bloomLevels[0].view, bloomPipeline.sampler());
+                    boundLookLut.view(), boundLookLut.sampler(), bloomLevels[0].view, bloomPipeline.sampler(),
+                    gSkyClassification.view,
+                    endSky.view(), endSky.sampler(),
+                    celestialsView != 0L ? celestialsView : fallbackAtlasView,
+                    atlasSamplerHandle);
             bloomPipeline.setImages(rrOutput.view, exposure.image().view, bloomLevels);
             debugPresentPipeline.setImages(displayImage.view, gNormal.view, gAlbedo.view, gDepth.view,
                     gMotion.view, gSpecAlbedo.view, gSpecMotion.view, rrOutput.view, exposure.image().view,
@@ -666,13 +1013,18 @@ public final class RtComposite {
                 return false;
             }
             refreshMaterialBindingsIfNeeded(ctx);
+            syncSharcResources(ctx);
+            int frameSpp = spp();
+            refreshPathSamplingPolicy(frameSpp);
             updateMotion();
-            recordFrame(ctx, active, nativeColor);
+            recordFrame(ctx, active, nativeColor, frameSpp);
             if (!loggedActive) {
                 loggedActive = true;
                 CausticaMod.LOGGER.info("RT composite active (terrain): {}x{}, RT output replaces the world target", width, height);
             }
             return true;
+        } catch (EndSkyUnavailableException e) {
+            return false;
         } catch (Throwable t) {
             ctx.gpuExecutor().throwIfFailed();
             failed = true;
@@ -698,6 +1050,8 @@ public final class RtComposite {
         }
         try {
             ensureWorld(ctx);
+        } catch (EndSkyUnavailableException e) {
+            CausticaMod.LOGGER.debug("RT resource bring-up waiting for the vanilla End sky texture");
         } catch (Throwable t) {
             failed = true;
             CausticaMod.LOGGER.error("RT resource bring-up failed; reverting to vanilla path", t);
@@ -706,6 +1060,7 @@ public final class RtComposite {
 
     private RtPipeline ensureWorld(RtContext ctx) {
         if (worldPipeline == null) {
+            try {
             // Must exist before bindWorldTextures below writes the sky-LUT descriptors. This is the
             // earliest possible bind: ensureResourcesReady drives this from the client tick, ahead of the
             // render()/composite path. bindWorldTextures only ever runs again on a
@@ -730,16 +1085,298 @@ public final class RtComposite {
                             VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true, "rt world push " + i));
                 }
             }
+            if (pathSamplerData == null) {
+                pathSamplerData = RtPathSamplerData.create(ctx);
+                CausticaMod.LOGGER.info("Initialized canonical path sampler v{}",
+                        RtPathSamplerData.ALGORITHM_VERSION);
+            }
             if (output != null) {
                 worldPipeline.setStorageImage(output.view);
                 bindGuideImages();
             }
             bindWorldTextures(ctx);
             reloadRebindRequested = false;
+            } catch (RuntimeException | Error t) {
+                rollbackWorldPipeline(ctx);
+                throw t;
+            }
         }
         // The TLAS is rebuilt and bound per frame in recordFrame since dynamic entity content animates
         // the instance set every frame.
         return worldPipeline;
+    }
+
+    private void rollbackWorldPipeline(RtContext ctx) {
+        materialBindingsReady = false;
+        materialEpochTraceGate = false;
+        boundBlockAlbedoAtlasHandle = 0L;
+        bindlessTextureCapacity = 0;
+        ctx.waitIdle();
+        Throwable failure = null;
+        failure = destroyStep(failure, "SHaRC resources", this::destroySharcResources);
+        RtPipeline world = worldPipeline;
+        worldPipeline = null;
+        if (world != null) {
+            failure = destroyStep(failure, "world pipeline", world::destroy);
+        }
+        failure = destroyStep(failure, "material registry", RtMaterialRegistry.INSTANCE::destroy);
+
+        RtPathSamplerData samplerData = pathSamplerData;
+        pathSamplerData = null;
+        if (samplerData != null) {
+            failure = destroyStep(failure, "path sampler data", samplerData::destroy);
+        }
+        pathSampleCursor = 0L;
+        pathSampleEpoch = 0;
+        pathSamplerResetPending = true;
+        pathSamplingPolicySignature = Long.MIN_VALUE;
+
+        PushSlot[] slots = pushRing;
+        pushRing = null;
+        if (slots != null) {
+            for (PushSlot slot : slots) {
+                if (slot != null) {
+                    failure = destroyStep(failure, "world push buffer", slot.buffer::destroy);
+                }
+            }
+        }
+
+        RtSkyLut atmosphere = skyLut;
+        skyLut = null;
+        if (atmosphere != null) {
+            failure = destroyStep(failure, "sky LUT", atmosphere::destroy);
+        }
+        if (failure != null) {
+            throw new IllegalStateException("RT world bring-up rollback failed", failure);
+        }
+    }
+
+    private boolean sharcRequested() {
+        return CausticaConfig.Rt.Sharc.ENABLED.value();
+    }
+
+    private boolean sharcActive() {
+        return sharcRequested() && debugView() == 0 && RtSharcSupport.available()
+                && sharcCache != null && sharcQueryPipeline != null
+                && sharcUpdatePipeline != null && sharcResolvePipeline != null;
+    }
+
+    /** User-facing effective state for the dedicated SHaRC options page. */
+    public String sharcStatus() {
+        if (!RtSharcSupport.available()) {
+            return RtSharcSupport.status();
+        }
+        if (!sharcRequested()) {
+            return "off";
+        }
+        if (debugView() != 0) {
+            return "paused while a renderer debug view is selected";
+        }
+        if (sharcActive()) {
+            return CausticaConfig.Rt.Sharc.PRIMARY_SURFACE_DEBUG.value()
+                    ? "active - primary-surface debug" : "active - secondary paths";
+        }
+        return sharcResourcesPresent() ? "initializing" : "ready - activates while rendering";
+    }
+
+    /** Request a timeline-safe clear; harmless while the lazy SHaRC cache is not allocated. */
+    public void requestSharcReset() {
+        if (sharcCache != null) {
+            sharcCache.requestReset();
+        }
+    }
+
+    private boolean sharcResourcesPresent() {
+        return sharcCache != null || sharcQueryPipeline != null
+                || sharcUpdatePipeline != null || sharcResolvePipeline != null;
+    }
+
+    private void syncSharcResources(RtContext ctx) {
+        boolean present = sharcCache != null || sharcQueryPipeline != null
+                || sharcUpdatePipeline != null || sharcResolvePipeline != null;
+        if (!sharcRequested() || !RtSharcSupport.available()) {
+            if (present) {
+                ctx.waitIdle();
+                destroySharcResources();
+            }
+            return;
+        }
+        RtTerrain terrain = RtTerrain.currentOrNull();
+        if (worldPipeline == null || output == null || gNormal == null || !materialBindingsReady || terrain == null) {
+            return;
+        }
+        int exponent = CausticaConfig.Rt.Sharc.CACHE_EXPONENT.value();
+        boolean ser = RtDeviceBringup.serExtEnabled();
+        boolean recreate = !present || sharcResourceExponent != exponent || sharcUsesSer != ser
+                || sharcRenderWidth != renderW || sharcRenderHeight != renderH;
+        if (!recreate) {
+            return;
+        }
+        if (present) {
+            ctx.waitIdle();
+            destroySharcResources();
+        }
+        try {
+            String query = ser ? "indirect_sharc_ser_query.rgen.spv" : "indirect_sharc_query.rgen.spv";
+            String update = ser ? "indirect_sharc_ser_update.rgen.spv" : "indirect_sharc_update.rgen.spv";
+            sharcQueryPipeline = RtPipeline.create(ctx, new String[]{query},
+                    new String[]{"sky.rmiss.spv", "guide.rmiss.spv"},
+                    "closest_hit.rchit.spv", "any_hit.rahit.spv",
+                    SharcPushConstantsData.BYTE_SIZE, bindlessTextureCapacity);
+            sharcUpdatePipeline = RtPipeline.create(ctx, new String[]{update},
+                    new String[]{"sky.rmiss.spv", "guide.rmiss.spv"},
+                    "closest_hit.rchit.spv", "any_hit.rahit.spv",
+                    SharcPushConstantsData.BYTE_SIZE, bindlessTextureCapacity);
+            sharcResolvePipeline = RtSharcResolvePipeline.create(ctx);
+            sharcCache = RtSharcCache.create(ctx, exponent);
+            long sampler = atlasSampler(ctx);
+            long atlas = blockAlbedoAtlasView();
+            bindSharcPipeline(sharcQueryPipeline, sampler, atlas);
+            bindSharcPipeline(sharcUpdatePipeline, sampler, atlas);
+            RtEntityTextures.INSTANCE.uploadAll(sampler, worldPipeline, sharcQueryPipeline, sharcUpdatePipeline);
+            sharcResourceExponent = sharcCache.exponent();
+            sharcUsesSer = ser;
+            sharcRenderWidth = renderW;
+            sharcRenderHeight = renderH;
+            sharcWorldIdentity = Minecraft.getInstance().level;
+            sharcDimensionIdentity = Minecraft.getInstance().level.dimension();
+            sharcTerrainX = terrain.blockX;
+            sharcTerrainY = terrain.blockY;
+            sharcTerrainZ = terrain.blockZ;
+            sharcMaterialEpoch = RtMaterialRegistry.INSTANCE.epoch();
+            sharcSettingsSignature = sharcSettingsSignature();
+            sharcLastCameraValid = false;
+            sharcLastSkyState = null;
+            sharcCache.requestReset();
+            CausticaMod.LOGGER.info("SHaRC 1.8 directional resources enabled: exponent={}, capacity={}, SER={}",
+                    sharcResourceExponent, sharcCache.capacity(), ser);
+        } catch (Throwable t) {
+            destroySharcResources();
+            RtSharcSupport.fail("resource or pipeline creation failed", t);
+        }
+    }
+
+    private void bindSharcPipeline(RtPipeline pipeline, long sampler, long atlasView) {
+        pipeline.setStorageImage(output.view);
+        bindGuideImages(pipeline);
+        pipeline.setBlockAlbedoAtlas(atlasView, sampler);
+        pipeline.setEntityAlbedoTexture(0, atlasView, sampler);
+        RtBlockMaterials.INSTANCE.bindPages(sampler, pipeline);
+        long celestials = celestialsAtlasView();
+        pipeline.setSkyAtlas(celestials != 0L ? celestials : atlasView, sampler);
+        EndSkyBinding endSky = requireEndSkyBinding();
+        pipeline.setEndSkyTexture(endSky.view(), endSky.sampler());
+        if (skyLut != null) {
+            pipeline.setSkyLuts(skyLut.skyViewView(), skyLut.transmittanceView(), skyLut.sampler());
+        }
+    }
+
+    private void destroySharcResources() {
+        Throwable failure = null;
+        RtSharcResolvePipeline resolvePipeline = sharcResolvePipeline;
+        sharcResolvePipeline = null;
+        if (resolvePipeline != null) {
+            failure = destroyStep(failure, "SHaRC resolve pipeline", resolvePipeline::destroy);
+        }
+        RtPipeline pipeline = sharcUpdatePipeline;
+        sharcUpdatePipeline = null;
+        if (pipeline != null) {
+            failure = destroyStep(failure, "SHaRC update pipeline", pipeline::destroy);
+        }
+        pipeline = sharcQueryPipeline;
+        sharcQueryPipeline = null;
+        if (pipeline != null) {
+            failure = destroyStep(failure, "SHaRC query pipeline", pipeline::destroy);
+        }
+        RtSharcCache cache = sharcCache;
+        sharcCache = null;
+        if (cache != null) {
+            failure = destroyStep(failure, "SHaRC cache", cache::destroy);
+        }
+        sharcResourceExponent = -1;
+        sharcUsesSer = false;
+        sharcWorldIdentity = null;
+        sharcDimensionIdentity = null;
+        sharcMaterialEpoch = -1L;
+        sharcSettingsSignature = Long.MIN_VALUE;
+        sharcRenderWidth = -1;
+        sharcRenderHeight = -1;
+        sharcLastCameraValid = false;
+        sharcLastSkyState = null;
+        if (failure != null) {
+            throw new IllegalStateException("SHaRC teardown failed", failure);
+        }
+    }
+
+    private static Throwable destroyStep(Throwable failure, String name, Runnable action) {
+        try {
+            action.run();
+        } catch (Throwable t) {
+            IllegalStateException wrapped = new IllegalStateException("RT teardown failed during " + name, t);
+            if (failure == null) {
+                return wrapped;
+            }
+            failure.addSuppressed(wrapped);
+        }
+        return failure;
+    }
+
+    private long sharcSettingsSignature() {
+        long signature = 17L;
+        signature = signature * 31L + spp();
+        signature = signature * 31L + maxBounces();
+        signature = signature * 31L + (waterWaves() ? 1L : 0L);
+        signature = signature * 31L + CausticaConfig.Rt.Lights.RIS_CANDIDATES.value();
+        signature = signature * 31L + (CausticaConfig.Rt.Sharc.ANTI_FIREFLY.value() ? 1L : 0L);
+        signature = signature * 31L + (CausticaConfig.Rt.Sharc.PRIMARY_SURFACE_DEBUG.value() ? 1L : 0L);
+        signature = signature * 31L + CausticaConfig.Rt.Sharc.UPDATE_TILE_SIZE.value();
+        signature = signature * 31L + CausticaConfig.Rt.Sharc.ACCUMULATION_FRAMES.value();
+        signature = signature * 31L + CausticaConfig.Rt.Sharc.STALE_FRAMES.value();
+        signature = signature * 31L + Float.floatToIntBits(CausticaConfig.Rt.Sharc.SCENE_SCALE.value());
+        signature = signature * 31L + Float.floatToIntBits(CausticaConfig.Rt.Sharc.RADIANCE_SCALE.value());
+        signature = signature * 31L + Float.floatToIntBits(CausticaConfig.Rt.Sharc.GRID_LOGARITHM_BASE.value());
+        signature = signature * 31L + Float.floatToIntBits(CausticaConfig.Rt.Sharc.GRID_LEVEL_BIAS.value());
+        signature = signature * 31L + Float.floatToIntBits(CausticaConfig.Rt.Sharc.ROUGHNESS_THRESHOLD.value());
+        return signature;
+    }
+
+    private void updateSharcResetPolicy(RtTerrain terrain, SkyPush sky) {
+        if (sharcCache == null) return;
+        var level = Minecraft.getInstance().level;
+        Object dimension = level != null ? level.dimension() : null;
+        if (sharcWorldIdentity != level || !Objects.equals(sharcDimensionIdentity, dimension)
+                || sharcTerrainX != terrain.blockX || sharcTerrainY != terrain.blockY || sharcTerrainZ != terrain.blockZ
+                || sharcMaterialEpoch != RtMaterialRegistry.INSTANCE.epoch()
+                || sharcSettingsSignature != sharcSettingsSignature()
+                || sharcRenderWidth != renderW || sharcRenderHeight != renderH) {
+            sharcCache.requestReset();
+        }
+        if (!sharcLastCameraValid || !Double.isFinite(camX) || !Double.isFinite(camY) || !Double.isFinite(camZ)) {
+            if (sharcLastCameraValid) sharcCache.requestReset();
+        } else {
+            double dx = camX - sharcLastCameraX;
+            double dy = camY - sharcLastCameraY;
+            double dz = camZ - sharcLastCameraZ;
+            if (dx * dx + dy * dy + dz * dz > 64.0 * 64.0) sharcCache.requestReset();
+        }
+        SharcSkyState skyState = SharcSkyState.from(sky);
+        if (hardSkyDiscontinuity(sharcLastSkyState, skyState)) {
+            sharcCache.requestReset();
+        }
+        sharcWorldIdentity = level;
+        sharcDimensionIdentity = dimension;
+        sharcTerrainX = terrain.blockX;
+        sharcTerrainY = terrain.blockY;
+        sharcTerrainZ = terrain.blockZ;
+        sharcMaterialEpoch = RtMaterialRegistry.INSTANCE.epoch();
+        sharcSettingsSignature = sharcSettingsSignature();
+        sharcRenderWidth = renderW;
+        sharcRenderHeight = renderH;
+        sharcLastCameraX = camX;
+        sharcLastCameraY = camY;
+        sharcLastCameraZ = camZ;
+        sharcLastCameraValid = Double.isFinite(camX) && Double.isFinite(camY) && Double.isFinite(camZ);
+        sharcLastSkyState = skyState;
     }
 
     private void refreshPipelineShapeIfNeeded(RtContext ctx) {
@@ -751,6 +1388,7 @@ public final class RtComposite {
             return;
         }
         ctx.waitIdle();
+        destroySharcResources();
         worldPipeline.destroy();
         worldPipeline = null;
         bindlessTextureCapacity = 0;
@@ -764,9 +1402,9 @@ public final class RtComposite {
      * the shared material registry, and invalidates old-epoch geometry before tracing resumes.
      */
     private void bindWorldTextures(RtContext ctx) {
+        EndSkyBinding endSky = requireEndSkyBinding();
         long sampler = atlasSampler(ctx);
         long atlasView = blockAlbedoAtlasView();
-        boundBlockAlbedoAtlasHandle = atlasView; // remember what we bound so a reload can detect the new atlas
         worldPipeline.setBlockAlbedoAtlas(atlasView, sampler);
         // Bindless slot 0 = fallback texture (the block atlas) so an entity whose texture can't be
         // resolved samples something defined rather than an unbound (partially-bound) descriptor.
@@ -778,7 +1416,6 @@ public final class RtComposite {
         worldPipeline.setEntityAlbedoTexture(0, atlasView, sampler);
         RtBlockMaterials.INSTANCE.bindPages(worldPipeline, sampler);
         RtMaterialRegistry.INSTANCE.rebuild(ctx, RtBlockMaterials.INSTANCE, materialOverrides);
-        materialBindingsReady = true;
         // Sky rewrite: bind the vanilla celestials atlas (sun + moon phases) for world.rmiss. The view
         // handle is stable across frames; the shader only samples it inside the sun/moon discs (sky
         // directions), so the block-atlas fallback is never read if the celestials atlas isn't ready.
@@ -792,11 +1429,14 @@ public final class RtComposite {
                         skyLut.sampler());
             }
         }
+        worldPipeline.setEndSkyTexture(endSky.view(), endSky.sampler());
         setCelestialUvAtlas(celView);
         // Atlas UVs and material IDs are one resource epoch. Drop old terrain as a unit rather than
         // incrementally displaying old UVs/IDs against the new atlas/table.
         RtTerrain.requestFullClear();
         materialEpochTraceGate = true;
+        boundBlockAlbedoAtlasHandle = atlasView;
+        materialBindingsReady = true;
     }
 
     private void refreshMaterialBindingsIfNeeded(RtContext ctx) {
@@ -804,7 +1444,12 @@ public final class RtComposite {
             return;
         }
         if (!materialBindingsReady) {
-            bindWorldTextures(ctx);
+            try {
+                bindWorldTextures(ctx);
+            } catch (RuntimeException | Error t) {
+                rollbackWorldPipeline(ctx);
+                throw t;
+            }
         }
     }
 
@@ -837,6 +1482,11 @@ public final class RtComposite {
         RtContext ctx = RtContext.currentOrNull();
         if (ctx != null) {
             ctx.waitIdle();
+            destroySharcResources();
+            if (displayPipeline != null) {
+                displayPipeline.destroy();
+                displayPipeline = null;
+            }
             if (worldPipeline != null) {
                 worldPipeline.destroy();
                 worldPipeline = null;
@@ -848,53 +1498,68 @@ public final class RtComposite {
 
     /** Bind the guide buffers into the world pipeline's extra storage-image slots. */
     private void bindGuideImages() {
-        if (worldPipeline == null || gNormal == null) {
+        bindGuideImages(worldPipeline);
+        bindGuideImages(sharcQueryPipeline);
+        bindGuideImages(sharcUpdatePipeline);
+    }
+
+    private void bindGuideImages(RtPipeline pipeline) {
+        if (pipeline == null || gNormal == null) {
             return;
         }
-        worldPipeline.setExtraStorageImage(0, gNormal.view);
-        worldPipeline.setExtraStorageImage(1, gAlbedo.view);
-        worldPipeline.setExtraStorageImage(2, gDepth.view);
-        worldPipeline.setExtraStorageImage(3, gMotion.view);
-        worldPipeline.setExtraStorageImage(4, gSpecAlbedo.view);
-        worldPipeline.setExtraStorageImage(5, gSpecMotion.view);
+        pipeline.setExtraStorageImage(0, gNormal.view);
+        pipeline.setExtraStorageImage(1, gAlbedo.view);
+        pipeline.setExtraStorageImage(2, gDepth.view);
+        pipeline.setExtraStorageImage(3, gMotion.view);
+        pipeline.setExtraStorageImage(4, gSpecAlbedo.view);
+        pipeline.setExtraStorageImage(5, gSpecMotion.view);
+        pipeline.setExtraStorageImage(6, gResponsivity.view);
+        pipeline.setExtraStorageImage(7, gParticleMask.view);
+        pipeline.setExtraStorageImage(8, gSkyClassification.view);
     }
 
     private void destroyGuideImages() {
-        if (gNormal != null) {
-            gNormal.destroy();
-            gNormal = null;
-        }
-        if (gAlbedo != null) {
-            gAlbedo.destroy();
-            gAlbedo = null;
-        }
-        if (gDepth != null) {
-            gDepth.destroy();
-            gDepth = null;
-        }
-        if (gMotion != null) {
-            gMotion.destroy();
-            gMotion = null;
-        }
-        if (gSpecAlbedo != null) {
-            gSpecAlbedo.destroy();
-            gSpecAlbedo = null;
-        }
-        if (gSpecMotion != null) {
-            gSpecMotion.destroy();
-            gSpecMotion = null;
-        }
-        if (rrOutput != null) {
-            rrOutput.destroy();
-            rrOutput = null;
+        Throwable failure = null;
+        RtImage image = gNormal;
+        gNormal = null;
+        if (image != null) failure = destroyStep(failure, "normal guide image", image::destroy);
+        image = gAlbedo;
+        gAlbedo = null;
+        if (image != null) failure = destroyStep(failure, "albedo guide image", image::destroy);
+        image = gDepth;
+        gDepth = null;
+        if (image != null) failure = destroyStep(failure, "depth guide image", image::destroy);
+        image = gMotion;
+        gMotion = null;
+        if (image != null) failure = destroyStep(failure, "motion guide image", image::destroy);
+        image = gSpecAlbedo;
+        gSpecAlbedo = null;
+        if (image != null) failure = destroyStep(failure, "specular-albedo guide image", image::destroy);
+        image = gSpecMotion;
+        gSpecMotion = null;
+        if (image != null) failure = destroyStep(failure, "specular-motion guide image", image::destroy);
+        image = gResponsivity;
+        gResponsivity = null;
+        if (image != null) failure = destroyStep(failure, "responsivity guide image", image::destroy);
+        image = gParticleMask;
+        gParticleMask = null;
+        if (image != null) failure = destroyStep(failure, "particle-mask guide image", image::destroy);
+        image = gSkyClassification;
+        gSkyClassification = null;
+        if (image != null) failure = destroyStep(failure, "primary-sky classification guide image", image::destroy);
+        image = rrOutput;
+        rrOutput = null;
+        if (image != null) failure = destroyStep(failure, "DLSS-RR output image", image::destroy);
+        if (failure != null) {
+            throw new IllegalStateException("RT guide-image teardown failed", failure);
         }
     }
 
     private void ensureOutput(RtContext ctx, int width, int height) {
-        // Debug presentation is downstream of the ordinary frame graph and must not change the image
-        // being inspected. In particular, toggling it must not rebuild at native resolution or disable
-        // the RR path whose render-resolution guide inputs the debug pass visualizes.
-        boolean rrEnabled = RtDlssRr.enabled();
+        // The raw debug view is a deliberate pre-reconstruction reference. It must trace at display
+        // resolution and must not create/use the RR path, otherwise it would only be another reconstructed image.
+        boolean rrRequested = RtDlssRr.enabled() && !rawDebugView();
+        boolean rrEnabled = rrRequested && !RtDlssRr.INSTANCE.hasFailed();
         int rrQuality = rrEnabled ? RtDlssRr.quality() : Integer.MIN_VALUE;
         if (output != null && continuationQueue != null
                 && displayImage != null && hdrDisplayImage != null && rrOutput != null
@@ -903,98 +1568,251 @@ public final class RtComposite {
                 && renderSizeRrEnabled == rrEnabled && renderSizeRrQuality == rrQuality) {
             return;
         }
-        ctx.waitIdle(); // resize is rare; no in-flight frame may use the old image/descriptor
-        if (displayImage != null) {
-            displayImage.destroy();
+        // Query before destroying the existing output. A stale shim or unavailable optional query must
+        // disable RR without leaving the compositor with no recoverable output resources.
+        int[] optimal = rrEnabled ? RtDlssRr.INSTANCE.queryOptimalRenderSize(width, height) : null;
+        boolean useRr = optimal != null;
+        int activeRrQuality = useRr ? rrQuality : Integer.MIN_VALUE;
+        if (output != null && displayW == width && displayH == height
+                && renderSizeRrEnabled == useRr && renderSizeRrQuality == activeRrQuality
+                && continuationQueue != null && displayImage != null && hdrDisplayImage != null
+                && rrOutput != null && bloomLevels.length > 0 && exposure.ready()) {
+            return;
         }
-        if (hdrDisplayImage != null) {
-            hdrDisplayImage.destroy();
-        }
-        destroyBloomLevels();
-        if (output != null) {
-            output.destroy();
-        }
-        if (continuationQueue != null) {
-            continuationQueue.destroy();
-            continuationQueue = null;
-        }
-        destroyGuideImages();
-
-        displayW = width;
-        displayH = height;
         // The path tracer + its guide buffers run at render res; DLSS-RR (or a fallback blit) upscales
         // to display res. With RR off there is no reconstruction pass, so trace at 1:1 for a faithful reference.
-        // With RR on, ask NGX what render resolution its chosen quality mode actually expects rather
-        // than assuming a fixed ratio: different quality modes (and driver versions) use different
-        // ratios, and DLSSD's own optimal-settings query is the source of truth for what it will accept.
-        int[] optimal = rrEnabled ? RtDlssRr.INSTANCE.queryOptimalRenderSize(width, height) : null;
-        renderW = optimal != null ? optimal[0] : width;
-        renderH = optimal != null ? optimal[1] : height;
-        renderSizeRrEnabled = rrEnabled;
-        renderSizeRrQuality = rrQuality;
-
-        // RT traces and DLSS-RR reconstruct scene-linear ACEScg in an HDR R16G16B16A16_SFLOAT target,
-        // so radiance > 1 and wide-gamut colour survive to the display seam. displayImage stays
-        // R8G8B8A8 to match the main target it is copied into
-        // (vkCmdCopyImage requires texel-size-compatible formats).
-        output = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "trace color " + renderW + "x" + renderH);
-        long pixelRecords = Math.multiplyExact((long) renderW, (long) renderH);
-        long continuationBytes = Math.multiplyExact(
-                Math.multiplyExact(pixelRecords, 2L), PATH_RECORD_BYTES);
-        continuationQueue = ctx.createBuffer(continuationBytes,
-                VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, false,
-                "path continuation queue " + renderW + "x" + renderH + "x2");
-        displayImage = ctx.createStorageImage(width, height, VK10.VK_FORMAT_R8G8B8A8_UNORM, "RT display image " + width + "x" + height);
-        // PQ-encoded ([0,1], ST.2084) HDR display image, written in parallel by display.comp when HDR mode is active.
-        hdrDisplayImage = ctx.createStorageImage(width, height, VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "RT HDR display image " + width + "x" + height);
-        // Bloom pyramid. Level 0 is half display resolution (the prefilter's 13-tap already covers a 5x5
-        // display-pixel footprint, so nothing is lost by starting there); each further level halves again
-        // until the look package's level count or the smallest useful size is reached.
-        int bloomWidth = Math.max(1, (width + 1) / 2);
-        int bloomHeight = Math.max(1, (height + 1) / 2);
-        int bloomLevelCount = RtBloomPipeline.levelsFor(bloomWidth, bloomHeight, LOOK.bloom().levels());
-        bloomLevels = new RtImage[bloomLevelCount];
-        for (int level = 0; level < bloomLevelCount; level++) {
-            bloomLevels[level] = ctx.createStorageImage(bloomWidth, bloomHeight,
-                    VK10.VK_FORMAT_R16G16B16A16_SFLOAT,
-                    "RT bloom level " + level + " " + bloomWidth + "x" + bloomHeight);
-            bloomWidth = Math.max(1, bloomWidth / 2);
-            bloomHeight = Math.max(1, bloomHeight / 2);
-        }
-        // Guide buffers match the trace (render) resolution; DLSS-RR consumes them at render res.
-        gNormal = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "guide normal roughness " + renderW + "x" + renderH);
-        gAlbedo = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "guide diffuse albedo " + renderW + "x" + renderH);
-        gDepth = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R32_SFLOAT, "guide linear depth " + renderW + "x" + renderH);
-        gMotion = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R16G16_SFLOAT, "guide motion " + renderW + "x" + renderH);
-        gSpecAlbedo = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "guide specular albedo " + renderW + "x" + renderH);
-        gSpecMotion = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R16G16_SFLOAT, "guide specular motion " + renderW + "x" + renderH);
-        // Display-res RT image the display mapper reads. Always present (DLSS-RR target, or blit-upscale fallback).
-        rrOutput = ctx.createStorageImage(width, height, VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "DLSS-RR output " + width + "x" + height);
-        exposure.ensureResources(ctx);
-
-        mvHasPrev = false; // recreated images -> first MV frame is zero
-        waterWaveTimeValid = false;
-        if (worldPipeline != null) {
-            worldPipeline.setStorageImage(output.view);
-            bindGuideImages();
-        }
+        // With RR on, the query above is the source of truth for the render resolution. If it failed,
+        // trace at display resolution and use the ordinary non-RR blit path.
+        int nextRenderW = useRr ? optimal[0] : width;
+        int nextRenderH = useRr ? optimal[1] : height;
+        // Resolve every transient descriptor prerequisite before publishing or rebinding either bundle.
+        // The same immutable snapshot is then valid for both the forward bind and rollback.
         RtToneLut boundLookLut = lookLut;
+        EndSkyBinding endSky = requireEndSkyBinding();
+        long fallbackAtlasView = blockAlbedoAtlasView();
+        long celestialsView = celestialsAtlasView();
+        long atlasSamplerHandle = atlasSampler(ctx);
+        OutputResources old = captureOutputResources();
+        boolean hadOld = old.output != null;
+        boolean oldRrEnabled = renderSizeRrEnabled;
+        int oldRrQuality = renderSizeRrQuality;
+        OutputResources next = null;
+        boolean installed = false;
+        ctx.waitIdle(); // resize is rare; no in-flight frame may use the old images or descriptors
+        if (output != null) {
+            RtDlssRr.INSTANCE.requestHistoryReset();
+        }
+        try {
+            destroySharcResources();
+            exposure.ensureResources(ctx);
+            next = createOutputResources(ctx, width, height, nextRenderW, nextRenderH);
+            installOutputResources(next, useRr, activeRrQuality);
+            installed = true;
+            mvHasPrev = false; // recreated images -> first MV frame is zero
+            waterWaveTimeValid = false;
+            if (worldPipeline != null) {
+                worldPipeline.setStorageImage(output.view);
+                bindGuideImages();
+            }
+            bindPresentationDescriptors(boundLookLut, endSky, fallbackAtlasView,
+                    celestialsView, atlasSamplerHandle);
+        } catch (RuntimeException | Error failure) {
+            boolean restored = false;
+            if (installed && hadOld) {
+                installOutputResources(old, oldRrEnabled, oldRrQuality);
+                try {
+                    if (worldPipeline != null) {
+                        worldPipeline.setStorageImage(output.view);
+                        bindGuideImages();
+                    }
+                    bindPresentationDescriptors(boundLookLut, endSky, fallbackAtlasView,
+                            celestialsView, atlasSamplerHandle);
+                    restored = true;
+                } catch (RuntimeException | Error rollbackFailure) {
+                    failure.addSuppressed(rollbackFailure);
+                }
+            }
+            if (installed && !restored) {
+                clearOutputResources();
+                if (hadOld) {
+                    try {
+                        old.destroy();
+                    } catch (RuntimeException | Error cleanupFailure) {
+                        failure.addSuppressed(cleanupFailure);
+                    }
+                }
+            }
+            if (next != null) {
+                try {
+                    next.destroy();
+                } catch (RuntimeException | Error cleanupFailure) {
+                    failure.addSuppressed(cleanupFailure);
+                }
+            }
+            throw failure;
+        }
+        old.destroy();
+    }
+
+    private void bindPresentationDescriptors(RtToneLut boundLookLut, EndSkyBinding endSky,
+                                             long fallbackAtlasView, long celestialsView,
+                                             long atlasSamplerHandle) {
         displayPipeline.setImages(displayImage.view, rrOutput.view, exposure.image().view, hdrDisplayImage.view,
                 sdrToneLut.view(), sdrToneLut.sampler(), hdrToneLut.view(), hdrToneLut.sampler(),
-                boundLookLut.view(), boundLookLut.sampler(), bloomLevels[0].view, bloomPipeline.sampler());
+                boundLookLut.view(), boundLookLut.sampler(), bloomLevels[0].view, bloomPipeline.sampler(),
+                gSkyClassification.view,
+                endSky.view(), endSky.sampler(),
+                celestialsView != 0L ? celestialsView : fallbackAtlasView,
+                atlasSamplerHandle);
         bloomPipeline.setImages(rrOutput.view, exposure.image().view, bloomLevels);
         debugPresentPipeline.setImages(displayImage.view, gNormal.view, gAlbedo.view, gDepth.view,
                 gMotion.view, gSpecAlbedo.view, gSpecMotion.view, rrOutput.view, exposure.image().view,
                 exposure.stateBuffer());
     }
 
+    private OutputResources captureOutputResources() {
+        OutputResources resources = new OutputResources(displayW, displayH, renderW, renderH);
+        resources.output = output;
+        resources.continuationQueue = continuationQueue;
+        resources.displayImage = displayImage;
+        resources.hdrDisplayImage = hdrDisplayImage;
+        resources.bloomLevels = bloomLevels;
+        resources.gNormal = gNormal;
+        resources.gAlbedo = gAlbedo;
+        resources.gDepth = gDepth;
+        resources.gMotion = gMotion;
+        resources.gSpecAlbedo = gSpecAlbedo;
+        resources.gSpecMotion = gSpecMotion;
+        resources.gResponsivity = gResponsivity;
+        resources.gParticleMask = gParticleMask;
+        resources.gSkyClassification = gSkyClassification;
+        resources.rrOutput = rrOutput;
+        return resources;
+    }
+
+    private void installOutputResources(OutputResources resources, boolean rrEnabled, int rrQuality) {
+        output = resources.output;
+        continuationQueue = resources.continuationQueue;
+        displayImage = resources.displayImage;
+        hdrDisplayImage = resources.hdrDisplayImage;
+        bloomLevels = resources.bloomLevels;
+        gNormal = resources.gNormal;
+        gAlbedo = resources.gAlbedo;
+        gDepth = resources.gDepth;
+        gMotion = resources.gMotion;
+        gSpecAlbedo = resources.gSpecAlbedo;
+        gSpecMotion = resources.gSpecMotion;
+        gResponsivity = resources.gResponsivity;
+        gParticleMask = resources.gParticleMask;
+        gSkyClassification = resources.gSkyClassification;
+        rrOutput = resources.rrOutput;
+        displayW = resources.displayW;
+        displayH = resources.displayH;
+        renderW = resources.renderW;
+        renderH = resources.renderH;
+        renderSizeRrEnabled = rrEnabled;
+        renderSizeRrQuality = rrQuality;
+    }
+
+    private void clearOutputResources() {
+        output = null;
+        continuationQueue = null;
+        displayImage = null;
+        hdrDisplayImage = null;
+        bloomLevels = new RtImage[0];
+        gNormal = null;
+        gAlbedo = null;
+        gDepth = null;
+        gMotion = null;
+        gSpecAlbedo = null;
+        gSpecMotion = null;
+        gResponsivity = null;
+        gParticleMask = null;
+        gSkyClassification = null;
+        rrOutput = null;
+        displayW = -1;
+        displayH = -1;
+        renderW = -1;
+        renderH = -1;
+        renderSizeRrEnabled = false;
+        renderSizeRrQuality = Integer.MIN_VALUE;
+    }
+
+    private static OutputResources createOutputResources(RtContext ctx, int width, int height,
+                                                          int renderW, int renderH) {
+        OutputResources resources = new OutputResources(width, height, renderW, renderH);
+        try {
+            // RT traces and DLSS-RR reconstruct scene-linear ACEScg in an HDR R16G16B16A16_SFLOAT target,
+            // so radiance > 1 and wide-gamut colour survive to the display seam. displayImage stays
+            // R8G8B8A8 to match the main target it is copied into
+            // (vkCmdCopyImage requires texel-size-compatible formats).
+            resources.output = ctx.createStorageImage(renderW, renderH,
+                    VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "trace color " + renderW + "x" + renderH);
+            long pixelRecords = Math.multiplyExact((long) renderW, (long) renderH);
+            long continuationBytes = Math.multiplyExact(
+                    Math.multiplyExact(pixelRecords, (long) PATH_SEGMENTS_PER_PIXEL), PATH_RECORD_BYTES);
+            resources.continuationQueue = ctx.createBuffer(continuationBytes,
+                    VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, false,
+                    "path continuation queue " + renderW + "x" + renderH + "x" + PATH_SEGMENTS_PER_PIXEL);
+            resources.displayImage = ctx.createStorageImage(width, height, VK10.VK_FORMAT_R8G8B8A8_UNORM,
+                    "RT display image " + width + "x" + height);
+            // PQ-encoded ([0,1], ST.2084) HDR display image, written in parallel by display.comp when HDR is active.
+            resources.hdrDisplayImage = ctx.createStorageImage(width, height,
+                    VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "RT HDR display image " + width + "x" + height);
+            // Bloom pyramid. Level 0 is half display resolution; each further level halves again until the
+            // look package's level count or the smallest useful size is reached.
+            int bloomWidth = Math.max(1, (width + 1) / 2);
+            int bloomHeight = Math.max(1, (height + 1) / 2);
+            int bloomLevelCount = RtBloomPipeline.levelsFor(bloomWidth, bloomHeight, LOOK.bloom().levels());
+            resources.bloomLevels = new RtImage[bloomLevelCount];
+            for (int level = 0; level < bloomLevelCount; level++) {
+                resources.bloomLevels[level] = ctx.createStorageImage(bloomWidth, bloomHeight,
+                        VK10.VK_FORMAT_R16G16B16A16_SFLOAT,
+                        "RT bloom level " + level + " " + bloomWidth + "x" + bloomHeight);
+                bloomWidth = Math.max(1, bloomWidth / 2);
+                bloomHeight = Math.max(1, bloomHeight / 2);
+            }
+            // Guide buffers match the trace (render) resolution; DLSS-RR consumes them at render res.
+            resources.gNormal = ctx.createStorageImage(renderW, renderH,
+                    VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "guide normal roughness " + renderW + "x" + renderH);
+            resources.gAlbedo = ctx.createStorageImage(renderW, renderH,
+                    VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "guide diffuse albedo " + renderW + "x" + renderH);
+            resources.gDepth = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R32_SFLOAT,
+                    "guide linear depth " + renderW + "x" + renderH);
+            resources.gMotion = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R16G16_SFLOAT,
+                    "guide motion " + renderW + "x" + renderH);
+            resources.gSpecAlbedo = ctx.createStorageImage(renderW, renderH,
+                    VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "guide specular albedo " + renderW + "x" + renderH);
+            resources.gSpecMotion = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R16G16_SFLOAT,
+                    "guide specular motion " + renderW + "x" + renderH);
+            resources.gResponsivity = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R16_SFLOAT,
+                    "guide responsivity " + renderW + "x" + renderH);
+            resources.gParticleMask = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R8_UINT,
+                    "guide particle mask " + renderW + "x" + renderH);
+            resources.gSkyClassification = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R16_SFLOAT,
+                    "guide primary-sky classification " + renderW + "x" + renderH);
+            // Display-res RT image the display mapper reads. Always present (DLSS-RR target, or blit fallback).
+            resources.rrOutput = ctx.createStorageImage(width, height,
+                    VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "DLSS-RR output " + width + "x" + height);
+            return resources;
+        } catch (RuntimeException | Error failure) {
+            resources.destroy();
+            throw failure;
+        }
+    }
+
     private void destroyBloomLevels() {
-        for (RtImage level : bloomLevels) {
+        Throwable failure = null;
+        RtImage[] levels = bloomLevels;
+        bloomLevels = new RtImage[0];
+        for (RtImage level : levels) {
             if (level != null) {
-                level.destroy();
+                failure = destroyStep(failure, "bloom level", level::destroy);
             }
         }
-        bloomLevels = new RtImage[0];
+        if (failure != null) {
+            throw new IllegalStateException("RT bloom teardown failed", failure);
+        }
     }
 
     /**
@@ -1022,30 +1840,47 @@ public final class RtComposite {
         mvHasPrev = true;
     }
 
-    private void recordFrame(RtContext ctx, RtPipeline active, GpuTexture nativeColor) {
+    private void recordFrame(RtContext ctx, RtPipeline active, GpuTexture nativeColor, int frameSpp) {
         long dstImage = vkImage(nativeColor);
         var encoder = (VulkanCommandEncoder) ((CommandEncoderAccessor) RenderSystem.getDevice().createCommandEncoder()).caustica$getBackend();
         RtGpuExecutor gpuExecutor = ctx.gpuExecutor();
         // Reserve the graphics-use value that guards this frame's reusable TLAS and entity resources.
         RtGpuExecutor.GraphicsUse graphicsUse = gpuExecutor.beginGraphicsUse(encoder);
-        RtGpuExecutor.GraphicsUseWaiter graphicsUseWaiter = gpuExecutor.graphicsUseWaiter();
-        // Reuse a completed readback slot, then latch one pre-exposure value for both raygen and resolve.
-        // This belongs after the timeline snapshot and before any world push data is written.
-        exposure.beginFrame(graphicsUseWaiter);
         pendingGraphicsUse = graphicsUse;
-        RtEntities.FrameEntities frameEntities = null;
-        VkCommandBuffer cmd = encoder.allocateAndBeginTransientCommandBuffer();
-        RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_COMMAND_BUFFER, cmd.address(), "composite command buffer");
-        int debugView = debugView();
-        RtTerrain terrain = RtTerrain.currentOrNull();
-        try (MemoryStack stack = MemoryStack.stackPush(); RtDebugLabels.Scope frameLabel = RtDebugLabels.scope(ctx, cmd, "composite frame")) {
-            // RR drives the upscale: trace + jitter at render res, DLSS-RR denoises+upscales to display.
-            // A debug view observes this ordinary path; it never changes jitter or disables RR.
-            boolean rrPath = RtDlssRr.enabled();
+        try {
+            RtGpuExecutor.GraphicsUseWaiter graphicsUseWaiter = gpuExecutor.graphicsUseWaiter();
+            // Reuse a completed readback slot, then latch one pre-exposure value for both raygen and resolve.
+            // This belongs after the timeline snapshot and before any world push data is written.
+            exposure.beginFrame(graphicsUseWaiter);
+            if (renderW > PATH_PIXEL_AXIS_LIMIT || renderH > PATH_PIXEL_AXIS_LIMIT) {
+                throw new IllegalStateException("Path sampler requires render dimensions at or below 65536: "
+                        + renderW + "x" + renderH);
+            }
+            int pathSampleBase = reservePathSamples(frameSpp);
+            RtPathSamplerData samplerData = Objects.requireNonNull(pathSamplerData,
+                    "Path sampler data must exist before recording an RT frame");
+            long pathSampleAddress = samplerData.deviceAddress();
+            if (pathSampleAddress == 0L) {
+                throw new IllegalStateException("Path sampler data lost its device address");
+            }
+            RtEntities.FrameEntities frameEntities = null;
+            boolean rrProduced = false;
+            VkCommandBuffer cmd = encoder.allocateAndBeginTransientCommandBuffer();
+            RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_COMMAND_BUFFER, cmd.address(), "composite command buffer");
+            int debugView = debugView();
+            RtTerrain terrain = RtTerrain.currentOrNull();
+            boolean sharcOn = sharcActive() && terrain != null;
+            try (MemoryStack stack = MemoryStack.stackPush(); RtDebugLabels.Scope frameLabel = RtDebugLabels.scope(ctx, cmd, "composite frame")) {
+            // RR drives the ordinary upscale. Raw debug is the explicit exception: it traces at full
+            // display resolution, uses no jitter, and never enters DLSS-RR or the debug-present compositor.
+            boolean rawDebug = rawDebugView();
+            boolean rrPath = RtDlssRr.enabled() && !RtDlssRr.INSTANCE.hasFailed() && !rawDebug;
+            float mipMapBias = rrPath ? RtDlssRr.recommendedMipMapBias(renderW, displayW) : 0.0f;
             float jitterX = 0f;
             float jitterY = 0f;
             if (rrPath) {
-                CausticaJitter.INSTANCE.prepare(renderW, renderH, displayW);
+                CausticaJitter.INSTANCE.prepare(renderW, renderH, displayW, displayH);
+                jitterPhaseCount = CausticaJitter.INSTANCE.currentPhaseCount();
                 jitterX = CausticaJitter.INSTANCE.jitterPixelsX() * jitterSignX();
                 jitterY = CausticaJitter.INSTANCE.jitterPixelsY() * jitterSignY();
             }
@@ -1119,8 +1954,29 @@ public final class RtComposite {
             // SAME bindless entity-texture array (destroy_stage_N.png is a standalone Sampler0 texture,
             // not a block-atlas sprite — see ModelBakery.BREAKING_LOCATIONS/DESTROY_TYPES), so any newly
             // resolved slot rides along with the uploadPending() call right below.
-            BreakEntry[] breaking = breakingEntries(terrain);
-            SkyPush sky = skyPush();
+            BreakEntry[] breaking;
+            SkyPush sky;
+            if (CaptureSession.active() && captureWorldPushFrozen) {
+                flags = captureFlags;
+                waterParams = captureWaterParams;
+                waterAnchor = captureWaterAnchor;
+                breaking = captureBreaking;
+                sky = captureSky;
+            } else {
+                breaking = breakingEntries(terrain);
+                sky = skyPush();
+                if (CaptureSession.active()) {
+                    captureFlags = flags;
+                    captureWaterParams = waterParams;
+                    captureWaterAnchor = waterAnchor;
+                    captureBreaking = breaking;
+                    captureSky = sky;
+                    captureWorldPushFrozen = true;
+                }
+            }
+            if (sharcOn) {
+                updateSharcResetPolicy(terrain, sky);
+            }
             new WorldPushData(
                     frameInvViewProj,
                     new Float3((float) (camX - terrain.blockX), (float) (camY - terrain.blockY),
@@ -1128,7 +1984,7 @@ public final class RtComposite {
                     (int) frameCounter,
                     mvPushMatrix,
                     new Float3(mvCamDeltaX, mvCamDeltaY, mvCamDeltaZ),
-                    spp(),
+                    frameSpp,
                     new Float2(jitterX, jitterY),
                     flags,
                     maxBounces(),
@@ -1154,13 +2010,28 @@ public final class RtComposite {
                     new Int4(terrain.lightGridDimX(), terrain.lightGridDimY(), terrain.lightGridDimZ(), 0),
                     terrain.lightCount(),
                     CausticaConfig.Rt.Lights.RIS_CANDIDATES.value(),
+                    mipMapBias,
                     // Must be the SAME value the exposure resolve divides out this frame (it reads it
                     // from the same RtExposure accessor), or the two stop cancelling.
-                    exposure.preExposure()
+                    exposure.preExposure(),
+                    pathSampleBase,
+                    pathSampleEpoch,
+                    pathSampleAddress,
+                    sky.skybox(),
+                    sky.skyFlags(),
+                    sky.skyColor(),
+                    sky.skyParams(),
+                    sky.endFlashUv()
             ).write(push);
             pushBuf.flush(0L, WORLD_PUSH_SIZE);
             // Upload any entity textures registered this frame into the bindless set before the trace.
-            RtEntityTextures.INSTANCE.uploadPending(active, atlasSampler(ctx));
+            long textureSampler = atlasSampler(ctx);
+            if (sharcQueryPipeline != null && sharcUpdatePipeline != null) {
+                RtEntityTextures.INSTANCE.uploadPending(textureSampler, active,
+                        sharcQueryPipeline, sharcUpdatePipeline);
+            } else {
+                RtEntityTextures.INSTANCE.uploadPending(active, textureSampler);
+            }
             // Build the entity BLAS, the TLAS that references it and the terrain BLAS, then the trace.
             // Barriers separate each stage; the graphics-use timeline guards resource reuse.
             if (!fe.blas().isEmpty()) {
@@ -1169,17 +2040,31 @@ public final class RtComposite {
                 }
                 VulkanCommandEncoder.memoryBarrier(cmd, stack); // entity BLAS writes visible to the TLAS build
             }
-            RtAccel.PreparedTlas frameTlas;
-            try (RtFrameStats.Scope ignored = RtFrameStats.FRAME.stage("frame.prepareTlas")) {
-                frameTlas = RtAccel.prepareTlas(ctx, fe.baseInstances(), fe.dynamicInstances(), tlasRing,
-                        graphicsUse);
+            RtAccel.PreparedTlas frameTlas = captureTlas;
+            boolean buildTlas = frameTlas == null;
+            if (buildTlas) {
+                try (RtFrameStats.Scope ignored = RtFrameStats.FRAME.stage("frame.prepareTlas")) {
+                    frameTlas = RtAccel.prepareTlas(ctx, fe.baseInstances(), fe.dynamicInstances(), tlasRing,
+                            graphicsUse);
+                }
+                if (CaptureSession.active()) {
+                    captureTlas = frameTlas;
+                }
+            } else {
+                RtAccel.markTlasUsed(frameTlas, graphicsUse);
             }
             active.setTlas(frameTlas.accel.handle, graphicsUse, graphicsUseWaiter);
-            currentTlasHandle = frameTlas.accel.handle;
-            try (RtFrameStats.Scope ignored = RtFrameStats.FRAME.stage("frame.recordTlas")) {
-                RtAccel.recordTlasBuild(ctx, cmd, frameTlas);
+            if (sharcOn) {
+                sharcUpdatePipeline.setTlas(frameTlas.accel.handle, graphicsUse, graphicsUseWaiter);
+                sharcQueryPipeline.setTlas(frameTlas.accel.handle, graphicsUse, graphicsUseWaiter);
             }
-            VulkanCommandEncoder.memoryBarrier(cmd, stack); // TLAS build visible to the trace
+            currentTlasHandle = frameTlas.accel.handle;
+            if (buildTlas) {
+                try (RtFrameStats.Scope ignored = RtFrameStats.FRAME.stage("frame.recordTlas")) {
+                    RtAccel.recordTlasBuild(ctx, cmd, frameTlas);
+                }
+                VulkanCommandEncoder.memoryBarrier(cmd, stack); // TLAS build visible to the trace
+            }
 
             // Push the BDA ring slot's address plus the small hot subset used directly by the shaders.
             // Every 64-bit device address the trace needs lives here, not behind worldPushAddr: the
@@ -1193,6 +2078,25 @@ public final class RtComposite {
                     terrain.lightLocalAliasBufferAddress(), terrain.lightGridCellBufferAddress(),
                     terrain.lightGridSpanBufferAddress(), continuationQueue.deviceAddress,
                     (int) frameCounter).write(pushConstants);
+            long sharcFrameAddress = 0L;
+            ByteBuffer sharcPushConstants = null;
+            int sharcTileSize = 0;
+            if (sharcOn) {
+                sharcTileSize = RtSharcCache.updateTileSize();
+                sharcFrameAddress = sharcCache.beginFrame(frameCounter,
+                        (float) (camX - terrain.blockX), (float) (camY - terrain.blockY),
+                        (float) (camZ - terrain.blockZ), graphicsUseWaiter);
+                sharcPushConstants = stack.malloc(SharcPushConstantsData.BYTE_SIZE);
+                new SharcPushConstantsData(pushBuf.deviceAddress, terrain.tableAddress(), fe.geomTableAddr(),
+                        RtMaterialRegistry.INSTANCE.tableAddress(), terrain.lightBufferAddress(),
+                        terrain.lightAliasBufferAddress(), terrain.lightLocalAliasBufferAddress(),
+                        terrain.lightGridCellBufferAddress(), terrain.lightGridSpanBufferAddress(),
+                        continuationQueue.deviceAddress, (int) frameCounter, sharcFrameAddress,
+                        sharcTileSize, renderW, renderH,
+                        CausticaConfig.Rt.Sharc.ROUGHNESS_THRESHOLD.value(),
+                        CausticaConfig.Rt.Sharc.PRIMARY_SURFACE_DEBUG.value() ? 1 : 0)
+                        .write(sharcPushConstants);
+            }
             // Sky LUTs, from the same WorldPush slot the trace is about to read: the sky the LUT holds and
             // the sky the frame shades are built from one set of angles, not two. Recorded here (after the
             // push flush, before the trace) so the miss shader's very first fetch sees this frame's dome.
@@ -1206,9 +2110,35 @@ public final class RtComposite {
                 active.trace(cmd, renderW, renderH, pushConstants, 0);
             }
             VulkanCommandEncoder.memoryBarrier(cmd, stack); // continuation/guide writes visible to pass B
-            try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "world indirect trace");
-                 RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.traceIndirect")) {
-                active.trace(cmd, renderW, renderH, pushConstants, 1);
+            if (sharcOn) {
+                sharcCache.recordPendingClear(cmd, stack);
+                try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "SHaRC sparse update");
+                     RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.sharcUpdate")) {
+                    sharcUpdatePipeline.trace(cmd, (renderW + sharcTileSize - 1) / sharcTileSize,
+                            (renderH + sharcTileSize - 1) / sharcTileSize, sharcPushConstants, 0);
+                }
+                if (sharcCache.queryReady()) {
+                    sharcCache.updateToResolveBarrier(cmd, stack);
+                    try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "SHaRC resolve");
+                         RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.sharcResolve")) {
+                        sharcResolvePipeline.dispatch(cmd, sharcFrameAddress, sharcCache.capacity());
+                    }
+                    sharcCache.resolveToQueryBarrier(cmd, stack);
+                    try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "SHaRC query");
+                         RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.sharcQuery")) {
+                        sharcQueryPipeline.trace(cmd, renderW, renderH, sharcPushConstants, 0);
+                    }
+                } else {
+                    try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "world indirect trace (SHaRC warmup)");
+                         RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.traceIndirect")) {
+                        active.trace(cmd, renderW, renderH, pushConstants, 1);
+                    }
+                }
+            } else {
+                try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "world indirect trace");
+                     RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.traceIndirect")) {
+                    active.trace(cmd, renderW, renderH, pushConstants, 1);
+                }
             }
             VulkanCommandEncoder.memoryBarrier(cmd, stack); // RT writes visible to DLSS reads
             // DLSS-RR denoise + upscale. The RT pass wrote noisy color (render res) + guides;
@@ -1217,7 +2147,8 @@ public final class RtComposite {
                 try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "DLSS-RR evaluate");
                      RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.dlssRr")) {
                     rrDone = RtDlssRr.INSTANCE.evaluate(cmd.address(), output, gDepth, gMotion, gAlbedo,
-                            gSpecAlbedo, gNormal, gSpecMotion, rrOutput, renderW, renderH, displayW, displayH,
+                            gSpecAlbedo, gNormal, gSpecMotion, gParticleMask, gResponsivity, rrOutput,
+                            renderW, renderH, displayW, displayH,
                             -jitterX, -jitterY, frameViewRotation, frameProjection);
                 }
             }
@@ -1242,10 +2173,12 @@ public final class RtComposite {
             // the histogram's log-luminance average biased by Monte-Carlo noise (Jensen's inequality
             // on the concave log()), so the computed exposure drifted with SPP; rrOutput is stable
             // regardless of SPP, keeping exposure consistent.
-            try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "exposure");
-                 RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.exposure")) {
-                exposure.record(ctx, cmd, stack, rrOutput, gDepth, gAlbedo);
-                exposure.recordStateReadback(cmd, stack);
+            if (!exposure.captureFrozen()) {
+                try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "exposure");
+                     RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.exposure")) {
+                    exposure.record(ctx, cmd, stack, rrOutput, gDepth, gAlbedo);
+                    exposure.recordStateReadback(cmd, stack);
+                }
             }
             VulkanCommandEncoder.memoryBarrier(cmd, stack); // exposure image visible to the display mapper
 
@@ -1260,14 +2193,19 @@ public final class RtComposite {
 
             try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "map RT to display");
                  RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.displayMap")) {
-                displayPipeline.dispatch(cmd, displayW, displayH, CausticaConfig.Rt.Hdr.enabled(),
-                        sdrToneLut.size, CausticaConfig.Rt.Tonemap.GAMMA.value(), loadedHdrLutNits,
-                        true, lookLut.size, LOOK.bloom().strength() / bloomLevels.length);
+                int displayPeakNits = CausticaConfig.Rt.Hdr.effectivePeakNits();
+                displayPipeline.dispatch(cmd, displayW, displayH, RtToneMapping.current(),
+                        sdrToneLut.size, CausticaConfig.Rt.Tonemap.GAMMA.value(), displayPeakNits,
+                        true, lookLut.size, LOOK.bloom().strength() / bloomLevels.length,
+                        frameInvViewProj, sky.skybox(), sky.skyFlags(),
+                        sky.skyColor().x(), sky.skyColor().y(), sky.skyColor().z(), sky.skyColor().w(),
+                        sky.skyParams().y(), sky.skyParams().z(), sky.skyParams().w(),
+                        sky.endFlashUv().x(), sky.endFlashUv().y(), sky.endFlashUv().z(), sky.endFlashUv().w());
             }
             hdrWrittenThisFrame = CausticaConfig.Rt.Hdr.enabled();
             VulkanCommandEncoder.memoryBarrier(cmd, stack); // display output visible to debug composite
 
-            if (debugView != 0) {
+            if (debugView != 0 && !rawDebug) {
                 // Debug content is composited only after the real scene has completed trace, RR/fallback,
                 // exposure, and display mapping. It therefore observes the renderer without perturbing
                 // exposure history or feeding literal diagnostic colors through ACES. Debug presentation
@@ -1288,15 +2226,32 @@ public final class RtComposite {
                         dstImage, VK10.VK_IMAGE_LAYOUT_GENERAL, copyRegion(stack, displayW, displayH));
             }
             VulkanCommandEncoder.memoryBarrier(cmd, stack);
+            rrProduced = rrDone;
         }
-        if (VK10.vkEndCommandBuffer(cmd) != VK10.VK_SUCCESS) {
-            throw new IllegalStateException("vkEndCommandBuffer(rt composite) failed");
+            if (VK10.vkEndCommandBuffer(cmd) != VK10.VK_SUCCESS) {
+                throw new IllegalStateException("vkEndCommandBuffer(rt composite) failed");
+            }
+            encoder.execute(cmd); // deferred into the frame's submission — correct for per-frame work
+            graphicsUse.markAccepted();
+            freshRtFrame = true;
+            freshDlssRrFrame = rrProduced;
+            // Do not attach a merely reserved token: failed recording may never signal it. Once execute succeeds,
+            // every owner in this frame's manifest is protected through the final overlay consumer.
+            RtEntities.INSTANCE.markGraphicsUse(frameEntities, graphicsUse);
+            exposure.markStateReadbackUse(graphicsUse);
+            if (sharcOn) {
+                sharcCache.commitFrameUse(graphicsUse);
+            }
+        } catch (RuntimeException | Error failure) {
+            if (!graphicsUse.isAccepted()) {
+                try {
+                    gpuExecutor.abortGraphicsUse(graphicsUse);
+                } catch (RuntimeException | Error abortFailure) {
+                    failure.addSuppressed(abortFailure);
+                }
+            }
+            throw failure;
         }
-        encoder.execute(cmd); // deferred into the frame's submission — correct for per-frame work
-        // Do not attach a merely reserved token: failed recording may never signal it. Once execute succeeds,
-        // every owner in this frame's manifest is protected through the final overlay consumer.
-        RtEntities.INSTANCE.markGraphicsUse(frameEntities, graphicsUse);
-        exposure.markStateReadbackUse(graphicsUse);
     }
 
     /**
@@ -1334,10 +2289,54 @@ public final class RtComposite {
         return count == result.length ? result : java.util.Arrays.copyOf(result, count);
     }
 
-    private record SkyPush(Float4 celestial, Float4 look0, Float4 look1, Float4 look2, Float4 look3,
-                           Float4 sunUv, Float4 moonUv) {}
+    static final float SHARC_SKY_ANGLE_JUMP_RADIANS = 0.1f;
+    static final float SHARC_SKY_VALUE_JUMP = 0.25f;
 
-    private record CelestialUv(Float4 sun, Float4 moon) {}
+    record SharcSkyState(int skybox, int skyFlags, float sunAngle, float moonAngle, float starAngle,
+                         float starBrightness, int moonPhase, float skyR, float skyG, float skyB) {
+        private static SharcSkyState from(SkyPush sky) {
+            return new SharcSkyState(sky.skybox(), sky.skyFlags(), sky.celestial().x(), sky.celestial().y(),
+                    sky.celestial().z(), sky.celestial().w(), Math.round(sky.look3().w()),
+                    sky.skyColor().x(), sky.skyColor().y(), sky.skyColor().z());
+        }
+    }
+
+    static boolean hardSkyDiscontinuity(SharcSkyState previous, SharcSkyState current) {
+        if (previous == null) {
+            return false;
+        }
+        if (previous.skybox() != current.skybox() || previous.skyFlags() != current.skyFlags()
+                || previous.moonPhase() != current.moonPhase()) {
+            return true;
+        }
+        return angularDistance(previous.sunAngle(), current.sunAngle()) > SHARC_SKY_ANGLE_JUMP_RADIANS
+                || angularDistance(previous.moonAngle(), current.moonAngle()) > SHARC_SKY_ANGLE_JUMP_RADIANS
+                || angularDistance(previous.starAngle(), current.starAngle()) > SHARC_SKY_ANGLE_JUMP_RADIANS
+                || finiteDistance(previous.starBrightness(), current.starBrightness()) > SHARC_SKY_VALUE_JUMP
+                || finiteDistance(previous.skyR(), current.skyR()) > SHARC_SKY_VALUE_JUMP
+                || finiteDistance(previous.skyG(), current.skyG()) > SHARC_SKY_VALUE_JUMP
+                || finiteDistance(previous.skyB(), current.skyB()) > SHARC_SKY_VALUE_JUMP;
+    }
+
+    private static float angularDistance(float first, float second) {
+        if (!Float.isFinite(first) || !Float.isFinite(second)) {
+            return Float.POSITIVE_INFINITY;
+        }
+        float fullTurn = (float) (Math.PI * 2.0);
+        float difference = Math.abs(first - second) % fullTurn;
+        return Math.min(difference, fullTurn - difference);
+    }
+
+    private static float finiteDistance(float first, float second) {
+        return Float.isFinite(first) && Float.isFinite(second)
+                ? Math.abs(first - second) : Float.POSITIVE_INFINITY;
+    }
+
+    private record SkyPush(int skybox, int skyFlags, Float4 skyColor, Float4 skyParams,
+                           Float4 endFlashUv, Float4 celestial, Float4 look0, Float4 look1, Float4 look2,
+                           Float4 look3, Float4 sunUv, Float4 moonUv) {}
+
+    private record CelestialUv(Float4 sun, Float4 moon, Float4 endFlash) {}
 
     /**
      * This frame's sky state: Minecraft's four eased celestial angles, its star brightness, the moon
@@ -1364,6 +2363,35 @@ public final class RtComposite {
     private SkyPush skyPush() {
         Minecraft mc = Minecraft.getInstance();
         float partial = mc.getDeltaTracker().getGameTimeDeltaPartialTick(false);
+        int mode = frameSkyboxMode;
+        EndFlashState endFlash = mode == RtSkyMath.SKYBOX_END && mc.level != null
+                ? mc.level.endFlashState() : null;
+        float endFlashIntensity = endFlash == null ? 0.0f : finiteColor(endFlash.getIntensity(partial));
+        boolean endFlashActive = mode == RtSkyMath.SKYBOX_END && endFlashIntensity > 1.0e-4f;
+        if (!endFlashStateValid || previousEndFlashActive != endFlashActive) {
+            if (endFlashStateValid) {
+                RtDlssRr.INSTANCE.requestHistoryReset();
+            }
+            previousEndFlashActive = endFlashActive;
+            endFlashStateValid = true;
+        }
+        float endFlashX = endFlash == null || !Float.isFinite(endFlash.getXAngle())
+                ? 0.0f : endFlash.getXAngle() * (float) (Math.PI / 180.0);
+        float endFlashY = endFlash == null || !Float.isFinite(endFlash.getYAngle())
+                ? 0.0f : endFlash.getYAngle() * (float) (Math.PI / 180.0);
+        Float4 skyColor = new Float4(frameSkyColorR, frameSkyColorG, frameSkyColorB, frameSkyColorA);
+        Float4 skyParams = new Float4(0.0f, endFlashIntensity, endFlashX, endFlashY);
+        RtLookPackage.Sky sky = LOOK.sky();
+        RtLookPackage.Lighting lighting = LOOK.lighting();
+        if (mode != RtSkyMath.SKYBOX_OVERWORLD) {
+            CelestialUv uv = celestialUv(0.0f);
+            return new SkyPush(
+                    mode, endFlashActive ? RtSkyMath.SKY_FLAG_END_FLASH : 0, skyColor, skyParams,
+                    uv.endFlash(),
+                    new Float4(0f, 0f, 0f, 0f), new Float4(0f, 0f, 0f, 0f),
+                    new Float4(0f, 0f, 0f, 0f), new Float4(0f, 0f, 0f, 0f),
+                    new Float4(0f, 0f, 0f, 0f), uv.sun(), uv.moon());
+        }
         var probe = mc.gameRenderer.mainCamera().attributeProbe();
         int seaLevel = mc.level != null ? mc.level.getSeaLevel() : 0;
         float viewerAltitudeKm = Math.clamp((float) ((camY - seaLevel) / 100.0), 0.0f, 99.0f);
@@ -1377,10 +2405,9 @@ public final class RtComposite {
         float starBrightness = probe.getValue(EnvironmentAttributes.STAR_BRIGHTNESS, partial);
         float moonPhase = probe.getValue(EnvironmentAttributes.MOON_PHASE, partial).index(); // 0 full .. 4 new
 
-        RtLookPackage.Sky sky = LOOK.sky();
-        RtLookPackage.Lighting lighting = LOOK.lighting();
         CelestialUv uv = celestialUv(moonPhase);
         return new SkyPush(
+                mode, 0, skyColor, skyParams, uv.endFlash(),
                 new Float4(sunAngle, moonAngle, starAngle, starBrightness),
                 new Float4(lighting.sunIlluminanceLux(), lighting.moonIlluminanceLux(),
                         lighting.nightAirglowLuminanceCdM2(), lighting.starLuminanceCdM2()),
@@ -1411,7 +2438,8 @@ public final class RtComposite {
         }
         return new CelestialUv(
                 new Float4(sunU0, sunV0, sunU1, sunV1),
-                new Float4(moonU0, moonV0, moonU1, moonV1));
+                new Float4(moonU0, moonV0, moonU1, moonV1),
+                new Float4(endFlashU0, endFlashV0, endFlashU1, endFlashV1));
     }
 
     private void setCelestialUvAtlas(long atlasHandle) {
@@ -1422,11 +2450,13 @@ public final class RtComposite {
         celestialUvMoonPhase = -1;
         sunU0 = 0f; sunV0 = 0f; sunU1 = 1f; sunV1 = 1f;
         moonU0 = 0f; moonV0 = 0f; moonU1 = 1f; moonV1 = 1f;
+        endFlashU0 = 0f; endFlashV0 = 0f; endFlashU1 = 1f; endFlashV1 = 1f;
     }
 
     private void refreshCelestialUvCache(int moonPhase) {
         sunU0 = 0f; sunV0 = 0f; sunU1 = 1f; sunV1 = 1f;
         moonU0 = 0f; moonV0 = 0f; moonU1 = 1f; moonV1 = 1f;
+        endFlashU0 = 0f; endFlashV0 = 0f; endFlashU1 = 1f; endFlashV1 = 1f;
         try {
             if (celestialUvAtlasHandle != 0L) {
                 TextureAtlas atlas = Minecraft.getInstance().getAtlasManager().getAtlasOrThrow(AtlasIds.CELESTIALS);
@@ -1434,6 +2464,9 @@ public final class RtComposite {
                 sunU0 = sun.getU0(); sunV0 = sun.getV0(); sunU1 = sun.getU1(); sunV1 = sun.getV1();
                 TextureAtlasSprite moon = atlas.getSprite(MOON_IDS[moonPhase]);
                 moonU0 = moon.getU0(); moonV0 = moon.getV0(); moonU1 = moon.getU1(); moonV1 = moon.getV1();
+                TextureAtlasSprite endFlash = atlas.getSprite(END_FLASH_ID);
+                endFlashU0 = endFlash.getU0(); endFlashV0 = endFlash.getV0();
+                endFlashU1 = endFlash.getU1(); endFlashV1 = endFlash.getV1();
             }
         } catch (Exception ignored) {
             // celestials atlas not yet loaded — keep full-range UVs (fallback texture is the block atlas)
@@ -1463,117 +2496,138 @@ public final class RtComposite {
     public void destroy() {
         // Teardown runs after the device is idle (CLIENT_STOPPING waits), so the TLAS ring's slots are no
         // longer in flight and can be freed immediately.
-        tlasRing.destroy();
-        if (RtDlssRr.enabled()) {
-            RtDlssRr.INSTANCE.destroy();
-        }
-        if (displayImage != null) {
-            displayImage.destroy();
-            displayImage = null;
-        }
-        if (hdrDisplayImage != null) {
-            hdrDisplayImage.destroy();
-            hdrDisplayImage = null;
-        }
-        destroyBloomLevels();
-        if (fgHudlessImage != null) {
-            fgHudlessImage.destroy();
-            fgHudlessImage = null;
-        }
-        if (fgHdrHudlessImage != null) {
-            fgHdrHudlessImage.destroy();
-            fgHdrHudlessImage = null;
-        }
-        RtWorldOverlay.INSTANCE.destroy(); // overlay features/pipelines/scratch live on the same device lifetime
-        if (output != null) {
-            output.destroy();
-            output = null;
-        }
-        if (continuationQueue != null) {
-            continuationQueue.destroy();
-            continuationQueue = null;
-        }
-        destroyGuideImages();
-        exposure.destroy();
-        if (displayPipeline != null) {
-            displayPipeline.destroy();
-            displayPipeline = null;
-        }
-        if (bloomPipeline != null) {
-            bloomPipeline.destroy();
-            bloomPipeline = null;
-        }
-        if (skyLut != null) {
-            skyLut.destroy();
-            skyLut = null;
-        }
-        if (debugPresentPipeline != null) {
-            debugPresentPipeline.destroy();
-            debugPresentPipeline = null;
-        }
-        if (sdrToneLut != null) {
-            sdrToneLut.destroy();
-            sdrToneLut = null;
-        }
-        if (hdrToneLut != null) {
-            hdrToneLut.destroy();
-            hdrToneLut = null;
-        }
-        if (lookLut != null) {
-            lookLut.destroy();
-            lookLut = null;
-        }
+        Throwable failure = null;
+        failure = destroyStep(failure, "TLAS ring", tlasRing::destroy);
+        failure = destroyStep(failure, "DLSS-RR", RtDlssRr.INSTANCE::destroy);
+
+        RtImage image = displayImage;
+        displayImage = null;
+        if (image != null) failure = destroyStep(failure, "display image", image::destroy);
+        image = hdrDisplayImage;
+        hdrDisplayImage = null;
+        if (image != null) failure = destroyStep(failure, "HDR display image", image::destroy);
+        failure = destroyStep(failure, "bloom images", this::destroyBloomLevels);
+        image = fgHudlessImage;
+        fgHudlessImage = null;
+        if (image != null) failure = destroyStep(failure, "FG HUD-less image", image::destroy);
+        image = fgHdrHudlessImage;
+        fgHdrHudlessImage = null;
+        if (image != null) failure = destroyStep(failure, "FG HDR HUD-less image", image::destroy);
+        failure = destroyStep(failure, "world overlay", RtWorldOverlay.INSTANCE::destroy);
+
+        image = output;
+        output = null;
+        if (image != null) failure = destroyStep(failure, "trace output", image::destroy);
+        RtBuffer buffer = continuationQueue;
+        continuationQueue = null;
+        if (buffer != null) failure = destroyStep(failure, "continuation queue", buffer::destroy);
+        RtPathSamplerData samplerData = pathSamplerData;
+        pathSamplerData = null;
+        if (samplerData != null) failure = destroyStep(failure, "path sampler data", samplerData::destroy);
+        pathSampleCursor = 0L;
+        pathSampleEpoch = 0;
+        pathSamplerResetPending = true;
+        pathSamplingPolicySignature = Long.MIN_VALUE;
+        failure = destroyStep(failure, "guide images", this::destroyGuideImages);
+        failure = destroyStep(failure, "exposure", exposure::destroy);
+
+        RtDisplayPipeline display = displayPipeline;
+        displayPipeline = null;
+        if (display != null) failure = destroyStep(failure, "display pipeline", display::destroy);
+        RtBloomPipeline bloom = bloomPipeline;
+        bloomPipeline = null;
+        if (bloom != null) failure = destroyStep(failure, "bloom pipeline", bloom::destroy);
+        RtSkyLut atmosphere = skyLut;
+        skyLut = null;
+        if (atmosphere != null) failure = destroyStep(failure, "sky LUT", atmosphere::destroy);
+        RtDebugPresentPipeline debug = debugPresentPipeline;
+        debugPresentPipeline = null;
+        if (debug != null) failure = destroyStep(failure, "debug-present pipeline", debug::destroy);
+        RtToneLut tone = sdrToneLut;
+        sdrToneLut = null;
+        if (tone != null) failure = destroyStep(failure, "SDR tone LUT", tone::destroy);
+        tone = hdrToneLut;
+        hdrToneLut = null;
+        if (tone != null) failure = destroyStep(failure, "HDR tone LUT", tone::destroy);
+        tone = lookLut;
+        lookLut = null;
+        if (tone != null) failure = destroyStep(failure, "look LUT", tone::destroy);
         loadedHdrLutNits = -1;
-        if (hdrCompositePipeline != null) {
-            hdrCompositePipeline.destroy();
-            hdrCompositePipeline = null;
-        }
-        if (hdrUiSampler != 0L) {
+        RtHdrCompositePipeline hdrComposite = hdrCompositePipeline;
+        hdrCompositePipeline = null;
+        if (hdrComposite != null) failure = destroyStep(failure, "HDR UI composite pipeline", hdrComposite::destroy);
+        long hdrSampler = hdrUiSampler;
+        hdrUiSampler = 0L;
+        if (hdrSampler != 0L) {
             RtContext hdrCtx = RtContext.currentOrNull();
             if (hdrCtx != null) {
-                VK10.vkDestroySampler(hdrCtx.vk(), hdrUiSampler, null);
-            }
-            hdrUiSampler = 0L;
-        }
-        if (sdrPresentPipeline != null) {
-            sdrPresentPipeline.destroy();
-            sdrPresentPipeline = null;
-        }
-        if (sdrPresentImage != null) {
-            sdrPresentImage.destroy();
-            sdrPresentImage = null;
-        }
-        for (RtImage img : fgInterp) {
-            if (img != null) {
-                img.destroy();
+                RtContext samplerContext = hdrCtx;
+                failure = destroyStep(failure, "HDR UI sampler",
+                        () -> VK10.vkDestroySampler(samplerContext.vk(), hdrSampler, null));
+            } else {
+                failure = destroyStep(failure, "HDR UI sampler context", () -> {
+                    throw new IllegalStateException("HDR UI sampler outlived its Vulkan context");
+                });
             }
         }
+        RtSdrPresentPipeline sdrPresent = sdrPresentPipeline;
+        sdrPresentPipeline = null;
+        if (sdrPresent != null) failure = destroyStep(failure, "SDR present pipeline", sdrPresent::destroy);
+        image = sdrPresentImage;
+        sdrPresentImage = null;
+        if (image != null) failure = destroyStep(failure, "SDR present image", image::destroy);
+
+        RtImage[] interpolationImages = fgInterp;
         fgInterp = new RtImage[0];
+        for (RtImage img : interpolationImages) {
+            if (img != null) {
+                failure = destroyStep(failure, "FG interpolation image", img::destroy);
+            }
+        }
         fgInterpW = -1;
         fgInterpH = -1;
         fgInterpFormat = Integer.MIN_VALUE;
-        if (worldPipeline != null) {
-            worldPipeline.destroy();
-            worldPipeline = null;
-        }
+        failure = destroyStep(failure, "SHaRC resources", this::destroySharcResources);
+        RtPipeline world = worldPipeline;
+        worldPipeline = null;
+        if (world != null) failure = destroyStep(failure, "world pipeline", world::destroy);
         bindlessTextureCapacity = 0;
         materialBindingsReady = false;
         materialEpochTraceGate = false;
-        RtMaterialRegistry.INSTANCE.destroy();
-        if (pushRing != null) {
-            for (PushSlot slot : pushRing) {
+        failure = destroyStep(failure, "material registry", RtMaterialRegistry.INSTANCE::destroy);
+        PushSlot[] slots = pushRing;
+        pushRing = null;
+        if (slots != null) {
+            for (PushSlot slot : slots) {
                 if (slot != null) {
-                    slot.buffer.destroy();
+                    failure = destroyStep(failure, "world push buffer", slot.buffer::destroy);
                 }
             }
-            pushRing = null;
         }
-        if (atlasSampler != 0L) {
+        long sampler = atlasSampler;
+        atlasSampler = 0L;
+        if (sampler != 0L) {
             RtContext ctx = RtContext.currentOrNull();
             if (ctx != null) {
-                VK10.vkDestroySampler(ctx.vk(), atlasSampler, null);
+                RtContext samplerContext = ctx;
+                failure = destroyStep(failure, "atlas sampler",
+                        () -> VK10.vkDestroySampler(samplerContext.vk(), sampler, null));
+            } else {
+                failure = destroyStep(failure, "atlas sampler context", () -> {
+                    throw new IllegalStateException("Atlas sampler outlived its Vulkan context");
+                });
             }
-            atlasSampler = 0L;
+        }
+        // A successful device teardown is the boundary for this per-device safety latch. The next
+        // bring-up must be allowed to retry on a fresh context, and the old render-tail token cannot
+        // survive that context boundary.
+        failed = false;
+        loggedActive = false;
+        pendingGraphicsUse = null;
+        currentTlasHandle = 0L;
+        clearOutputResources();
+        if (failure != null) {
+            throw new IllegalStateException("RT composite teardown failed", failure);
         }
     }
 
@@ -1624,6 +2678,24 @@ public final class RtComposite {
         region.get(0).dstSubresource().aspectMask(VK10.VK_IMAGE_ASPECT_COLOR_BIT).mipLevel(0).baseArrayLayer(0).layerCount(1);
         region.get(0).extent().set(width, height, 1);
         return region;
+    }
+
+    /** Replace a size-dependent image only after the device is idle, retaining the old image if allocation fails. */
+    private static RtImage replaceStorageImageAfterDeviceIdle(RtContext ctx, RtImage old, int width, int height,
+                                                              int format, String label) {
+        if (old != null) {
+            ctx.waitIdle();
+        }
+        RtImage replacement = ctx.createStorageImage(width, height, format, label);
+        try {
+            if (old != null) {
+                old.destroy();
+            }
+            return replacement;
+        } catch (RuntimeException | Error failure) {
+            replacement.destroy();
+            throw failure;
+        }
     }
 
     /** Whether the HDR present path (HDR image + combined UI -> PQ swapchain) should replace the vanilla SDR blit. */
@@ -1796,10 +2868,8 @@ public final class RtComposite {
             sdrPresentPipeline = RtSdrPresentPipeline.create(ctx);
         }
         if (sdrPresentImage == null || sdrPresentImage.width != swapW || sdrPresentImage.height != swapH) {
-            if (sdrPresentImage != null) {
-                sdrPresentImage.destroy();
-            }
-            sdrPresentImage = ctx.createStorageImage(swapW, swapH, VK10.VK_FORMAT_R16G16B16A16_SFLOAT,
+            sdrPresentImage = replaceStorageImageAfterDeviceIdle(ctx, sdrPresentImage, swapW, swapH,
+                    VK10.VK_FORMAT_R16G16B16A16_SFLOAT,
                     "RT SDR->PQ present image " + swapW + "x" + swapH);
         }
         RtImage dst = sdrPresentImage;
@@ -1899,10 +2969,8 @@ public final class RtComposite {
             return; // not a Vulkan-backed texture (shouldn't happen on this backend)
         }
         if (fgHudlessImage == null || fgHudlessImage.width != main.width || fgHudlessImage.height != main.height) {
-            if (fgHudlessImage != null) {
-                fgHudlessImage.destroy();
-            }
-            fgHudlessImage = ctx.createStorageImage(main.width, main.height, VK10.VK_FORMAT_R8G8B8A8_UNORM,
+            fgHudlessImage = replaceStorageImageAfterDeviceIdle(ctx, fgHudlessImage, main.width, main.height,
+                    VK10.VK_FORMAT_R8G8B8A8_UNORM,
                     "FG hudless capture " + main.width + "x" + main.height);
         }
         var encoder = (VulkanCommandEncoder) ((CommandEncoderAccessor) RenderSystem.getDevice().createCommandEncoder()).caustica$getBackend();
@@ -1919,6 +2987,36 @@ public final class RtComposite {
             throw new IllegalStateException("vkEndCommandBuffer(fg hudless capture) failed");
         }
         encoder.execute(cmd);
+    }
+
+    /** The End sky is a standalone Minecraft texture, not a sprite in the celestials atlas. */
+    private record EndSkyBinding(long view, long sampler) {}
+
+    private static final class EndSkyUnavailableException extends RuntimeException {
+        private EndSkyUnavailableException() {
+            super("Minecraft End sky texture has no Vulkan view/sampler");
+        }
+    }
+
+    private static EndSkyBinding requireEndSkyBinding() {
+        EndSkyBinding binding = endSkyBinding();
+        if (binding.view() == 0L || binding.sampler() == 0L) {
+            throw new EndSkyUnavailableException();
+        }
+        return binding;
+    }
+
+    private static EndSkyBinding endSkyBinding() {
+        try {
+            AbstractTexture texture = Minecraft.getInstance().getTextureManager().getTexture(END_SKY_ID);
+            if (!(texture.getTextureView() instanceof VulkanGpuTextureView view)
+                    || !(texture.getSampler() instanceof VulkanGpuSampler sampler)) {
+                return new EndSkyBinding(0L, 0L);
+            }
+            return new EndSkyBinding(view.vkImageView(), sampler.vkSampler());
+        } catch (Throwable ignored) {
+            return new EndSkyBinding(0L, 0L);
+        }
     }
 
     /**
@@ -1938,10 +3036,8 @@ public final class RtComposite {
             return;
         }
         if (fgHdrHudlessImage == null || fgHdrHudlessImage.width != src.width || fgHdrHudlessImage.height != src.height) {
-            if (fgHdrHudlessImage != null) {
-                fgHdrHudlessImage.destroy();
-            }
-            fgHdrHudlessImage = ctx.createStorageImage(src.width, src.height, VK10.VK_FORMAT_R16G16B16A16_SFLOAT,
+            fgHdrHudlessImage = replaceStorageImageAfterDeviceIdle(ctx, fgHdrHudlessImage, src.width, src.height,
+                    VK10.VK_FORMAT_R16G16B16A16_SFLOAT,
                     "FG HDR hudless capture (PQ) " + src.width + "x" + src.height);
         }
         // Make composite()'s writes to hdrDisplayImage (an earlier submit this frame) visible to this copy;
@@ -2059,15 +3155,28 @@ public final class RtComposite {
                 && (count == 0 || fgInterp[0] != null)) {
             return;
         }
+        if (fgInterp.length > 0) {
+            ctx.waitIdle();
+        }
+        RtImage[] replacement = new RtImage[count];
+        try {
+            for (int i = 0; i < count; i++) {
+                replacement[i] = ctx.createStorageImage(w, h, fmt, "FG interp " + i + " " + w + "x" + h);
+            }
+        } catch (RuntimeException | Error failure) {
+            for (RtImage img : replacement) {
+                if (img != null) {
+                    img.destroy();
+                }
+            }
+            throw failure;
+        }
         for (RtImage img : fgInterp) {
             if (img != null) {
                 img.destroy();
             }
         }
-        fgInterp = new RtImage[count];
-        for (int i = 0; i < count; i++) {
-            fgInterp[i] = ctx.createStorageImage(w, h, fmt, "FG interp " + i + " " + w + "x" + h);
-        }
+        fgInterp = replacement;
         fgInterpW = w;
         fgInterpH = h;
         fgInterpFormat = fmt;

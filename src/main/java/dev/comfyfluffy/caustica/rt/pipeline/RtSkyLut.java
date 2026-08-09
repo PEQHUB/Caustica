@@ -102,13 +102,24 @@ public final class RtSkyLut {
 
     public static RtSkyLut create(RtContext ctx) {
         VkDevice vk = ctx.vk();
-        RtImage transmittance = ctx.createStorageImage(TRANSMITTANCE_WIDTH, TRANSMITTANCE_HEIGHT,
-                VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "sky transmittance LUT");
-        RtImage multiScatter = ctx.createStorageImage(MULTISCATTER_WIDTH, MULTISCATTER_HEIGHT,
-                VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "sky multiple-scattering LUT");
-        RtImage skyView = ctx.createStorageImage(SKY_VIEW_WIDTH, SKY_VIEW_HEIGHT,
-                VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "sky view LUT");
+        RtImage transmittance = null;
+        RtImage multiScatter = null;
+        RtImage skyView = null;
+        long sampler = 0L;
+        long descriptorSetLayout = 0L;
+        long descriptorPool = 0L;
+        long descriptorSet = 0L;
+        long pipelineLayout = 0L;
+        long transmittancePipeline = 0L;
+        long multiScatterPipeline = 0L;
+        long skyViewPipeline = 0L;
         try (MemoryStack stack = MemoryStack.stackPush()) {
+            transmittance = ctx.createStorageImage(TRANSMITTANCE_WIDTH, TRANSMITTANCE_HEIGHT,
+                    VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "sky transmittance LUT");
+            multiScatter = ctx.createStorageImage(MULTISCATTER_WIDTH, MULTISCATTER_HEIGHT,
+                    VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "sky multiple-scattering LUT");
+            skyView = ctx.createStorageImage(SKY_VIEW_WIDTH, SKY_VIEW_HEIGHT,
+                    VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "sky view LUT");
             // CLAMP on both axes. The sky-view LUT's U axis is angle-from-the-light, which is folded on
             // itself rather than wrapped, and its V axis stacks the two body slices — a REPEAT here would
             // let the sun's rows bleed into the moon's at the seam.
@@ -121,7 +132,7 @@ public final class RtSkyLut {
                     .minLod(0.0f).maxLod(0.0f);
             LongBuffer handle = stack.mallocLong(1);
             check(VK10.vkCreateSampler(vk, samplerInfo, null, handle), "vkCreateSampler(sky LUT)");
-            long sampler = handle.get(0);
+            sampler = handle.get(0);
             RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_SAMPLER, sampler, "sky LUT sampler");
 
             VkDescriptorSetLayoutBinding.Buffer bindings = VkDescriptorSetLayoutBinding.calloc(SKY_LUT_BINDING_COUNT, stack);
@@ -137,7 +148,7 @@ public final class RtSkyLut {
                     .sType$Default().pBindings(bindings);
             check(VK10.vkCreateDescriptorSetLayout(vk, layoutInfo, null, handle),
                     "vkCreateDescriptorSetLayout(sky LUT)");
-            long descriptorSetLayout = handle.get(0);
+            descriptorSetLayout = handle.get(0);
             RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT,
                     descriptorSetLayout, "sky LUT descriptor set layout");
 
@@ -148,7 +159,7 @@ public final class RtSkyLut {
                     .sType$Default().maxSets(1).pPoolSizes(poolSizes);
             check(VK10.vkCreateDescriptorPool(vk, poolInfo, null, handle),
                     "vkCreateDescriptorPool(sky LUT)");
-            long descriptorPool = handle.get(0);
+            descriptorPool = handle.get(0);
             RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_DESCRIPTOR_POOL,
                     descriptorPool, "sky LUT descriptor pool");
 
@@ -158,7 +169,7 @@ public final class RtSkyLut {
             LongBuffer setHandle = stack.mallocLong(1);
             check(VK10.vkAllocateDescriptorSets(vk, allocateInfo, setHandle),
                     "vkAllocateDescriptorSets(sky LUT)");
-            long descriptorSet = setHandle.get(0);
+            descriptorSet = setHandle.get(0);
             RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_DESCRIPTOR_SET,
                     descriptorSet, "sky LUT descriptor set");
 
@@ -172,15 +183,15 @@ public final class RtSkyLut {
                     .pPushConstantRanges(pushRange);
             check(VK10.vkCreatePipelineLayout(vk, pipelineLayoutInfo, null, handle),
                     "vkCreatePipelineLayout(sky LUT)");
-            long pipelineLayout = handle.get(0);
+            pipelineLayout = handle.get(0);
             RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_PIPELINE_LAYOUT,
                     pipelineLayout, "sky LUT pipeline layout");
 
-            long transmittancePipeline = createComputePipeline(ctx, stack, pipelineLayout,
+            transmittancePipeline = createComputePipeline(ctx, stack, pipelineLayout,
                     "transmittance.comp.spv", "sky transmittance pipeline");
-            long multiScatterPipeline = createComputePipeline(ctx, stack, pipelineLayout,
+            multiScatterPipeline = createComputePipeline(ctx, stack, pipelineLayout,
                     "multiscatter.comp.spv", "sky multiple-scattering pipeline");
-            long skyViewPipeline = createComputePipeline(ctx, stack, pipelineLayout,
+            skyViewPipeline = createComputePipeline(ctx, stack, pipelineLayout,
                     "view.comp.spv", "sky view pipeline");
 
             VkDescriptorImageInfo.Buffer images = VkDescriptorImageInfo.calloc(SKY_LUT_BINDING_COUNT, stack);
@@ -211,6 +222,18 @@ public final class RtSkyLut {
             return new RtSkyLut(ctx, transmittance, multiScatter, skyView, sampler, descriptorSetLayout,
                     descriptorPool, descriptorSet, pipelineLayout, transmittancePipeline,
                     multiScatterPipeline, skyViewPipeline);
+        } catch (Throwable t) {
+            if (skyViewPipeline != 0L) VK10.vkDestroyPipeline(vk, skyViewPipeline, null);
+            if (multiScatterPipeline != 0L) VK10.vkDestroyPipeline(vk, multiScatterPipeline, null);
+            if (transmittancePipeline != 0L) VK10.vkDestroyPipeline(vk, transmittancePipeline, null);
+            if (pipelineLayout != 0L) VK10.vkDestroyPipelineLayout(vk, pipelineLayout, null);
+            if (descriptorPool != 0L) VK10.vkDestroyDescriptorPool(vk, descriptorPool, null);
+            if (descriptorSetLayout != 0L) VK10.vkDestroyDescriptorSetLayout(vk, descriptorSetLayout, null);
+            if (sampler != 0L) VK10.vkDestroySampler(vk, sampler, null);
+            if (skyView != null) skyView.destroy();
+            if (multiScatter != null) multiScatter.destroy();
+            if (transmittance != null) transmittance.destroy();
+            throw t;
         }
     }
 
@@ -279,19 +302,29 @@ public final class RtSkyLut {
     private static long createComputePipeline(RtContext ctx, MemoryStack stack, long layout,
                                               String shader, String label) {
         VkDevice vk = ctx.vk();
-        long module = loadModule(vk, stack, SHADER_DIR + shader);
-        RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_SHADER_MODULE, module, label + " module");
-        VkPipelineShaderStageCreateInfo stage = VkPipelineShaderStageCreateInfo.calloc(stack)
-                .sType$Default().stage(VK10.VK_SHADER_STAGE_COMPUTE_BIT)
-                .module(module).pName(stack.UTF8("main"));
-        VkComputePipelineCreateInfo.Buffer info = VkComputePipelineCreateInfo.calloc(1, stack);
-        info.get(0).sType$Default().stage(stage).layout(layout);
-        LongBuffer handle = stack.mallocLong(1);
-        check(VK10.vkCreateComputePipelines(vk, VK10.VK_NULL_HANDLE, info, null, handle),
-                "vkCreateComputePipelines(" + shader + ")");
-        VK10.vkDestroyShaderModule(vk, module, null);
-        RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_PIPELINE, handle.get(0), label);
-        return handle.get(0);
+        long module = 0L;
+        long pipeline = 0L;
+        try {
+            module = loadModule(vk, stack, SHADER_DIR + shader);
+            RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_SHADER_MODULE, module, label + " module");
+            VkPipelineShaderStageCreateInfo stage = VkPipelineShaderStageCreateInfo.calloc(stack)
+                    .sType$Default().stage(VK10.VK_SHADER_STAGE_COMPUTE_BIT)
+                    .module(module).pName(stack.UTF8("main"));
+            VkComputePipelineCreateInfo.Buffer info = VkComputePipelineCreateInfo.calloc(1, stack);
+            info.get(0).sType$Default().stage(stage).layout(layout);
+            LongBuffer handle = stack.mallocLong(1);
+            check(VK10.vkCreateComputePipelines(vk, VK10.VK_NULL_HANDLE, info, null, handle),
+                    "vkCreateComputePipelines(" + shader + ")");
+            pipeline = handle.get(0);
+            VK10.vkDestroyShaderModule(vk, module, null);
+            module = 0L;
+            RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_PIPELINE, pipeline, label);
+            return pipeline;
+        } catch (Throwable t) {
+            if (module != 0L) VK10.vkDestroyShaderModule(vk, module, null);
+            if (pipeline != 0L) VK10.vkDestroyPipeline(vk, pipeline, null);
+            throw t;
+        }
     }
 
     private static long loadModule(VkDevice vk, MemoryStack stack, String resource) {

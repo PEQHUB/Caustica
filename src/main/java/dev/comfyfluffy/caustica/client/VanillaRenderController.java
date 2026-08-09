@@ -120,6 +120,13 @@ public final class VanillaRenderController {
 		}
 	}
 
+	/** Clear the controller-side fallback latch after an explicit render-state invalidation. */
+	public void resetFailureLatch() {
+		this.failureLatched = false;
+		this.inactiveReason = null;
+		this.lastLoggedInactiveReason = null;
+	}
+
 	private String findInactiveReason(RenderTarget mainTarget) {
 		if (this.failureLatched || RtComposite.INSTANCE.hasFailed()) {
 			return "RT composite failure latch is set";

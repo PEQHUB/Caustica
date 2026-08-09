@@ -79,10 +79,11 @@ public final class NgxLibrary {
 		this.createDlssd = handle(lookup, "ngxshim_create_dlssd",
 				FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.JAVA_LONG, ValueLayout.JAVA_INT, ValueLayout.JAVA_INT,
 						ValueLayout.JAVA_INT, ValueLayout.JAVA_INT, ValueLayout.JAVA_INT, ValueLayout.JAVA_INT, ValueLayout.JAVA_INT));
-		// int ngxshim_evaluate_dlssd(cmd, feature, [color/depth/mv/diffAlbedo/specAlbedo/normals/specMotion/specHit/out: view,img,fmt]*9, rw,rh,dw,dh, jx,jy,mvsx,mvsy, reset, frameMs, matrices)
-		this.evaluateDlssd = handle(lookup, "ngxshim_evaluate_dlssd",
+		// int ngxshim_evaluate_dlssd_v2(cmd, feature, [color/depth/mv/diffAlbedo/specAlbedo/normals/specMotion/particle/responsivity/out: view,img,fmt]*10, rw,rh,dw,dh, jx,jy,mvsx,mvsy, reset, frameMs, matrices)
+		this.evaluateDlssd = handle(lookup, "ngxshim_evaluate_dlssd_v2",
 				FunctionDescriptor.of(ValueLayout.JAVA_INT,
 						ValueLayout.JAVA_LONG, ValueLayout.ADDRESS,
+						ValueLayout.JAVA_LONG, ValueLayout.JAVA_LONG, ValueLayout.JAVA_INT,
 						ValueLayout.JAVA_LONG, ValueLayout.JAVA_LONG, ValueLayout.JAVA_INT,
 						ValueLayout.JAVA_LONG, ValueLayout.JAVA_LONG, ValueLayout.JAVA_INT,
 						ValueLayout.JAVA_LONG, ValueLayout.JAVA_LONG, ValueLayout.JAVA_INT,
@@ -257,7 +258,8 @@ public final class NgxLibrary {
 	                         long specularAlbedoView, long specularAlbedoImage, int specularAlbedoFormat,
 	                         long normalsView, long normalsImage, int normalsFormat,
 	                         long specularMotionView, long specularMotionImage, int specularMotionFormat,
-	                         long specularHitDistanceView, long specularHitDistanceImage, int specularHitDistanceFormat,
+	                         long particleMaskView, long particleMaskImage, int particleMaskFormat,
+	                         long responsivityMaskView, long responsivityMaskImage, int responsivityMaskFormat,
 	                         long outputView, long outputImage, int outputFormat,
 	                         int renderWidth, int renderHeight, int displayWidth, int displayHeight,
 	                         float jitterX, float jitterY, float mvScaleX, float mvScaleY,
@@ -272,13 +274,14 @@ public final class NgxLibrary {
 					specularAlbedoView, specularAlbedoImage, specularAlbedoFormat,
 					normalsView, normalsImage, normalsFormat,
 					specularMotionView, specularMotionImage, specularMotionFormat,
-					specularHitDistanceView, specularHitDistanceImage, specularHitDistanceFormat,
+					particleMaskView, particleMaskImage, particleMaskFormat,
+					responsivityMaskView, responsivityMaskImage, responsivityMaskFormat,
 					outputView, outputImage, outputFormat,
 					renderWidth, renderHeight, displayWidth, displayHeight,
 					jitterX, jitterY, mvScaleX, mvScaleY, reset, frameTimeMs,
 					worldToViewMatrix, viewToClipMatrix);
 		} catch (Throwable t) {
-			throw new RuntimeException("ngxshim_evaluate_dlssd failed", t);
+			throw new RuntimeException("ngxshim_evaluate_dlssd_v2 failed", t);
 		}
 	}
 

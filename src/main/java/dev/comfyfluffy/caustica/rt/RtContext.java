@@ -55,7 +55,7 @@ public final class RtContext {
 
     private final VulkanDevice device;
     private final VkDevice vk;
-    private final long vma;
+    private long vma;
     private final VulkanQueue graphicsQueue;
     private final VulkanQueue computeQueue;
     /** Serializes device-wide host waits against submissions from the Caustica compute thread. */
@@ -66,11 +66,13 @@ public final class RtContext {
     private final int shaderGroupHandleAlignment;
     private final int maxShaderGroupStride;
     private final int accelerationStructureScratchAlignment;
+    private final int maxPushConstantsSize;
     private final long updateAfterBindCombinedImageSamplerLimit;
     private long commandPool;
 
     private RtContext(VulkanDevice device, long vma, int handleSize, int baseAlign, int handleAlign,
-                      int maxSbtStride, int scratchAlign, long updateAfterBindCombinedImageSamplerLimit) {
+                      int maxSbtStride, int scratchAlign, int maxPushConstantsSize,
+                      long updateAfterBindCombinedImageSamplerLimit) {
         this.device = device;
         this.vk = device.vkDevice();
         this.vma = vma;
@@ -82,6 +84,7 @@ public final class RtContext {
         this.shaderGroupHandleAlignment = handleAlign;
         this.maxShaderGroupStride = maxSbtStride;
         this.accelerationStructureScratchAlignment = scratchAlign;
+        this.maxPushConstantsSize = maxPushConstantsSize;
         this.updateAfterBindCombinedImageSamplerLimit = updateAfterBindCombinedImageSamplerLimit;
         this.gpuExecutor = new RtGpuExecutor(this);
     }
@@ -157,14 +160,17 @@ public final class RtContext {
 
             CausticaMod.LOGGER.info(
                     "RT portability limits: SBT handleAlignment={}, baseAlignment={}, maxStride={}; "
-                            + "AS scratchAlignment={}; update-after-bind combined-sampler limit={}",
+                            + "AS scratchAlignment={}; maxPushConstantsSize={}; "
+                            + "update-after-bind combined-sampler limit={}",
                     rtProps.shaderGroupHandleAlignment(), rtProps.shaderGroupBaseAlignment(),
                     Integer.toUnsignedLong(rtProps.maxShaderGroupStride()),
-                    asProps.minAccelerationStructureScratchOffsetAlignment(), combinedImageSamplerLimit);
+                    asProps.minAccelerationStructureScratchOffsetAlignment(), limits.maxPushConstantsSize(),
+                    combinedImageSamplerLimit);
 
             return new RtContext(device, pVma.get(0), rtProps.shaderGroupHandleSize(), rtProps.shaderGroupBaseAlignment(),
                     rtProps.shaderGroupHandleAlignment(), rtProps.maxShaderGroupStride(),
-                    asProps.minAccelerationStructureScratchOffsetAlignment(), combinedImageSamplerLimit);
+                    asProps.minAccelerationStructureScratchOffsetAlignment(), limits.maxPushConstantsSize(),
+                    combinedImageSamplerLimit);
         }
     }
 
@@ -214,6 +220,11 @@ public final class RtContext {
 
     public int maxShaderGroupStride() {
         return maxShaderGroupStride;
+    }
+
+    /** Device-reported limit for one Vulkan push-constant range, in bytes. */
+    public int maxPushConstantsSize() {
+        return maxPushConstantsSize;
     }
 
     /** Conservative combined-image-sampler limit for a descriptor set using update-after-bind. */
@@ -524,16 +535,45 @@ public final class RtContext {
     }
 
     public void destroy() {
-        gpuExecutor.shutdown();
-        if (commandPool != 0L) {
-            VK10.vkDestroyCommandPool(vk, commandPool, null);
-            commandPool = 0L;
+        Throwable failure = null;
+        try {
+            gpuExecutor.shutdown();
+        } catch (Throwable t) {
+            failure = teardownFailure(failure, "GPU executor", t);
         }
-        if (vma != 0L) {
-            Vma.vmaDestroyAllocator(vma);
+        long pool = commandPool;
+        commandPool = 0L;
+        if (pool != 0L) {
+            try {
+                VK10.vkDestroyCommandPool(vk, pool, null);
+            } catch (Throwable t) {
+                failure = teardownFailure(failure, "RT command pool", t);
+            }
         }
-        instance = null;
-        unavailable = false;
+        long allocator = vma;
+        vma = 0L;
+        if (allocator != 0L) {
+            try {
+                Vma.vmaDestroyAllocator(allocator);
+            } catch (Throwable t) {
+                failure = teardownFailure(failure, "RT VMA allocator", t);
+            }
+        }
+        if (instance == this) {
+            instance = null;
+            unavailable = false;
+        }
+        if (failure != null) {
+            throw (RuntimeException) failure;
+        }
+    }
+
+    private static Throwable teardownFailure(Throwable failure, String name, Throwable cause) {
+        if (failure == null) {
+            return new IllegalStateException("RT context teardown failed during " + name, cause);
+        }
+        failure.addSuppressed(cause);
+        return failure;
     }
 
     private void ensurePool() {

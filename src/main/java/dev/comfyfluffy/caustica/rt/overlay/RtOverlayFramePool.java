@@ -20,6 +20,7 @@ public final class RtOverlayFramePool {
     private static final long MIN_SIZE = 256;
 
     private final List<RtBuffer> acquiredThisFrame = new ArrayList<>();
+    private boolean imageReplacementBoundary;
 
     /** A host-visible vertex buffer of at least {@code bytes}, valid for this frame only. */
     public RtBuffer acquireVertex(RtContext ctx, long bytes, String label) {
@@ -37,21 +38,48 @@ public final class RtOverlayFramePool {
         return b;
     }
 
+    /**
+     * Establish the rare resize boundary shared by all overlay image generations prepared this frame.
+     * The overlay descriptor sets are singletons, so waiting also makes rebinding them to a replacement
+     * image view legal while protecting the old image from asynchronous graphics use.
+     */
+    public void awaitImageReplacementBoundary(RtContext ctx) {
+        if (!imageReplacementBoundary) {
+            ctx.waitIdle();
+            imageReplacementBoundary = true;
+        }
+    }
+
     /** Retire everything acquired this frame once its overlay commands have completed. */
     public void endFrame(RtContext ctx, RtGpuExecutor.GraphicsUse graphicsUse) {
         if (acquiredThisFrame.isEmpty()) {
+            imageReplacementBoundary = false;
             return;
         }
         List<RtBuffer> retired = List.copyOf(acquiredThisFrame);
         ctx.gpuExecutor().retireAfterGraphics(graphicsUse, () -> retired.forEach(RtBuffer::destroy));
         acquiredThisFrame.clear();
+        imageReplacementBoundary = false;
     }
 
     /** Immediate teardown of unpublished buffers; queued buffers are owned by the GPU executor. */
     public void destroy() {
+        Throwable failure = null;
         for (RtBuffer b : acquiredThisFrame) {
-            b.destroy();
+            try {
+                b.destroy();
+            } catch (Throwable t) {
+                if (failure == null) {
+                    failure = t;
+                } else {
+                    failure.addSuppressed(t);
+                }
+            }
         }
         acquiredThisFrame.clear();
+        imageReplacementBoundary = false;
+        if (failure != null) {
+            throw new IllegalStateException("Overlay frame-pool teardown failed", failure);
+        }
     }
 }

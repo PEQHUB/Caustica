@@ -17,8 +17,9 @@ import org.slf4j.LoggerFactory;
 /**
  * Central mutable runtime configuration. Each setting resolves its value, in order of precedence, from a
  * {@code -Dcaustica.*} system property, then the {@code config/caustica.toml} file, then a hardcoded
- * default. The settings UI and any other code call the same {@code set(...)} methods, and {@link #save()}
- * writes the current values back to the TOML file.
+ * default. A profile version below {@value #DEFAULTS_PROFILE_VERSION} selects the hardcoded defaults for
+ * its first load; system properties still take precedence. The settings UI and any other code call the
+ * same {@code set(...)} methods, and {@link #save()} writes the current values back to the TOML file.
  *
  * <p>The system property namespace ({@code caustica.rt.foo}) and the TOML layout are independent: the file
  * uses real nested tables (e.g. {@code [omm]} with a {@code subdivision} key) grouped for readability, while
@@ -30,6 +31,8 @@ public final class CausticaConfig {
 
     private static final Path CONFIG_PATH = resolveConfigPath();
     private static final CommentedFileConfig FILE = loadFile(CONFIG_PATH);
+    static final int DEFAULTS_PROFILE_VERSION = 17;
+    private static final boolean FORCE_DEFAULTS_ON_FIRST_LOAD = shouldResetToDefaults();
 
     private CausticaConfig() {
     }
@@ -56,17 +59,31 @@ public final class CausticaConfig {
     public static void ensureRegistered() {
         @SuppressWarnings("unused")
         Object[] touch = {
-            Rt.ENABLED, Rt.Composite.SPP, Rt.Composite.MAX_BOUNCES, Rt.Terrain.ASYNC_DISPATCH_PER_PASS, Rt.Omm.ENABLED,
-            Rt.Entities.ENABLED, Rt.Entities.GLOW_ENABLED, Rt.EntityTextures.MAX_TEXTURES, Rt.DlssRr.ENABLED, Rt.Fg.ENABLED,
-            Rt.Reflex.ENABLED, Rt.Exposure.MODE, Rt.Tonemap.GAMMA, Rt.FrameStats.ENABLED,
-            Rt.Screenshots.EXR_ENABLED, Rt.Hdr.ENABLED, Ngx.PATH,
+            Rt.ENABLED, Rt.Composite.SPP, Rt.Composite.MAX_BOUNCES,
+            Rt.Sharc.ENABLED, Rt.Sharc.CACHE_EXPONENT, Rt.Sharc.ANTI_FIREFLY,
+            Rt.Sharc.PRIMARY_SURFACE_DEBUG, Rt.Sharc.UPDATE_TILE_SIZE,
+            Rt.Sharc.ACCUMULATION_FRAMES, Rt.Sharc.STALE_FRAMES, Rt.Sharc.SCENE_SCALE,
+            Rt.Sharc.RADIANCE_SCALE, Rt.Sharc.GRID_LOGARITHM_BASE, Rt.Sharc.GRID_LEVEL_BIAS,
+            Rt.Sharc.ROUGHNESS_THRESHOLD, Rt.Terrain.ASYNC_DISPATCH_PER_PASS, Rt.Terrain.BLAS_COMPACTION,
+            Rt.Omm.ENABLED, Rt.Omm.SUBDIVISION, Rt.Omm.STATS,
+            Rt.Entities.ENABLED, Rt.Entities.GLOW_ENABLED, Rt.Entities.BE_BUILDS_PER_FRAME,
+            Rt.EntityTextures.MAX_TEXTURES, Rt.DlssRr.ENABLED, Rt.DlssRr.PRESET,
+            Rt.Fg.ENABLED, Rt.Fg.MULTI_FRAME_COUNT,
+            Rt.Reflex.ENABLED, Rt.Exposure.MODE, Rt.Exposure.LOW_PERCENTILE, Rt.Exposure.HIGH_PERCENTILE,
+            Rt.Exposure.PRE_EXPOSURE, Rt.Tonemap.GAMMA,
+            Rt.Sdr.TONE_MAPPER, Rt.Hdr.TONE_MAPPER,
+            Rt.FrameStats.ENABLED,
+            Rt.Screenshots.EXR_ENABLED,
+            Rt.Lights.RIS_CANDIDATES, Rt.Lights.MIN_FILL_RATIO, Rt.Lights.STATS,
+            Rt.Lights.DUMP, Rt.Lights.DUMP_RADIUS, Rt.Overlay.BLOCK_OUTLINE_ENABLED,
+            Rt.Diagnostics.HEAVY_CRASH_DIAGNOSTICS, Rt.Hdr.ENABLED, Ngx.PATH,
         };
     }
 
     /** Writes the default config file if it does not exist yet. */
     public static void saveIfMissing() {
         ensureRegistered();
-        if (FILE.valueMap().isEmpty()) {
+        if (FILE.valueMap().isEmpty() || FORCE_DEFAULTS_ON_FIRST_LOAD) {
             save();
         }
     }
@@ -75,6 +92,7 @@ public final class CausticaConfig {
     public static synchronized void save() {
         ensureRegistered();
         writeComments();
+        FILE.set("config-version", profileVersionForSave());
         for (RuntimeSetting<?> setting : SETTINGS) {
             setting.writeToFile(FILE);
         }
@@ -96,14 +114,18 @@ public final class CausticaConfig {
                 " Controls direct lighting from glowing blocks such as torches, glowstone, and lava.\n"
                         + " Set ris-candidates to 0 to disable it. stats, dump, and dump-radius are debugging options.");
         FILE.setComment("tonemap",
-                " Controls the final image. gamma: 1 is neutral; lower values brighten midtones.");
+                " Controls the final image. PsychoV24 is the SDR and HDR default;\n"
+                        + " ACES 2.0 remains available as the reference display transform, with BT.2390 as the standards-based HDR\n"
+                        + " alternative. gamma: 1 is neutral; lower values brighten midtones.");
         FILE.setComment("exposure",
                 " Controls automatic exposure. manual-ev sets exposure in manual mode and adjusts it in auto mode.\n"
+                        + " low/high-percentile define the histogram window; pre-exposure keeps stored radiance near mid-grey.\n"
                         + " adapt-darken and adapt-brighten control adjustment speed in seconds.\n"
                         + " sky-weight-cap and emissive-weight-cap limit how much bright areas affect exposure.");
         FILE.setComment("hdr",
                 " HDR display output. Requires operating system and display support.\n"
-                        + " ui-nits controls UI brightness; peak-nits must be 500, 1000, 2000, or 4000.");
+                        + " ui-nits controls UI brightness; peak-nits uses 50-nit increments from 50 to 5000.\n"
+                        + " ACES 2.0 uses the nearest baked HDR mastering target; analytical HDR modes use the exact value.");
         FILE.setComment("screenshots",
                 " exr-enabled saves an ACEScg EXR beside the normal F2 PNG while ray tracing is active.");
     }
@@ -128,6 +150,25 @@ public final class CausticaConfig {
             LOGGER.warn("Failed to read Caustica config {}: {}", path, e.toString());
         }
         return config;
+    }
+
+    private static boolean shouldResetToDefaults() {
+        return shouldResetToDefaults(FILE.contains("config-version") ? FILE.get("config-version") : null);
+    }
+
+    static boolean shouldResetToDefaults(Object version) {
+        return !(version instanceof Number) || ((Number) version).intValue() < DEFAULTS_PROFILE_VERSION;
+    }
+
+    private static int profileVersionForSave() {
+        Object version = FILE.contains("config-version") ? FILE.get("config-version") : null;
+        return profileVersionForSave(version);
+    }
+
+    static int profileVersionForSave(Object version) {
+        return version instanceof Number
+                ? Math.max(DEFAULTS_PROFILE_VERSION, ((Number) version).intValue())
+                : DEFAULTS_PROFILE_VERSION;
     }
 
     private static Boolean fileBoolean(String tomlPath) {
@@ -219,7 +260,7 @@ public final class CausticaConfig {
             if (prop != null) {
                 return Boolean.parseBoolean(prop.trim());
             }
-            Boolean fromFile = fileBoolean(tomlPath);
+            Boolean fromFile = FORCE_DEFAULTS_ON_FIRST_LOAD ? null : fileBoolean(tomlPath);
             return fromFile != null ? fromFile : defaultValue;
         }
     }
@@ -297,7 +338,7 @@ public final class CausticaConfig {
                     return defaultValue;
                 }
             }
-            Number fromFile = fileNumber(tomlPath);
+            Number fromFile = FORCE_DEFAULTS_ON_FIRST_LOAD ? null : fileNumber(tomlPath);
             return fromFile != null ? sanitize.applyAsInt(fromFile.intValue()) : defaultValue;
         }
     }
@@ -394,7 +435,7 @@ public final class CausticaConfig {
                     return defaultValue;
                 }
             }
-            Number fromFile = fileNumber(tomlPath);
+            Number fromFile = FORCE_DEFAULTS_ON_FIRST_LOAD ? null : fileNumber(tomlPath);
             if (fromFile == null) {
                 return defaultValue;
             }
@@ -458,7 +499,7 @@ public final class CausticaConfig {
             if (prop != null) {
                 return sanitize.apply(prop);
             }
-            String fromFile = fileString(tomlPath);
+            String fromFile = FORCE_DEFAULTS_ON_FIRST_LOAD ? null : fileString(tomlPath);
             return sanitize.apply(fromFile != null ? fromFile : defaultValue);
         }
     }
@@ -516,7 +557,7 @@ public final class CausticaConfig {
 
         private String resolveInitial() {
             String prop = System.getProperty(key);
-            return prop != null ? prop : fileString(tomlPath);
+            return prop != null ? prop : (FORCE_DEFAULTS_ON_FIRST_LOAD ? null : fileString(tomlPath));
         }
     }
 
@@ -529,10 +570,12 @@ public final class CausticaConfig {
         }
 
         public static final class Composite {
+            /** Debug value that exposes the full-resolution path-traced image before reconstruction. */
+            public static final int RAW_DEBUG_VIEW = 10;
             public static final IntSetting DEBUG_VIEW = intValue("caustica.rt.debugView", "composite.debug-view", 0);
             public static final IntSetting SPP = intAtLeast("caustica.rt.spp", "composite.spp", 1, 1);
             public static final IntSetting MAX_BOUNCES =
-                    clampedInt("caustica.rt.maxBounces", "composite.max-bounces", 4, 2, 8);
+                    clampedInt("caustica.rt.maxBounces", "composite.max-bounces", 8, 2, 8);
             public static final BooleanSetting WATER_WAVES =
                     bool("caustica.rt.waterWaves", "composite.water-waves", true);
             // Sun/moon angular radii and the noon south tilt moved into the versioned look package
@@ -545,6 +588,38 @@ public final class CausticaConfig {
                     finiteFloat("caustica.rt.jitterSignY", "composite.jitter-sign-y", -1.0f);
 
             private Composite() {
+            }
+        }
+
+        /** Runtime-safe controls for the optional, separately packaged SHaRC directional cache. */
+        public static final class Sharc {
+            public static final BooleanSetting ENABLED = bool("caustica.rt.sharc.enabled", "sharc.enabled", false);
+            public static final IntSetting CACHE_EXPONENT =
+                    clampedInt("caustica.rt.sharc.cacheExponent", "sharc.cache-exponent", 20, 16, 23);
+            public static final BooleanSetting ANTI_FIREFLY = bool(
+                    "caustica.rt.sharc.antiFirefly", "sharc.anti-firefly", true);
+            /** Developer comparison mode; production keeps camera-visible primary surfaces live. */
+            public static final BooleanSetting PRIMARY_SURFACE_DEBUG = bool(
+                    "caustica.rt.sharc.primarySurfaceDebug", "sharc.primary-surface-debug", false);
+            public static final IntSetting UPDATE_TILE_SIZE =
+                    clampedInt("caustica.rt.sharc.updateTileSize", "sharc.update-tile-size", 8, 2, 64);
+            public static final IntSetting ACCUMULATION_FRAMES =
+                    clampedInt("caustica.rt.sharc.accumulationFrames", "sharc.accumulation-frames", 8, 1, 1024);
+            public static final IntSetting STALE_FRAMES =
+                    clampedInt("caustica.rt.sharc.staleFrames", "sharc.stale-frames", 32, 8, 1024);
+            public static final FloatSetting SCENE_SCALE = finiteClampedFloat(
+                    "caustica.rt.sharc.sceneScale", "sharc.scene-scale", 1.0f, 1.0f, 100.0f);
+            public static final FloatSetting RADIANCE_SCALE = finiteClampedFloat(
+                    "caustica.rt.sharc.radianceScale", "sharc.radiance-scale", 1000.0f, 50.0f, 1000.0f);
+            public static final FloatSetting GRID_LOGARITHM_BASE = finiteClampedFloat(
+                    "caustica.rt.sharc.gridLogarithmBase", "sharc.grid-logarithm-base", 2.0f, 1.01f, 16.0f);
+            public static final FloatSetting GRID_LEVEL_BIAS = finiteClampedFloat(
+                    "caustica.rt.sharc.gridLevelBias", "sharc.grid-level-bias", 0.0f, -16.0f, 16.0f);
+            /** Additional minimum linear roughness for SHaRC diffuse ownership; zero preserves the mirror cutoff. */
+            public static final FloatSetting ROUGHNESS_THRESHOLD = finiteClampedFloat(
+                    "caustica.rt.sharc.roughnessThreshold", "sharc.roughness-threshold", 0.0f, 0.0f, 1.0f);
+
+            private Sharc() {
             }
         }
 
@@ -571,7 +646,7 @@ public final class CausticaConfig {
         /** RIS block-emitter lights. {@code ris-candidates = 0} disables everything. */
         public static final class Lights {
             public static final IntSetting RIS_CANDIDATES =
-                    intAtLeast("caustica.rt.risCandidates", "lights.ris-candidates", 8, 0);
+                    clampedInt("caustica.rt.risCandidates", "lights.ris-candidates", 0, 0, 32);
             public static final FloatSetting MIN_FILL_RATIO =
                     finiteFloat("caustica.rt.lightMinFillRatio", "lights.min-fill-ratio", 0.25f);
             public static final BooleanSetting STATS = bool("caustica.rt.lightStats", "lights.stats", false);
@@ -746,9 +821,9 @@ public final class CausticaConfig {
             public static final FloatSetting ADAPT_BRIGHTEN =
                     exposureScale("caustica.rt.exposure.adaptBrighten", "exposure.adapt-brighten", 0.4f);
             public static final FloatSetting LOW_PERCENTILE =
-                    clampedFloat("caustica.rt.exposure.lowPercentile", "exposure.low-percentile", 0.50f, 0.0f, 1.0f);
+                    percentile("caustica.rt.exposure.lowPercentile", "exposure.low-percentile", 0.50f);
             public static final FloatSetting HIGH_PERCENTILE =
-                    clampedFloat("caustica.rt.exposure.highPercentile", "exposure.high-percentile", 0.95f, 0.0f, 1.0f);
+                    percentile("caustica.rt.exposure.highPercentile", "exposure.high-percentile", 0.99f);
             public static final IntSetting STRIDE =
                     clampedInt("caustica.rt.exposure.stride", "exposure.stride", 2, 1, 8);
             public static final FloatSetting CENTER_WEIGHT_SIGMA =
@@ -818,6 +893,93 @@ public final class CausticaConfig {
             }
         }
 
+        /** Selectable SDR operators. PsychoV24 is the default; ACES 2.0 uses the baked LUT. */
+        public static final class Sdr {
+            public static final StringSetting TONE_MAPPER =
+                    string("caustica.rt.sdr.toneMapper", "sdr.tone-mapper", "psychov24",
+                            Sdr::sanitizeToneMapper);
+            public static final FloatSetting AGX_CONTRAST =
+                    clampedFloat("caustica.rt.sdr.agx.contrast", "sdr.agx.contrast", 1.0f, 0.0f, 2.0f);
+            public static final FloatSetting AGX_SATURATION =
+                    clampedFloat("caustica.rt.sdr.agx.saturation", "sdr.agx.saturation", 1.0f, 0.0f, 3.0f);
+            public static final FloatSetting PBR_START_COMPRESSION =
+                    clampedFloat("caustica.rt.sdr.pbrNeutral.startCompression",
+                            "sdr.pbr-neutral.start-compression", 0.76f, 0.0f, 0.99f);
+            public static final FloatSetting PBR_DESATURATION =
+                    clampedFloat("caustica.rt.sdr.pbrNeutral.desaturation",
+                            "sdr.pbr-neutral.desaturation", 0.15f, 0.0f, 1.0f);
+            public static final FloatSetting REINHARD_WHITE_POINT =
+                    clampedFloat("caustica.rt.sdr.reinhard.whitePoint",
+                            "sdr.reinhard.white-point", 4.0f, 1.0f, 20.0f);
+            public static final FloatSetting ACES_EXPOSURE =
+                    clampedFloat("caustica.rt.sdr.aces.exposure",
+                            "sdr.aces.exposure", 1.0f, 0.0f, 4.0f);
+            public static final FloatSetting LOTTES_CONTRAST =
+                    clampedFloat("caustica.rt.sdr.lottes.contrast",
+                            "sdr.lottes.contrast", 1.0f, 0.1f, 5.0f);
+            public static final FloatSetting LOTTES_SHOULDER =
+                    clampedFloat("caustica.rt.sdr.lottes.shoulder",
+                            "sdr.lottes.shoulder", 1.0f, 0.1f, 5.0f);
+            public static final FloatSetting LOTTES_HDR_MAX =
+                    clampedFloat("caustica.rt.sdr.lottes.hdrMax",
+                            "sdr.lottes.hdr-max", 16.0f, 1.0f, 64.0f);
+            public static final FloatSetting LOTTES_MID_IN =
+                    clampedFloat("caustica.rt.sdr.lottes.midIn",
+                            "sdr.lottes.mid-in", 0.18f, 0.01f, 1.0f);
+            public static final FloatSetting LOTTES_MID_OUT =
+                    clampedFloat("caustica.rt.sdr.lottes.midOut",
+                            "sdr.lottes.mid-out", 0.18f, 0.01f, 1.0f);
+            public static final FloatSetting UNCHARTED_A =
+                    clampedFloat("caustica.rt.sdr.uncharted2.a", "sdr.uncharted2.a", 0.15f, 0.01f, 1.0f);
+            public static final FloatSetting UNCHARTED_B =
+                    clampedFloat("caustica.rt.sdr.uncharted2.b", "sdr.uncharted2.b", 0.50f, 0.01f, 2.0f);
+            public static final FloatSetting UNCHARTED_C =
+                    clampedFloat("caustica.rt.sdr.uncharted2.c", "sdr.uncharted2.c", 0.10f, 0.0f, 1.0f);
+            public static final FloatSetting UNCHARTED_D =
+                    clampedFloat("caustica.rt.sdr.uncharted2.d", "sdr.uncharted2.d", 0.20f, 0.01f, 2.0f);
+            public static final FloatSetting UNCHARTED_E =
+                    clampedFloat("caustica.rt.sdr.uncharted2.e", "sdr.uncharted2.e", 0.02f, 0.0f, 1.0f);
+            public static final FloatSetting UNCHARTED_F =
+                    clampedFloat("caustica.rt.sdr.uncharted2.f", "sdr.uncharted2.f", 0.30f, 0.01f, 2.0f);
+            public static final FloatSetting UNCHARTED_WHITE_POINT =
+                    clampedFloat("caustica.rt.sdr.uncharted2.whitePoint",
+                            "sdr.uncharted2.white-point", 11.2f, 1.0f, 32.0f);
+            public static final FloatSetting GT_CONTRAST =
+                    clampedFloat("caustica.rt.sdr.gt.contrast", "sdr.gt.contrast", 1.0f, 0.1f, 4.0f);
+            public static final FloatSetting GT_LINEAR_START =
+                    clampedFloat("caustica.rt.sdr.gt.linearStart", "sdr.gt.linear-start", 0.22f, 0.01f, 0.99f);
+            public static final FloatSetting GT_LINEAR_LENGTH =
+                    clampedFloat("caustica.rt.sdr.gt.linearLength", "sdr.gt.linear-length", 0.40f, 0.01f, 4.0f);
+            public static final FloatSetting GT_BLACK_CURVE =
+                    clampedFloat("caustica.rt.sdr.gt.blackCurve", "sdr.gt.black-curve", 1.33f, 0.1f, 4.0f);
+            public static final FloatSetting GT_BLACK_LIFT =
+                    clampedFloat("caustica.rt.sdr.gt.blackLift", "sdr.gt.black-lift", 0.0f, -0.5f, 0.5f);
+            public static final FloatSetting PSYCHOV24_COMPRESSION =
+                    clampedFloat("caustica.rt.sdr.psychov24.compression",
+                            "sdr.psychov24.compression", 1.0f, 0.0f, 8.0f);
+            public static final FloatSetting PSYCHOV24_GAMUT_COMPRESSION =
+                    clampedFloat("caustica.rt.sdr.psychov24.gamutCompression",
+                            "sdr.psychov24.gamut-compression", 1.0f, 0.0f, 1.0f);
+            public static final FloatSetting PSYCHOV24_HIGHLIGHTS =
+                    clampedFloat("caustica.rt.sdr.psychov24.highlights",
+                            "sdr.psychov24.highlights", 1.0f, 0.0f, 3.0f);
+            public static final FloatSetting PSYCHOV24_SHADOWS =
+                    clampedFloat("caustica.rt.sdr.psychov24.shadows",
+                            "sdr.psychov24.shadows", 1.0f, 0.0f, 3.0f);
+            public static final FloatSetting PSYCHOV24_CONTRAST =
+                    clampedFloat("caustica.rt.sdr.psychov24.contrast",
+                            "sdr.psychov24.contrast", 1.0f, 0.1f, 3.0f);
+            public static final FloatSetting PSYCHOV24_PURITY =
+                    clampedFloat("caustica.rt.sdr.psychov24.purity",
+                            "sdr.psychov24.purity", 1.0f, 0.0f, 3.0f);
+            private Sdr() {
+            }
+
+            private static String sanitizeToneMapper(String value) {
+                return dev.comfyfluffy.caustica.rt.pipeline.RtToneMapping.SdrMode.parse(value).canonicalName();
+            }
+        }
+
         /** Render-frame timing + hitch logging. See {@code RtFrameStats}. */
         public static final class FrameStats {
             public static final BooleanSetting ENABLED = bool("caustica.rt.frameStats", "frame-stats.enabled", false);
@@ -826,7 +988,7 @@ public final class CausticaConfig {
             }
         }
 
-        /** Optional high-dynamic-range screenshot output paired with vanilla's F2 PNG. */
+        /** Optional scene-linear HDR screenshot output paired with vanilla's F2 PNG. */
         public static final class Screenshots {
             public static final BooleanSetting EXR_ENABLED =
                     bool("caustica.rt.screenshots.exr", "screenshots.exr-enabled", false);
@@ -855,17 +1017,45 @@ public final class CausticaConfig {
          * encoding both HDR10 swapchains and DLSS Frame Generation require; whatever pixel format the surface
          * pairs with that color space, commonly a 10-bit UNORM), falling back to SDR if the surface doesn't
          * advertise it. The ACES LUT owns scene-to-display mapping; {@code uiNits} places SDR-authored UI
-         * in that PQ output, while {@code peakNits} selects the LUT's mastering target.
+         * in that PQ output, while {@code peakNits} controls the display peak. PsychoV24 is the current
+         * tuned default; ACES 2.0 selects the nearest baked HDR LUT and BT.2390 uses the exact configured peak.
          */
         public static final class Hdr {
             public static final BooleanSetting ENABLED = bool("caustica.rt.hdr", "hdr.enabled", false);
             public static final FloatSetting UI_NITS =
                     clampedFloat("caustica.rt.hdr.uiNits", "hdr.ui-nits", 200.0f, 80.0f, 500.0f);
-
-            // ACES HDR LUTs are available only for these mastering targets.
-            public static final List<Integer> PEAK_NITS_STEPS = List.of(500, 1000, 2000, 4000);
+            public static final FloatSetting PAPER_WHITE_NITS =
+                    clampedFloat("caustica.rt.hdr.paperWhiteNits", "hdr.paper-white-nits", 200.0f, 80.0f, 500.0f);
+            public static final StringSetting TONE_MAPPER =
+                    string("caustica.rt.hdr.toneMapper", "hdr.tone-mapper", "psychov24",
+                            Hdr::sanitizeToneMapper);
+            public static final FloatSetting PSYCHOV24_COMPRESSION =
+                    clampedFloat("caustica.rt.hdr.psychov24.compression",
+                            "hdr.psychov24.compression", 0.0f, 0.0f, 8.0f);
+            public static final FloatSetting PSYCHOV24_GAMUT_COMPRESSION =
+                    clampedFloat("caustica.rt.hdr.psychov24.gamutCompression",
+                            "hdr.psychov24.gamut-compression", 1.0f, 0.0f, 1.0f);
+            public static final FloatSetting PSYCHOV24_HIGHLIGHTS =
+                    clampedFloat("caustica.rt.hdr.psychov24.highlights",
+                            "hdr.psychov24.highlights", 1.0f, 0.0f, 3.0f);
+            public static final FloatSetting PSYCHOV24_SHADOWS =
+                    clampedFloat("caustica.rt.hdr.psychov24.shadows",
+                            "hdr.psychov24.shadows", 1.0f, 0.0f, 3.0f);
+            public static final FloatSetting PSYCHOV24_CONTRAST =
+                    clampedFloat("caustica.rt.hdr.psychov24.contrast",
+                            "hdr.psychov24.contrast", 1.0f, 0.1f, 3.0f);
+            public static final FloatSetting PSYCHOV24_PURITY =
+                    clampedFloat("caustica.rt.hdr.psychov24.purity",
+                            "hdr.psychov24.purity", 1.0f, 0.0f, 3.0f);
+            public static final int PEAK_NITS_MIN = 50;
+            public static final int PEAK_NITS_MAX = 5000;
+            public static final int PEAK_NITS_STEP = 50;
+            // ACES 2.0 HDR LUTs are baked only for these mastering targets. Analytical HDR modes do
+            // not depend on this list and can use every 50-nit peak exposed by the control.
+            public static final List<Integer> ACES_LUT_NITS = List.of(500, 1000, 2000, 4000);
             public static final IntSetting PEAK_NITS =
-                    intChoice("caustica.rt.hdr.peakNits", "hdr.peak-nits", 1000, PEAK_NITS_STEPS);
+                    quantizedInt("caustica.rt.hdr.peakNits", "hdr.peak-nits", 1000,
+                            PEAK_NITS_MIN, PEAK_NITS_MAX, PEAK_NITS_STEP);
 
             // Surface capability and current swapchain state are separate: HDR controls remain available
             // while the swapchain is native SDR, so enabling HDR can recreate it in PQ.
@@ -910,6 +1100,43 @@ public final class CausticaConfig {
                 return UI_NITS.value();
             }
 
+            public static float paperWhiteNits() {
+                // Keep an invalid persisted paper-white value from exceeding the selected display peak.
+                // The raw setting remains intact so raising the peak restores the user's requested value.
+                return Math.min(PAPER_WHITE_NITS.value(), PEAK_NITS.value());
+            }
+
+            /** Highlight headroom above paper white, in paper-white-referred units. */
+            public static float headroom() {
+                return Math.max(1.0f, PEAK_NITS.value() / Math.max(1.0f, paperWhiteNits()));
+            }
+
+            /** Selects the nearest packaged ACES 2.0 HDR LUT for the requested display peak. */
+            public static int nearestAcesLutNits(int requestedNits) {
+                int nearest = ACES_LUT_NITS.get(0);
+                int nearestDistance = Math.abs(requestedNits - nearest);
+                for (int candidate : ACES_LUT_NITS) {
+                    int distance = Math.abs(requestedNits - candidate);
+                    if (distance < nearestDistance) {
+                        nearest = candidate;
+                        nearestDistance = distance;
+                    }
+                }
+                return nearest;
+            }
+
+            /** Peak represented by the currently active HDR transform and its presentation metadata. */
+            public static int effectivePeakNits() {
+                return dev.comfyfluffy.caustica.rt.pipeline.RtToneMapping.HdrMode.parse(TONE_MAPPER.get())
+                        == dev.comfyfluffy.caustica.rt.pipeline.RtToneMapping.HdrMode.ACES_2_0
+                        ? nearestAcesLutNits(PEAK_NITS.value())
+                        : PEAK_NITS.value();
+            }
+
+            private static String sanitizeToneMapper(String value) {
+                return dev.comfyfluffy.caustica.rt.pipeline.RtToneMapping.HdrMode.parse(value).canonicalName();
+            }
+
         }
     }
 
@@ -944,6 +1171,12 @@ public final class CausticaConfig {
         return new IntSetting(key, tomlPath, fallback, v -> choices.contains(v) ? v : fallback);
     }
 
+    private static IntSetting quantizedInt(String key, String tomlPath, int fallback,
+                                           int min, int max, int step) {
+        return new IntSetting(key, tomlPath, fallback,
+                v -> Math.clamp(Math.round(v / (float) step) * step, min, max));
+    }
+
     private static IntSetting clampedInt(String key, String tomlPath, int fallback, int min, int max) {
         return new IntSetting(key, tomlPath, fallback, v -> Math.clamp(v, min, max));
     }
@@ -956,8 +1189,19 @@ public final class CausticaConfig {
         return new FloatSetting(key, tomlPath, fallback, v -> v, v -> v, v -> Math.clamp(v, 1.0e-4, 1.0e4));
     }
 
+    private static FloatSetting percentile(String key, String tomlPath, float fallback) {
+        return new FloatSetting(key, tomlPath, fallback, v -> v, v -> v,
+                v -> Double.isFinite(v) ? Math.clamp(v, 0.0, 1.0) : fallback);
+    }
+
     private static FloatSetting clampedFloat(String key, String tomlPath, float fallback, float min, float max) {
         return new FloatSetting(key, tomlPath, fallback, v -> v, v -> v, v -> Math.clamp(v, min, max));
+    }
+
+    private static FloatSetting finiteClampedFloat(String key, String tomlPath, float fallback,
+                                                   float min, float max) {
+        return new FloatSetting(key, tomlPath, fallback, v -> v, v -> v,
+                v -> Double.isFinite(v) ? Math.clamp(v, min, max) : fallback);
     }
 
     private static FloatSetting radians(String key, String tomlPath, float fallbackDegrees) {

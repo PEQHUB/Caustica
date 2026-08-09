@@ -56,6 +56,7 @@ public final class RtFramePresenter {
     private static final long LOG_INTERVAL_NS = 1_000_000_000L;
 
     private long[] acquireSemaphores = new long[0];
+    private VulkanDevice acquireSemaphoreDevice;
     private int acquireCursor;
     private boolean failed;
 
@@ -98,6 +99,9 @@ public final class RtFramePresenter {
             long backbufferView, long srcImage, int srcW, int srcH, int generatedCount, boolean hdrBackbuffer) {
         pendingCount = 0;
         if (failed || swapchain == 0L || srcImage == 0L || generatedCount <= 0) {
+            return;
+        }
+        if (!hasPresentSemaphorePool(swapchainImages, presentSemaphores)) {
             return;
         }
         try {
@@ -257,38 +261,87 @@ public final class RtFramePresenter {
         enc.signalSemaphore(presentSem, 0L, 4096L);
     }
 
+    static boolean hasPresentSemaphorePool(LongList swapchainImages, long[] presentSemaphores) {
+        return swapchainImages != null && !swapchainImages.isEmpty()
+                && presentSemaphores != null && presentSemaphores.length >= swapchainImages.size();
+    }
+
     private void ensureCapacity(VulkanDevice device, int semaphoreCount, int generatedCount) {
+        if (acquireSemaphores.length < semaphoreCount) {
+            // destroy() clears pending arrays as part of the old-device teardown, so grow those arrays
+            // only after the teardown has completed.
+            destroy(acquireSemaphoreDevice != null ? acquireSemaphoreDevice : device);
+            acquireSemaphores = new long[semaphoreCount];
+            try (MemoryStack stack = MemoryStack.stackPush()) {
+                VkSemaphoreCreateInfo sci = VkSemaphoreCreateInfo.calloc(stack).sType$Default();
+                LongBuffer p = stack.mallocLong(1);
+                for (int i = 0; i < semaphoreCount; i++) {
+                    if (VK10.vkCreateSemaphore(device.vkDevice(), sci, null, p) != VK10.VK_SUCCESS) {
+                        throw new IllegalStateException("vkCreateSemaphore(fg acquire) failed");
+                    }
+                    acquireSemaphores[i] = p.get(0);
+                }
+            }
+            acquireSemaphoreDevice = device;
+            acquireCursor = 0;
+        }
+
         if (pendingImageIndex.length < generatedCount) {
             pendingImageIndex = new int[generatedCount];
             pendingPresentSem = new long[generatedCount];
         }
-        if (acquireSemaphores.length >= semaphoreCount) {
-            return;
-        }
-        destroy(device);
-        acquireSemaphores = new long[semaphoreCount];
-        try (MemoryStack stack = MemoryStack.stackPush()) {
-            VkSemaphoreCreateInfo sci = VkSemaphoreCreateInfo.calloc(stack).sType$Default();
-            LongBuffer p = stack.mallocLong(1);
-            for (int i = 0; i < semaphoreCount; i++) {
-                if (VK10.vkCreateSemaphore(device.vkDevice(), sci, null, p) != VK10.VK_SUCCESS) {
-                    throw new IllegalStateException("vkCreateSemaphore(fg acquire) failed");
-                }
-                acquireSemaphores[i] = p.get(0);
-            }
-        }
-        acquireCursor = 0;
     }
 
-    /** Destroy the acquire-semaphore pool (device teardown). */
+    /** Destroy the acquire-semaphore pool and clear all per-device presentation state. */
     public void destroy(VulkanDevice device) {
-        for (long sem : acquireSemaphores) {
-            if (sem != 0L) {
-                VK10.vkDestroySemaphore(device.vkDevice(), sem, null);
+        Throwable failure = null;
+        VulkanDevice owner = acquireSemaphoreDevice != null ? acquireSemaphoreDevice : device;
+        if (owner == null && acquireSemaphores.length != 0) {
+            failure = new IllegalStateException(
+                    "DLSS-FG acquire semaphores cannot be destroyed without their Vulkan device");
+        } else if (owner != null) {
+            for (int i = 0; i < acquireSemaphores.length; i++) {
+                long sem = acquireSemaphores[i];
+                if (sem != 0L) {
+                    try {
+                        VK10.vkDestroySemaphore(owner.vkDevice(), sem, null);
+                        acquireSemaphores[i] = 0L;
+                    } catch (Throwable t) {
+                        if (failure == null) {
+                            failure = new IllegalStateException("DLSS-FG acquire semaphore teardown failed", t);
+                        } else {
+                            failure.addSuppressed(t);
+                        }
+                    }
+                }
+            }
+            boolean allDestroyed = true;
+            for (long semaphore : acquireSemaphores) {
+                if (semaphore != 0L) {
+                    allDestroyed = false;
+                    break;
+                }
+            }
+            if (allDestroyed) {
+                acquireSemaphores = new long[0];
+                acquireSemaphoreDevice = null;
             }
         }
-        acquireSemaphores = new long[0];
-        acquireCursor = 0;
-        pendingCount = 0;
+        try {
+            acquireCursor = 0;
+            pendingImageIndex = new int[0];
+            pendingPresentSem = new long[0];
+            pendingCount = 0;
+            failed = false;
+            logWindowStartNs = 0L;
+            realFramesInWindow = 0;
+            generatedFramesInWindow = 0;
+            interpOkInWindow = 0;
+            interpFallbackInWindow = 0;
+        } finally {
+            if (failure != null) {
+                throw (RuntimeException) failure;
+            }
+        }
     }
 }

@@ -136,7 +136,7 @@ final class RtBlockOutlineFeature implements RtOverlayFeature {
             return false;
         }
 
-        ensureResources(ctx, width, height);
+        ensureResources(ctx, pool, width, height);
         float[] data = verts.toFloatArray();
         vbo = pool.acquireVertex(ctx, (long) data.length * Float.BYTES, "block outline vbo");
         MemoryUtil.memFloatBuffer(vbo.mapped, data.length).put(data);
@@ -178,7 +178,7 @@ final class RtBlockOutlineFeature implements RtOverlayFeature {
                 && (itemStack.canBreakBlockInAdventureMode(blockInWorld) || itemStack.canPlaceOnBlockInAdventureMode(blockInWorld));
     }
 
-    private void ensureResources(RtContext ctx, int width, int height) {
+    private void ensureResources(RtContext ctx, RtOverlayFramePool pool, int width, int height) {
         this.ctxRef = ctx;
         if (pipeline == null) {
             accelSet = RtOverlayPipelines.accelStructureSet(ctx, VK10.VK_SHADER_STAGE_FRAGMENT_BIT, "block outline");
@@ -204,18 +204,32 @@ final class RtBlockOutlineFeature implements RtOverlayFeature {
                     .build(ctx, "block outline composite");
         }
         if (msaaImage == null || msaaImage.width != width || msaaImage.height != height) {
-            if (msaaImage != null) {
-                msaaImage.destroy();
-            }
-            msaaImage = ctx.createTransientMsaaColorImage(width, height, RtWorldOverlay.TARGET_FORMAT,
+            RtImage replacement = ctx.createTransientMsaaColorImage(width, height, RtWorldOverlay.TARGET_FORMAT,
                     RtDeviceBringup.overlayMsaaSamples(), "block outline msaa " + width + "x" + height);
+            try {
+                if (msaaImage != null) {
+                    pool.awaitImageReplacementBoundary(ctx);
+                    msaaImage.destroy();
+                }
+                msaaImage = replacement;
+            } catch (Throwable t) {
+                replacement.destroy();
+                throw t;
+            }
         }
         if (resolvedMask == null || resolvedMask.width != width || resolvedMask.height != height) {
-            if (resolvedMask != null) {
-                resolvedMask.destroy();
-            }
-            resolvedMask = ctx.createStorageImage(width, height, RtWorldOverlay.TARGET_FORMAT,
+            RtImage replacement = ctx.createStorageImage(width, height, RtWorldOverlay.TARGET_FORMAT,
                     "block outline resolved mask " + width + "x" + height, VK10.VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
+            try {
+                if (resolvedMask != null) {
+                    pool.awaitImageReplacementBoundary(ctx);
+                    resolvedMask.destroy();
+                }
+                resolvedMask = replacement;
+            } catch (Throwable t) {
+                replacement.destroy();
+                throw t;
+            }
         }
         compositeSet.bind(ctx, resolvedMask.view);
     }
@@ -260,33 +274,47 @@ final class RtBlockOutlineFeature implements RtOverlayFeature {
 
     @Override
     public void destroy() {
-        if (ctxRef == null) {
+        RtContext context = ctxRef;
+        ctxRef = null;
+        if (context == null) {
             return;
         }
-        if (pipeline != null) {
-            pipeline.destroy(ctxRef.vk());
-            pipeline = null;
+        Throwable failure = null;
+        RtOverlayPipelines.Pipeline currentPipeline = pipeline;
+        pipeline = null;
+        if (currentPipeline != null) {
+            failure = RtWorldOverlay.teardownStep(failure, "block outline pipeline", () -> currentPipeline.destroy(context.vk()));
         }
-        if (accelSet != null) {
-            accelSet.destroy(ctxRef.vk());
-            accelSet = null;
+        RtOverlayPipelines.AccelStructureSet currentAccelSet = accelSet;
+        accelSet = null;
+        if (currentAccelSet != null) {
+            failure = RtWorldOverlay.teardownStep(failure, "block outline acceleration descriptor set",
+                    () -> currentAccelSet.destroy(context.vk()));
         }
-        if (compositePipeline != null) {
-            compositePipeline.destroy(ctxRef.vk());
-            compositePipeline = null;
+        RtOverlayPipelines.Pipeline composite = compositePipeline;
+        compositePipeline = null;
+        if (composite != null) {
+            failure = RtWorldOverlay.teardownStep(failure, "block outline composite pipeline",
+                    () -> composite.destroy(context.vk()));
         }
-        if (compositeSet != null) {
-            compositeSet.destroy(ctxRef.vk());
-            compositeSet = null;
+        RtOverlayPipelines.ReadOnlyImageSet imageSet = compositeSet;
+        compositeSet = null;
+        if (imageSet != null) {
+            failure = RtWorldOverlay.teardownStep(failure, "block outline composite descriptor set",
+                    () -> imageSet.destroy(context.vk()));
         }
-        if (msaaImage != null) {
-            msaaImage.destroy();
-            msaaImage = null;
+        RtImage image = msaaImage;
+        msaaImage = null;
+        if (image != null) {
+            failure = RtWorldOverlay.teardownStep(failure, "block outline MSAA image", image::destroy);
         }
-        if (resolvedMask != null) {
-            resolvedMask.destroy();
-            resolvedMask = null;
+        image = resolvedMask;
+        resolvedMask = null;
+        if (image != null) {
+            failure = RtWorldOverlay.teardownStep(failure, "block outline resolved mask", image::destroy);
         }
-        ctxRef = null;
+        if (failure != null) {
+            throw new IllegalStateException("Block outline teardown failed", failure);
+        }
     }
 }

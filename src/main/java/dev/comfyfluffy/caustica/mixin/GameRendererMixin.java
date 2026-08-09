@@ -5,6 +5,7 @@ import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
 import com.mojang.blaze3d.pipeline.RenderTarget;
 import com.mojang.blaze3d.systems.RenderSystem;
 import com.mojang.blaze3d.vulkan.VulkanDevice;
+import dev.comfyfluffy.caustica.client.UltraScreenshot;
 import dev.comfyfluffy.caustica.client.VanillaRenderController;
 import dev.comfyfluffy.caustica.client.WorldRenderScaler;
 import dev.comfyfluffy.caustica.rt.RtComposite;
@@ -12,6 +13,7 @@ import dev.comfyfluffy.caustica.rt.RtReflex;
 import dev.comfyfluffy.caustica.rt.RtUiOverlay;
 import dev.comfyfluffy.caustica.rt.overlay.RtWorldOverlay;
 import net.minecraft.client.DeltaTracker;
+import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.GameRenderer;
 import net.minecraft.client.renderer.SubmitNodeStorage;
 import net.minecraft.client.renderer.feature.FeatureRenderDispatcher;
@@ -62,6 +64,7 @@ public abstract class GameRendererMixin {
 	@Inject(method = "render(Lnet/minecraft/client/DeltaTracker;Z)V", at = @At("TAIL"))
 	private void caustica$endRtFrameStats(DeltaTracker deltaTracker, boolean advanceGameTime, CallbackInfo ci) {
 		RtComposite.INSTANCE.endFrame();
+		UltraScreenshot.INSTANCE.frameRendered(Minecraft.getInstance());
 	}
 
 	@Inject(method = "render(Lnet/minecraft/client/DeltaTracker;Z)V",
@@ -123,7 +126,12 @@ public abstract class GameRendererMixin {
 					target = "Lnet/minecraft/client/renderer/fog/FogRenderer;endFrame()V",
 					shift = At.Shift.AFTER))
 	private void caustica$endWorldScale(DeltaTracker deltaTracker, boolean advanceGameTime, CallbackInfo ci) {
-		WorldRenderScaler.INSTANCE.endSafetyNet(this.mainRenderTarget);
+		try {
+			WorldRenderScaler.INSTANCE.endSafetyNet(this.mainRenderTarget);
+		} finally {
+			// An early renderLevel exit can move the only RT composite into this safety-net seam.
+			RtComposite.INSTANCE.finishGraphicsUse();
+		}
 	}
 
 	// Capture the frame's camera for the RT composite at the exact point the level projection is built
@@ -140,7 +148,7 @@ public abstract class GameRendererMixin {
 
 		var cameraState = this.gameRenderState().levelRenderState.cameraRenderState;
 		RtComposite.INSTANCE.captureFrame(projection, cameraState.viewRotationMatrix,
-				cameraState.pos.x, cameraState.pos.y, cameraState.pos.z);
+				cameraState.pos.x, cameraState.pos.y, cameraState.pos.z, cameraState.fogData);
 		VanillaRenderController.INSTANCE.markProjectionCaptured();
 		return projection;
 	}
@@ -157,10 +165,10 @@ public abstract class GameRendererMixin {
 					ordinal = 1,
 					shift = At.Shift.AFTER))
 	private void caustica$endWorldScaleBeforeHand(DeltaTracker deltaTracker, CallbackInfo ci) {
-		WorldRenderScaler.INSTANCE.end(this.mainRenderTarget);
-		// Fold RT world overlays into the shared transparent UI image before hand/screen effects and the GUI
-		// add their own layers. RtUiOverlay then performs the single final blend to SDR/HDR.
 		try {
+			WorldRenderScaler.INSTANCE.end(this.mainRenderTarget);
+			// Fold RT world overlays into the shared transparent UI image before hand/screen effects and the GUI
+			// add their own layers. RtUiOverlay then performs the single final blend to SDR/HDR.
 			RtWorldOverlay.INSTANCE.compositeIntoUiOverlay(
 					this.mainRenderTarget, RtComposite.INSTANCE.currentGraphicsUse());
 		} finally {

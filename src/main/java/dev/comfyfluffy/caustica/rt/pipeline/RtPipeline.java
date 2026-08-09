@@ -142,6 +142,18 @@ public final class RtPipeline {
                         + deviceLimit);
             }
         }
+        long dsl = 0L;
+        long pool = 0L;
+        long layout = 0L;
+        long pipeline = 0L;
+        long bindlessLayout = 0L;
+        long bindlessPool = 0L;
+        long[] sets = null;
+        long[] mGen = null;
+        long[] mMiss = null;
+        long mHit = 0L;
+        long mAhit = 0L;
+        RtBuffer sbt = null;
         try (MemoryStack stack = MemoryStack.stackPush()) {
             VkDescriptorSetLayoutBinding.Buffer binds = VkDescriptorSetLayoutBinding.calloc(
                     WORLD_SET_BINDING_COUNT, stack);
@@ -154,7 +166,7 @@ public final class RtPipeline {
             binds.get(WORLD_BLOCK_ALBEDO).binding(WORLD_BLOCK_ALBEDO)
                     .descriptorType(VK10.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
                     .descriptorCount(1).stageFlags(atlasStages);
-            for (int binding = WORLD_G_NORMAL; binding <= WORLD_G_SPEC_MOTION; binding++) {
+            for (int binding = WORLD_G_NORMAL; binding <= WORLD_G_SKY_CLASSIFICATION; binding++) {
                 binds.get(binding).binding(binding).descriptorType(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
                         .descriptorCount(1).stageFlags(VK_SHADER_STAGE_RAYGEN_BIT_KHR);
             }
@@ -168,10 +180,13 @@ public final class RtPipeline {
                     .descriptorType(VK10.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
                     .descriptorCount(1)
                     .stageFlags(VK_SHADER_STAGE_MISS_BIT_KHR | VK_SHADER_STAGE_RAYGEN_BIT_KHR);
+            binds.get(WORLD_END_SKY).binding(WORLD_END_SKY)
+                    .descriptorType(VK10.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
+                    .descriptorCount(1).stageFlags(VK_SHADER_STAGE_MISS_BIT_KHR);
             VkDescriptorSetLayoutCreateInfo dslci = VkDescriptorSetLayoutCreateInfo.calloc(stack).sType$Default().pBindings(binds);
             LongBuffer p = stack.mallocLong(1);
             check(VK10.vkCreateDescriptorSetLayout(vk, dslci, null, p), "vkCreateDescriptorSetLayout");
-            long dsl = p.get(0);
+            dsl = p.get(0);
             RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT, dsl, label + " descriptor set layout");
 
             VkDescriptorPoolSize.Buffer poolSizes = VkDescriptorPoolSize.calloc(3, stack);
@@ -182,7 +197,7 @@ public final class RtPipeline {
                     .descriptorCount(RING * WORLD_SET_SAMPLER_COUNT);
             VkDescriptorPoolCreateInfo dpci = VkDescriptorPoolCreateInfo.calloc(stack).sType$Default().maxSets(RING).pPoolSizes(poolSizes);
             check(VK10.vkCreateDescriptorPool(vk, dpci, null, p), "vkCreateDescriptorPool");
-            long pool = p.get(0);
+            pool = p.get(0);
             RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_DESCRIPTOR_POOL, pool, label + " descriptor pool");
             LongBuffer layouts = stack.mallocLong(RING);
             for (int i = 0; i < RING; i++) {
@@ -192,14 +207,14 @@ public final class RtPipeline {
                     .descriptorPool(pool).pSetLayouts(layouts);
             LongBuffer pSet = stack.mallocLong(RING);
             check(VK10.vkAllocateDescriptorSets(vk, dsai, pSet), "vkAllocateDescriptorSets");
-            long[] sets = new long[RING];
+            sets = new long[RING];
             pSet.get(sets);
             for (int i = 0; i < RING; i++) {
                 RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_DESCRIPTOR_SET, sets[i], label + " descriptor set " + i);
             }
 
             // Optional bindless set (set 1): entity albedo plus canonical material page arrays.
-            long bindlessLayout = 0L, bindlessPool = 0L, bindlessSet = 0L;
+            long bindlessSet = 0L;
             if (bindlessTextures > 0) {
                 // Entity albedo and canonical material pages have independent index spaces. All arrays
                 // use the configured capacity here; material pages occupy compact indices from zero.
@@ -252,7 +267,7 @@ public final class RtPipeline {
                 plci.pPushConstantRanges(pcr);
             }
             check(VK10.vkCreatePipelineLayout(vk, plci, null, p), "vkCreatePipelineLayout");
-            long layout = p.get(0);
+            layout = p.get(0);
             RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_PIPELINE_LAYOUT, layout, label + " pipeline layout");
 
             // Stages: one per rgen entry, one miss per rmiss entry, the closest-hit, then (optionally)
@@ -268,19 +283,19 @@ public final class RtPipeline {
             int chitStage = raygenCount + missCount;
             int ahitStage = chitStage + 1;
             int stageCount = raygenCount + missCount + 1 + (hasAhit ? 1 : 0);
-            long[] mGen = new long[raygenCount];
+            mGen = new long[raygenCount];
             for (int g = 0; g < raygenCount; g++) {
                 mGen[g] = loadModule(vk, stack, rgen[g]);
                 RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_SHADER_MODULE, mGen[g], label + " " + rgen[g]);
             }
-            long[] mMiss = new long[missCount];
+            mMiss = new long[missCount];
             for (int m = 0; m < missCount; m++) {
                 mMiss[m] = loadModule(vk, stack, rmiss[m]);
                 RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_SHADER_MODULE, mMiss[m], label + " " + rmiss[m]);
             }
-            long mHit = loadModule(vk, stack, rchit);
+            mHit = loadModule(vk, stack, rchit);
             RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_SHADER_MODULE, mHit, label + " " + rchit);
-            long mAhit = hasAhit ? loadModule(vk, stack, rahit) : 0L;
+            mAhit = hasAhit ? loadModule(vk, stack, rahit) : 0L;
             if (hasAhit) {
                 RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_SHADER_MODULE, mAhit, label + " " + rahit);
             }
@@ -323,18 +338,22 @@ public final class RtPipeline {
             LongBuffer pPipeline = stack.mallocLong(1);
             check(vkCreateRayTracingPipelinesKHR(vk, VK10.VK_NULL_HANDLE, VK10.VK_NULL_HANDLE, rtpci, null, pPipeline),
                     "vkCreateRayTracingPipelinesKHR");
-            long pipeline = pPipeline.get(0);
+            pipeline = pPipeline.get(0);
             RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_PIPELINE, pipeline, label);
 
             for (int g = 0; g < raygenCount; g++) {
                 VK10.vkDestroyShaderModule(vk, mGen[g], null);
+                mGen[g] = 0L;
             }
             for (int m = 0; m < missCount; m++) {
                 VK10.vkDestroyShaderModule(vk, mMiss[m], null);
+                mMiss[m] = 0L;
             }
             VK10.vkDestroyShaderModule(vk, mHit, null);
+            mHit = 0L;
             if (hasAhit) {
                 VK10.vkDestroyShaderModule(vk, mAhit, null);
+                mAhit = 0L;
             }
 
             // SBT: one record per group. Over-align the stride so every region start is base-aligned and
@@ -348,7 +367,7 @@ public final class RtPipeline {
                 throw new UnsupportedOperationException("SBT stride " + stride + " exceeds maxShaderGroupStride "
                         + Integer.toUnsignedLong(ctx.maxShaderGroupStride()));
             }
-            RtBuffer sbt = ctx.createAlignedBuffer(stride * groupCount,
+            sbt = ctx.createAlignedBuffer(stride * groupCount,
                     VK_BUFFER_USAGE_SHADER_BINDING_TABLE_BIT_KHR, true,
                     label + " shader binding table", ctx.shaderGroupBaseAlignment());
             for (int g = 0; g < groupCount; g++) {
@@ -358,7 +377,69 @@ public final class RtPipeline {
             return new RtPipeline(ctx, dsl, pool, sets, layout, pipeline, sbt, stride,
                     raygenCount, missCount, hitGroupCount, pushConstantSize, pcStages,
                     bindlessLayout, bindlessPool, bindlessSet);
+        } catch (Throwable t) {
+            Throwable cleanupFailure = null;
+            RtBuffer sbtToDestroy = sbt;
+            if (sbtToDestroy != null) cleanupFailure = cleanup(cleanupFailure, sbtToDestroy::destroy);
+            long pipelineHandle = pipeline;
+            if (pipelineHandle != 0L) cleanupFailure = cleanup(cleanupFailure,
+                    () -> VK10.vkDestroyPipeline(vk, pipelineHandle, null));
+            long ahitHandle = mAhit;
+            if (ahitHandle != 0L) cleanupFailure = cleanup(cleanupFailure,
+                    () -> VK10.vkDestroyShaderModule(vk, ahitHandle, null));
+            long hitHandle = mHit;
+            if (hitHandle != 0L) cleanupFailure = cleanup(cleanupFailure,
+                    () -> VK10.vkDestroyShaderModule(vk, hitHandle, null));
+            if (mMiss != null) {
+                for (long module : mMiss) {
+                    if (module != 0L) {
+                        long handle = module;
+                        cleanupFailure = cleanup(cleanupFailure,
+                                () -> VK10.vkDestroyShaderModule(vk, handle, null));
+                    }
+                }
+            }
+            if (mGen != null) {
+                for (long module : mGen) {
+                    if (module != 0L) {
+                        long handle = module;
+                        cleanupFailure = cleanup(cleanupFailure,
+                                () -> VK10.vkDestroyShaderModule(vk, handle, null));
+                    }
+                }
+            }
+            long layoutHandle = layout;
+            if (layoutHandle != 0L) cleanupFailure = cleanup(cleanupFailure,
+                    () -> VK10.vkDestroyPipelineLayout(vk, layoutHandle, null));
+            long bindlessPoolHandle = bindlessPool;
+            if (bindlessPoolHandle != 0L) cleanupFailure = cleanup(cleanupFailure,
+                    () -> VK10.vkDestroyDescriptorPool(vk, bindlessPoolHandle, null));
+            long bindlessLayoutHandle = bindlessLayout;
+            if (bindlessLayoutHandle != 0L) cleanupFailure = cleanup(cleanupFailure,
+                    () -> VK10.vkDestroyDescriptorSetLayout(vk, bindlessLayoutHandle, null));
+            long poolHandle = pool;
+            if (poolHandle != 0L) cleanupFailure = cleanup(cleanupFailure,
+                    () -> VK10.vkDestroyDescriptorPool(vk, poolHandle, null));
+            long dslHandle = dsl;
+            if (dslHandle != 0L) cleanupFailure = cleanup(cleanupFailure,
+                    () -> VK10.vkDestroyDescriptorSetLayout(vk, dslHandle, null));
+            if (cleanupFailure != null) {
+                t.addSuppressed(cleanupFailure);
+            }
+            throw t;
         }
+    }
+
+    private static Throwable cleanup(Throwable failure, Runnable action) {
+        try {
+            action.run();
+        } catch (Throwable t) {
+            if (failure == null) {
+                return t;
+            }
+            failure.addSuppressed(t);
+        }
+        return failure;
     }
 
     private static boolean hitGroupUsesAnyHit(int relativeHitGroup) {
@@ -444,6 +525,11 @@ public final class RtPipeline {
 
     public boolean hasSkyAtlas() {
         return true;
+    }
+
+    /** Bind Minecraft's standalone End sky texture for dimension-specific ray misses. */
+    public void setEndSkyTexture(long imageView, long sampler) {
+        writeAtlasBinding(WORLD_END_SKY, imageView, sampler);
     }
 
     /** Bind this frame's atmosphere LUTs (see {@link RtSkyLut}); both share the LUT's own sampler. */
