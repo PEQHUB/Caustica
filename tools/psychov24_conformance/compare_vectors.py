@@ -51,6 +51,14 @@ def main():
     for ref, actual in zip(reference, candidate):
         if ref["case"] != actual["case"]:
             raise ValueError(f"case order differs: {ref['case']} != {actual['case']}")
+        if ref["class"].strip().lower() != actual["class"].strip().lower():
+            raise ValueError(f"classification differs in case {ref['case']}")
+        for field in ref:
+            if field.startswith(("input_", "param_", "parameter_")):
+                expected_input = number(ref, field, args.reference)
+                observed_input = number(actual, field, args.candidate)
+                if expected_input != observed_input:
+                    raise ValueError(f"{field} differs in case {ref['case']}")
         limit = EXTREME_TOLERANCE if ref["class"].lower() == "extreme" else ORDINARY_TOLERANCE
         input_vector = tuple(number(ref, f"input_{channel}", args.reference) for channel in CHANNELS)
         for channel in CHANNELS:

@@ -65,12 +65,13 @@ public final class RtDlssRr {
 
     public void resetFailureLatch() {
         boolean canRetry = true;
-        if (initialized && !isNull(feature)) {
+        if (!isNull(feature)) {
             try {
-                if (((GpuDeviceAccessor) RenderSystem.getDevice()).caustica$getBackend() instanceof VulkanDevice device) {
-                    releaseFeature(device);
-                } else {
+                VulkanDevice device = featureDevice != null ? featureDevice : currentDeviceOrNull();
+                if (device == null) {
                     canRetry = false;
+                } else {
+                    releaseFeature(device);
                 }
             } catch (Throwable t) {
                 canRetry = false;
@@ -101,6 +102,7 @@ public final class RtDlssRr {
 
     private NgxLibrary lib;
     private MemorySegment feature = MemorySegment.NULL;
+    private VulkanDevice featureDevice;
     private boolean initialized;
     private boolean failed;
     private boolean featureInvalid;
@@ -229,7 +231,8 @@ public final class RtDlssRr {
         featureInvalid = !isNull(feature);
         if (featureInvalid) {
             try {
-                if (((GpuDeviceAccessor) RenderSystem.getDevice()).caustica$getBackend() instanceof VulkanDevice device) {
+                VulkanDevice device = featureDevice != null ? featureDevice : currentDeviceOrNull();
+                if (device != null) {
                     releaseFeature(device);
                     featureInvalid = false;
                 }
@@ -290,6 +293,7 @@ public final class RtDlssRr {
                 featureDisplayHeight = displayHeight;
                 featureQuality = quality;
                 featurePreset = preset;
+                featureDevice = device;
                 resetHistory = true; // a fresh feature has no temporal history
                 CausticaMod.LOGGER.info("DLSS-RR feature created: {}x{} -> {}x{} (quality {}, preset {})",
                         renderWidth, renderHeight, displayWidth, displayHeight, quality, preset);
@@ -328,32 +332,66 @@ public final class RtDlssRr {
      * teardown ({@code NgxRuntime.shutdown()} in {@code CausticaClient.shutdownRt}), so FG can keep using NGX.
      */
     public void destroy() {
+        Throwable failure = null;
         try {
-            if (((GpuDeviceAccessor) RenderSystem.getDevice()).caustica$getBackend() instanceof VulkanDevice device) {
+            if (!isNull(feature)) {
+                VulkanDevice device = featureDevice != null ? featureDevice : currentDeviceOrNull();
+                if (device == null) {
+                    throw new IllegalStateException("DLSS-RR feature owner device is unavailable");
+                }
                 releaseFeature(device);
             }
-        } finally {
-            initialized = false;
+        } catch (Throwable t) {
+            failure = new IllegalStateException("DLSS-RR teardown failed", t);
+        }
+        initialized = false;
+        if (isNull(feature)) {
             lib = null;
-            feature = MemorySegment.NULL;
+            featureDevice = null;
             featureInvalid = false;
             failed = false;
             resetHistory = false;
             lastFrameNanos = 0L;
             loggedAvailable = false;
+        } else {
+            failed = true;
+            featureInvalid = true;
         }
+        if (failure != null) {
+            throw (RuntimeException) failure;
+        }
+    }
+
+    private static VulkanDevice currentDeviceOrNull() {
+        RtContext ctx = RtContext.currentOrNull();
+        if (ctx != null) {
+            return ctx.device();
+        }
+        if (RenderSystem.getDevice() instanceof GpuDeviceAccessor accessor
+                && accessor.caustica$getBackend() instanceof VulkanDevice device) {
+            return device;
+        }
+        return null;
     }
 
     private void releaseFeature(VulkanDevice device) {
         if (!isNull(feature)) {
+            VulkanDevice owner = featureDevice != null ? featureDevice : device;
+            if (owner == null) {
+                throw new IllegalStateException("DLSS-RR feature owner device is unavailable");
+            }
+            if (lib == null) {
+                throw new IllegalStateException("DLSS-RR feature library is unavailable");
+            }
             RtContext ctx = RtContext.currentOrNull();
-            if (ctx != null && ctx.device() == device) {
+            if (ctx != null && ctx.device() == owner) {
                 ctx.waitIdle();
             } else {
-                VK10.vkDeviceWaitIdle(device.vkDevice());
+                VK10.vkDeviceWaitIdle(owner.vkDevice());
             }
             lib.release(feature);
             feature = MemorySegment.NULL;
+            featureDevice = null;
         }
         featureRenderWidth = -1;
         featureRenderHeight = -1;

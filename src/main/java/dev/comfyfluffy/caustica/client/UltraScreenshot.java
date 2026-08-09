@@ -185,10 +185,13 @@ public final class UltraScreenshot {
     }
 
     private void restoreForOutput() {
-        restoreState(true);
+        Throwable failure = restoreState(true);
+        if (failure != null) {
+            throw new IllegalStateException("Ultra screenshot cleanup failed", failure);
+        }
     }
 
-    private void restoreState(boolean retainLease) {
+    private Throwable restoreState(boolean retainLease) {
         Throwable failure = null;
         try {
             CaptureSession.end();
@@ -211,6 +214,7 @@ public final class UltraScreenshot {
         if (failure != null) {
             CausticaMod.LOGGER.error("Ultra screenshot cleanup failed", failure);
         }
+        return failure;
     }
 
     private static Throwable appendFailure(Throwable first, Throwable next) {

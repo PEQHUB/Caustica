@@ -101,7 +101,13 @@ public final class RtExposure {
             float evApplied
     ) {}
 
-    /** Snapshot the exposure state used by the residual-exposed EXR capture. */
+    /**
+     * Snapshot the controller after the capture copy has completed.
+     *
+     * <p>{@code residualExposure} is read from the same 1x1 GPU image that the display shader samples.
+     * The absolute multiplier can therefore be reconstructed exactly as
+     * {@code preExposure * residualExposure}, even when auto exposure corrected a stale prediction.
+     */
     public CaptureMetadata captureMetadata(float residualExposure) {
         if (!Float.isFinite(residualExposure) || residualExposure <= 0.0f) {
             throw new IllegalArgumentException("Invalid residual exposure " + residualExposure);

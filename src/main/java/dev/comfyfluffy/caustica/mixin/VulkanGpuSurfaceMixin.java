@@ -108,6 +108,9 @@ public abstract class VulkanGpuSurfaceMixin {
 	@Unique
 	private int caustica$metadataPeakNits = -1;
 
+	@Unique
+	private boolean caustica$fifoPresent = true;
+
 	@Inject(method = "<init>(Lcom/mojang/blaze3d/vulkan/VulkanDevice;J)V", at = @At("TAIL"))
 	private void caustica$logHdrCapabilities(VulkanDevice device, long windowHandle, CallbackInfo ci) {
 		try {
@@ -256,6 +259,7 @@ public abstract class VulkanGpuSurfaceMixin {
 	@Inject(method = "configure", at = @At("TAIL"))
 	private void caustica$applySwapchainExtensionState(GpuSurface.Configuration config, CallbackInfo ci) {
 		RtFramePresenter.INSTANCE.onSwapchainRecreated();
+		caustica$fifoPresent = config.presentMode() == GpuSurface.PresentMode.FIFO;
 		caustica$applyHdrMetadataIfNeeded();
 		if (RtDeviceBringup.reflexEnabled()) {
 			RtReflex.INSTANCE.applySleepMode(this.device.vkDevice(), this.swapchain);
@@ -263,10 +267,9 @@ public abstract class VulkanGpuSurfaceMixin {
 		// DLSS-FG diagnostic: MAILBOX/IMMEDIATE present modes let a later present silently replace/skip an
 		// earlier queued-but-not-yet-scanned-out one, which would drop FG's generated frame before the
 		// display ever shows it — even though our vkQueuePresentKHR call itself reports success. FIFO is the
-		// only mode that guarantees every queued present gets its own vblank. Log once per (re)configure so
-		// this is checkable without guessing at the in-game V-Sync setting.
-		if (dev.comfyfluffy.caustica.rt.pipeline.RtDlssFg.enabled()) {
-			CausticaMod.LOGGER.info("DLSS-FG: swapchain present mode = {} (FIFO required for generated frames "
+		// only mode that guarantees every queued present gets its own vblank; generated presents are refused below.
+		if (dev.comfyfluffy.caustica.rt.pipeline.RtDlssFg.enabled() && !caustica$fifoPresent) {
+			CausticaMod.LOGGER.warn("DLSS-FG disabled for non-FIFO swapchain present mode: {} (FIFO required for generated frames "
 					+ "to actually display; MAILBOX/IMMEDIATE will silently drop them — enable V-Sync if not FIFO)",
 					config.presentMode());
 		}
@@ -383,7 +386,7 @@ public abstract class VulkanGpuSurfaceMixin {
 	 */
 	@Inject(method = "blitFromTexture", at = @At("TAIL"))
 	private void caustica$presentGeneratedFrames(CommandEncoderBackend commandEncoder, GpuTextureView textureView, CallbackInfo ci) {
-		if (this.currentImageIndex < 0 || !RtFramePresenter.INSTANCE.isActive()) {
+		if (this.currentImageIndex < 0 || !caustica$fifoPresent || !RtFramePresenter.INSTANCE.isActive()) {
 			return;
 		}
 		long srcImage = textureView.texture() instanceof com.mojang.blaze3d.vulkan.VulkanGpuTexture t ? t.vkImage() : 0L;
@@ -407,7 +410,7 @@ public abstract class VulkanGpuSurfaceMixin {
 	 */
 	@Unique
 	private void caustica$presentGeneratedFramesHdr(VulkanCommandEncoder enc, RtComposite rt) {
-		if (this.currentImageIndex < 0 || !RtFramePresenter.INSTANCE.isActive()) {
+		if (this.currentImageIndex < 0 || !caustica$fifoPresent || !RtFramePresenter.INSTANCE.isActive()) {
 			return;
 		}
 		long hdrView = rt.hdrBackbufferView();

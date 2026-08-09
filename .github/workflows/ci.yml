@@ -29,7 +29,7 @@ on:
       - "src/**"
 
 env:
-  DLSS_SDK_REF: v310.7.0
+  DLSS_SDK_REF: a291cc7d2cc642a51566f3dfd5376f635cd1b284
   DLSS_SDK_PATH: third_party/DLSS
   NGX_SHIM_CONFIG: release
   NGX_VENDOR_CONFIG: rel

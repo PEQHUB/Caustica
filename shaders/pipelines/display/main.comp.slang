@@ -1,8 +1,7 @@
 // Maps the display-res scene-linear ACEScg RT image to sRGB SDR and, when enabled, PQ/BT.2020 HDR,
 // via baked ACES 2.0 display-transform LUTs (see tools/bake_display_lut.py). Tonemap seam: the path tracer and DLSS-RR use scene-linear
-// ACEScg; exposure is applied from the compositor-owned 1x1 image right here. ACES output applies the
-// selected scene-referred look (LMT), while local SDR/HDR modes intentionally consume the exposed signal
-// directly for their analytical curves.
+// ACEScg; exposure is applied from the compositor-owned 1x1 image right here. Every output mode applies
+// the selected scene-referred look (LMT) before its display-specific transform.
 
 import display_common;
 import bindings;
@@ -335,14 +334,10 @@ void main(uint3 dispatchId : SV_DispatchThreadID) {
     }
     float3 exposedAcesCg = sceneLinearAcesCg * exposure;
     exposedAcesCg += sampleBloom(pix, w, h) * max(pc.bloomStrength, 0.0);
-    float3 lookedAcesCg = exposedAcesCg;
-    bool acesOutput = pc.sdrMode == 0 || (pc.hdrEnabled != 0 && pc.hdrMode == 0);
-    if (acesOutput) {
-        lookedAcesCg = applyLook(exposedAcesCg);
-    }
+    float3 lookedAcesCg = applyLook(exposedAcesCg);
     float3 sdrColor = pc.sdrMode == 0
             ? tonemap(lookedAcesCg)
-            : localSdrToneMap(exposedAcesCg);
+            : localSdrToneMap(lookedAcesCg);
     if (pc.hdrEnabled == 0 && pc.skybox == 1u && coverage >= 0.999) {
         sdrColor = ditherSkySdr(sdrColor, pix);
     }
@@ -351,6 +346,6 @@ void main(uint3 dispatchId : SV_DispatchThreadID) {
     if (pc.hdrEnabled != 0) {
         hdrImage[pix] = pc.hdrMode == 0
                 ? float4(tonemapHdr(lookedAcesCg), 1.0)
-                : float4(displayGammaHdr(localHdrToneMap(exposedAcesCg)), 1.0);
+                : float4(displayGammaHdr(localHdrToneMap(lookedAcesCg)), 1.0);
     }
 }

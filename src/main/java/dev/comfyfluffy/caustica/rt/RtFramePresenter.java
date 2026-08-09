@@ -109,14 +109,18 @@ public final class RtFramePresenter {
         if (!hasPresentSemaphorePool(swapchainImages, presentSemaphores)) {
             return;
         }
+        int usableGeneratedCount = clampGeneratedCount(generatedCount, swapchainImages.size());
+        if (usableGeneratedCount == 0) {
+            return;
+        }
         try {
-            ensureCapacity(device, swapchainImages.size() + 1, generatedCount);
-            for (int i = 0; i < generatedCount; i++) {
+            ensureCapacity(device, swapchainImages.size() + 1, usableGeneratedCount);
+            for (int i = 0; i < usableGeneratedCount; i++) {
                 // null = no captured RT frame this tick (menu/loading/transition — routine, not a bug): fall
                 // back to duplicating the real frame for just this one frame. A genuine FG failure instead
                 // throws, caught below, which disables FG for the session.
                 RtImage interp = RtComposite.INSTANCE.fgInterpolate(enc, backbufferView, srcImage,
-                        swapW, swapH, i + 1, generatedCount, hdrBackbuffer);
+                        swapW, swapH, i + 1, usableGeneratedCount, hdrBackbuffer);
                 if (interp != null) {
                     interpOkInWindow++;
                 } else {
@@ -279,6 +283,10 @@ public final class RtFramePresenter {
                 && presentSemaphores != null && presentSemaphores.length >= swapchainImages.size();
     }
 
+    static int clampGeneratedCount(int requested, int swapchainImageCount) {
+        return Math.clamp(requested, 0, Math.max(0, swapchainImageCount - 1));
+    }
+
     private void ensureCapacity(VulkanDevice device, int semaphoreCount, int generatedCount) {
         if (acquireSemaphores.length < semaphoreCount) {
             // destroy() clears pending arrays as part of the old-device teardown, so grow those arrays
@@ -313,31 +321,43 @@ public final class RtFramePresenter {
             failure = new IllegalStateException(
                     "DLSS-FG acquire semaphores cannot be destroyed without their Vulkan device");
         } else if (owner != null) {
-            for (int i = 0; i < acquireSemaphores.length; i++) {
-                long sem = acquireSemaphores[i];
-                if (sem != 0L) {
-                    try {
-                        VK10.vkDestroySemaphore(owner.vkDevice(), sem, null);
-                        acquireSemaphores[i] = 0L;
-                    } catch (Throwable t) {
-                        if (failure == null) {
-                            failure = new IllegalStateException("DLSS-FG acquire semaphore teardown failed", t);
-                        } else {
-                            failure.addSuppressed(t);
+            try {
+                RtContext ctx = RtContext.currentOrNull();
+                if (ctx != null && ctx.device() == owner) {
+                    ctx.waitIdle();
+                } else if (VK10.vkDeviceWaitIdle(owner.vkDevice()) != VK10.VK_SUCCESS) {
+                    throw new IllegalStateException("vkDeviceWaitIdle failed before DLSS-FG semaphore teardown");
+                }
+            } catch (Throwable t) {
+                failure = new IllegalStateException("DLSS-FG semaphore teardown could not quiesce the device", t);
+            }
+            if (failure == null) {
+                for (int i = 0; i < acquireSemaphores.length; i++) {
+                    long sem = acquireSemaphores[i];
+                    if (sem != 0L) {
+                        try {
+                            VK10.vkDestroySemaphore(owner.vkDevice(), sem, null);
+                            acquireSemaphores[i] = 0L;
+                        } catch (Throwable t) {
+                            if (failure == null) {
+                                failure = new IllegalStateException("DLSS-FG acquire semaphore teardown failed", t);
+                            } else {
+                                failure.addSuppressed(t);
+                            }
                         }
                     }
                 }
-            }
-            boolean allDestroyed = true;
-            for (long semaphore : acquireSemaphores) {
-                if (semaphore != 0L) {
-                    allDestroyed = false;
-                    break;
+                boolean allDestroyed = true;
+                for (long semaphore : acquireSemaphores) {
+                    if (semaphore != 0L) {
+                        allDestroyed = false;
+                        break;
+                    }
                 }
-            }
-            if (allDestroyed) {
-                acquireSemaphores = new long[0];
-                acquireSemaphoreDevice = null;
+                if (allDestroyed) {
+                    acquireSemaphores = new long[0];
+                    acquireSemaphoreDevice = null;
+                }
             }
         }
         try {

@@ -584,6 +584,13 @@ if (requestedNgxPlatformsRaw.size() == 1 && requestedNgxPlatformsRaw[0].equalsIg
 
 def dlssSdkEnv = providers.environmentVariable("DLSS_SDK")
 def dlssSdkRootProvider = dlssSdkEnv.map { file(it) }
+def expectedDlssSdkCommit = "a291cc7d2cc642a51566f3dfd5376f635cd1b284"
+def expectedDlssSdkHeaderHashes = [
+	"include/nvsdk_ngx_defs.h": "a9481cbc78d53ee56639f0a573ec095c6c1ea1e5f296d139c20c42bf342c2e1b",
+	"include/nvsdk_ngx_defs_dlssd.h": "019036e5157c82431cb6aba7c0ff76110dae196300a3ea211d3b75376e137e1d",
+	"include/nvsdk_ngx_defs_dlssg.h": "c45756c6e97c524365ebaa74362b6b0aadcf57b4320f6e504d09047e0cf16a8c",
+	"include/nvsdk_ngx_defs_vk.h": "43b821c5d297d86165e6d2f96a476f5c30f2158c7d5a0451425c6b927abfec88"
+]
 
 def releaseToolchainReceipt = layout.buildDirectory.file("reproducibility/release-toolchain.properties")
 def releasePreflight = tasks.register("releasePreflight") {
@@ -672,11 +679,19 @@ def releasePreflight = tasks.register("releasePreflight") {
 		if (dlssSdk == null || !dlssSdk.isDirectory()) fail("DLSS_SDK is not a directory")
 		def dlssCommit = gitHead(dlssSdk)
 		if (dlssCommit == "unavailable") fail("DLSS SDK git commit is unavailable")
+		if (!dlssCommit.equalsIgnoreCase(expectedDlssSdkCommit)) {
+			fail("DLSS SDK commit ${dlssCommit} is not the project-pinned ${expectedDlssSdkCommit}")
+		}
 		entries["dlss.sdk.path"] = dlssSdk.absolutePath
 		entries["dlss.sdk.commit"] = dlssCommit
-		["include/nvsdk_ngx_defs.h", "include/nvsdk_ngx_defs_dlssd.h",
-		 "include/nvsdk_ngx_defs_dlssg.h", "include/nvsdk_ngx_defs_vk.h"].each { relative ->
-			hashInput("dlss.${relative.replace('/', '.')}", new File(dlssSdk, relative))
+		expectedDlssSdkHeaderHashes.each { relative, expected ->
+			File header = new File(dlssSdk, relative)
+			if (!header.isFile()) fail("missing DLSS SDK header: ${header}")
+			def actual = sha256File(header)
+			if (actual != expected) {
+				fail("DLSS SDK hash mismatch for ${relative}: ${actual} != ${expected}")
+			}
+			hashInput("dlss.${relative.replace('/', '.')}", header)
 		}
 		if (currentNgxPlatform == "windows-x64") {
 			hashInput("dlss.staticLibrary", new File(dlssSdk, "lib/Windows_x86_64/x64/nvsdk_ngx_d.lib"))
@@ -693,15 +708,12 @@ def releasePreflight = tasks.register("releasePreflight") {
 			fail("unsupported NGX platform")
 		}
 
-		entries["sharc.expectedVersion"] = sharcVersion
-		entries["sharc.expectedCommit"] = sharcCommit
-		entries["sharc.expectedHashes"] = sharcHashes.collect { relative, expected -> "${relative}:${expected}" }.join("|")
-		if (sharcSdkRoot == null) {
-			entries["sharc.status"] = "absent"
-			if ((findProperty("releaseRequireSharc") ?: "false").toString().toBoolean()) {
-				fail("SHARC_SDK is required by releaseRequireSharc=true")
-			}
-		} else {
+	entries["sharc.expectedVersion"] = sharcVersion
+	entries["sharc.expectedCommit"] = sharcCommit
+	entries["sharc.expectedHashes"] = sharcHashes.collect { relative, expected -> "${relative}:${expected}" }.join("|")
+	if (sharcSdkRoot == null) {
+		fail("SHARC_SDK is required for release artifacts")
+	} else {
 			entries["sharc.status"] = "validated"
 			entries["sharc.path"] = sharcSdkRoot.absolutePath
 			entries["sharc.commit"] = sharcCommit
@@ -865,7 +877,8 @@ def buildNgxShim = tasks.register("buildNgxShim", BuildNgxShim) {
 	configureArgs.set([
 		"-DNGX_SHIM_REPRODUCIBILITY_STRICT=ON",
 		"-DNGX_SHIM_REPRODUCIBILITY_RECEIPT=${new File(ngxShimBuildRoot, "ngxshim-toolchain.properties").absolutePath}",
-		"-DNGX_DLSS_VENDOR_CONFIG=${ngxVendorConfig}"
+		"-DNGX_DLSS_VENDOR_CONFIG=${ngxVendorConfig}",
+		"-DNGX_EXPECTED_DLSS_SDK_COMMIT=${expectedDlssSdkCommit}"
 	] + (org.gradle.internal.os.OperatingSystem.current().windows
 			? ["-G", "Visual Studio 17 2022", "-A", "x64"]
 			: ["-DCMAKE_BUILD_TYPE=${ngxShimBuildType}"]))

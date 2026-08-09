@@ -70,6 +70,27 @@ public abstract class ScreenshotMixin {
         if (CaptureSession.active()) {
             return;
         }
-        original.call(target, callback);
+        long token = CaptureSession.screenshotThreadToken();
+        boolean inherited = CaptureSession.screenshotIsUltra(token);
+        if (!inherited) {
+            token = CaptureSession.acquireScreenshot(false);
+            if (token == 0L) {
+                return;
+            }
+        }
+        long callbackToken = token;
+        Consumer<NativeImage> leasedCallback = image -> {
+            try {
+                callback.accept(image);
+            } finally {
+                CaptureSession.releaseScreenshot(callbackToken);
+            }
+        };
+        try {
+            original.call(target, leasedCallback);
+        } catch (Throwable t) {
+            CaptureSession.releaseScreenshot(callbackToken);
+            throw t;
+        }
     }
 }

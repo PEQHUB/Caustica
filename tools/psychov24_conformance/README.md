@@ -14,6 +14,8 @@ Each file must contain the header below and identical rows in identical order:
 case,class,input_r,input_g,input_b,output_r,output_g,output_b
 ```
 
+The comparator rejects mismatched case classes and input vectors before comparing outputs.
+
 Use `class=extreme` for gamut-boundary or other extreme vectors; all other rows use the
 ordinary `2e-5` channel tolerance. The comparator reports vector count, maximum error,
 worst case/channel, non-finite count, and tolerance failures. It deliberately does not
