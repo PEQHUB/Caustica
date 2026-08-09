@@ -9,14 +9,12 @@ source = { virtual = "." }
 dependencies = [
     { name = "numpy" },
     { name = "opencolorio" },
-    { name = "openexr" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "numpy", specifier = ">=2.5,<3" },
     { name = "opencolorio", specifier = ">=2.5,<3" },
-    { name = "openexr", specifier = ">=3.4,<4" },
 ]
 
 [[package]]
@@ -61,12 +59,3 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/8e/90/6e8f3a0bba909754112514fce6f2baf9d5ba99fff71cc2bea00e621e6bba/opencolorio-2.5.2-cp314-cp314-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:e1ede691d5263d3fc3c796bfff29f07042ac724d25675b031dd305ff5461366f", size = 6943716, upload-time = "2026-05-13T18:49:34.436Z" },
     { url = "https://files.pythonhosted.org/packages/cd/db/5327b1e96d4bdfd5793976f8626edc9c81497b95f50b67f5a5f8a11ce6f0/opencolorio-2.5.2-cp314-cp314-win_amd64.whl", hash = "sha256:076536f95c02911dcd32a5fd7033e5c3261d88a1aca7e40f4fd6093b99622f4b", size = 4032919, upload-time = "2026-05-13T18:49:36.219Z" },
 ]
-
-[[package]]
-name = "openexr"
-version = "3.4.13"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "numpy" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/ac/c4/11e2377b53c195136e76186c98ea1756a92d4fba01f241bc8741868d6833/openexr-3.4.13.tar.gz", hash = "sha256:ae5135e39ff0b9086a56e02f3d8b5cf52c5ca7cfcde5e57080b1c12c82e3ec8a", size = 25618192, upload-time = "2026-06-19T19:13:46.099Z" }
