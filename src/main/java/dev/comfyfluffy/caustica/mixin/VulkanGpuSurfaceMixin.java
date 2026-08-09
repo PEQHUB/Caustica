@@ -255,6 +255,7 @@ public abstract class VulkanGpuSurfaceMixin {
 	 */
 	@Inject(method = "configure", at = @At("TAIL"))
 	private void caustica$applySwapchainExtensionState(GpuSurface.Configuration config, CallbackInfo ci) {
+		RtFramePresenter.INSTANCE.onSwapchainRecreated();
 		caustica$applyHdrMetadataIfNeeded();
 		if (RtDeviceBringup.reflexEnabled()) {
 			RtReflex.INSTANCE.applySleepMode(this.device.vkDevice(), this.swapchain);

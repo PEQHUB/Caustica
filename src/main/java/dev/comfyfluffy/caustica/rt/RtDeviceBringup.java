@@ -666,6 +666,7 @@ public final class RtDeviceBringup {
                 CausticaMod.LOGGER.error(
                         "RT extensions enabled but entry points missing (rtPipeline={}, asBuild={}, traceRays={}) — RT bring-up FAILED",
                         rtPipeline, asBuild, traceRays);
+                disableAfterProbeFailure(null);
                 return;
             }
             try (MemoryStack stack = MemoryStack.stackPush()) {
@@ -716,7 +717,24 @@ public final class RtDeviceBringup {
             }
         } catch (Throwable t) {
             // A probe must never break device creation.
+            disableAfterProbeFailure(t);
             CausticaMod.LOGGER.error("RT probe threw; continuing without RT", t);
+        }
+    }
+
+    private static void disableAfterProbeFailure(Throwable cause) {
+        rtRequested = false;
+        serBackend = SerBackend.NONE;
+        ommEnabled = false;
+        reflexEnabled = false;
+        presentIdEnabled = false;
+        wideLinesEnabled = false;
+        maxLineWidth = 1.0f;
+        overlayMsaaSamples = VK10.VK_SAMPLE_COUNT_1_BIT;
+        maxOpacity4StateSubdivisionLevel = 0;
+        RtSharcSupport.setDeviceFeaturesEnabled(false, false, false);
+        if (cause != null) {
+            CausticaMod.LOGGER.warn("Caustica RT probe disabled the RT path after a device capability failure", cause);
         }
     }
 }

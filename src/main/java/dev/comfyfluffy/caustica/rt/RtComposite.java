@@ -903,15 +903,14 @@ public final class RtComposite {
         if (ctx == null) {
             return false;
         }
-        ctx.gpuExecutor().throwIfFailed();
         // Count-bounded terrain streaming (dispatch/drain/build kick) runs here once per render frame — before
         // the ready gate below, because it is what MAKES terrain ready during the initial fill.
         try {
+            ctx.gpuExecutor().throwIfFailed();
             if (!CaptureSession.active()) {
                 RtTerrain.frame(ctx);
             }
         } catch (Throwable t) {
-            ctx.gpuExecutor().throwIfFailed();
             failed = true;
             CausticaMod.LOGGER.error("RT terrain streaming failed; reverting to vanilla path", t);
             return false;
@@ -1026,7 +1025,6 @@ public final class RtComposite {
         } catch (EndSkyUnavailableException e) {
             return false;
         } catch (Throwable t) {
-            ctx.gpuExecutor().throwIfFailed();
             failed = true;
             CausticaMod.LOGGER.error("RT composite failed; reverting to vanilla path", t);
             return false;
@@ -1097,7 +1095,11 @@ public final class RtComposite {
             bindWorldTextures(ctx);
             reloadRebindRequested = false;
             } catch (RuntimeException | Error t) {
-                rollbackWorldPipeline(ctx);
+                try {
+                    rollbackWorldPipeline(ctx);
+                } catch (RuntimeException | Error rollbackFailure) {
+                    t.addSuppressed(rollbackFailure);
+                }
                 throw t;
             }
         }
@@ -1111,8 +1113,12 @@ public final class RtComposite {
         materialEpochTraceGate = false;
         boundBlockAlbedoAtlasHandle = 0L;
         bindlessTextureCapacity = 0;
-        ctx.waitIdle();
         Throwable failure = null;
+        try {
+            ctx.waitIdle();
+        } catch (Throwable waitFailure) {
+            failure = waitFailure;
+        }
         failure = destroyStep(failure, "SHaRC resources", this::destroySharcResources);
         RtPipeline world = worldPipeline;
         worldPipeline = null;
@@ -1251,7 +1257,11 @@ public final class RtComposite {
             CausticaMod.LOGGER.info("SHaRC 1.8 directional resources enabled: exponent={}, capacity={}, SER={}",
                     sharcResourceExponent, sharcCache.capacity(), ser);
         } catch (Throwable t) {
-            destroySharcResources();
+            try {
+                destroySharcResources();
+            } catch (Throwable cleanupFailure) {
+                t.addSuppressed(cleanupFailure);
+            }
             RtSharcSupport.fail("resource or pipeline creation failed", t);
         }
     }
@@ -2248,6 +2258,10 @@ public final class RtComposite {
                     gpuExecutor.abortGraphicsUse(graphicsUse);
                 } catch (RuntimeException | Error abortFailure) {
                     failure.addSuppressed(abortFailure);
+                } finally {
+                    if (pendingGraphicsUse == graphicsUse) {
+                        pendingGraphicsUse = null;
+                    }
                 }
             }
             throw failure;

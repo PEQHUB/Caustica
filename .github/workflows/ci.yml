@@ -171,21 +171,24 @@ jobs:
           path: build/native/ngx_shim/release
           merge-multiple: true
 
-      - name: Build bundled jar
+      - name: Build bundled release
         env:
           DLSS_SDK: ${{ github.workspace }}/${{ env.DLSS_SDK_PATH }}
         run: >
-          bash ./gradlew build
+          bash ./gradlew release
           -PngxPlatforms=windows-x64,linux-x64
           -PngxVendorConfig=${{ env.NGX_VENDOR_CONFIG }}
           -PngxShimConfig=${{ env.NGX_SHIM_CONFIG }}
 
-      - name: Upload bundled jar
+      - name: Upload bundled release
         uses: actions/upload-artifact@v4
         with:
-          name: caustica-bundled-jar
+          name: caustica-bundled-release
           path: |
             build/libs/*.jar
             !build/libs/*-sources.jar
             !build/libs/*-dev.jar
+            build/reproducibility/release-artifact.properties
+            build/reproducibility/release-toolchain.properties
+            build/reproducibility/ngxshim-toolchain-release.properties
           if-no-files-found: error

@@ -269,6 +269,16 @@ NGX_SHIM_EXPORT void* ngxshim_create_dlss(VkCommandBuffer cmd,
     }
 
     DlssFeature* feature = (DlssFeature*) std::malloc(sizeof(DlssFeature));
+    if (!feature) {
+        NGX_LOG("create_dlss: wrapper allocation failed; releasing handle=%p and params=%p", (void*) handle, (void*) params);
+        if (handle) {
+            NVSDK_NGX_VULKAN_ReleaseFeature(handle);
+        }
+        if (params) {
+            NVSDK_NGX_VULKAN_DestroyParameters(params);
+        }
+        return nullptr;
+    }
     feature->handle = handle;
     feature->params = params;
     feature->ownsParams = true; // allocated above; release destroys it
@@ -381,15 +391,15 @@ NGX_SHIM_EXPORT void* ngxshim_create_dlssd(VkCommandBuffer cmd,
     }
     NVSDK_NGX_Result r = NVSDK_NGX_Result_Success;
 
-    if (renderPreset != 0) {
-        unsigned int preset = (unsigned int) renderPreset;
-        NVSDK_NGX_Parameter_SetUI(params, NVSDK_NGX_Parameter_RayReconstruction_Hint_Render_Preset_DLAA, preset);
-        NVSDK_NGX_Parameter_SetUI(params, NVSDK_NGX_Parameter_RayReconstruction_Hint_Render_Preset_Quality, preset);
-        NVSDK_NGX_Parameter_SetUI(params, NVSDK_NGX_Parameter_RayReconstruction_Hint_Render_Preset_Balanced, preset);
-        NVSDK_NGX_Parameter_SetUI(params, NVSDK_NGX_Parameter_RayReconstruction_Hint_Render_Preset_Performance, preset);
-        NVSDK_NGX_Parameter_SetUI(params, NVSDK_NGX_Parameter_RayReconstruction_Hint_Render_Preset_UltraPerformance, preset);
-        NVSDK_NGX_Parameter_SetUI(params, NVSDK_NGX_Parameter_RayReconstruction_Hint_Render_Preset_UltraQuality, preset);
-    }
+    // The capability block is shared across feature instances, so write every hint on every create;
+    // zero restores the DLL's default when the caller requests the Default preset.
+    unsigned int preset = (unsigned int) renderPreset;
+    NVSDK_NGX_Parameter_SetUI(params, NVSDK_NGX_Parameter_RayReconstruction_Hint_Render_Preset_DLAA, preset);
+    NVSDK_NGX_Parameter_SetUI(params, NVSDK_NGX_Parameter_RayReconstruction_Hint_Render_Preset_Quality, preset);
+    NVSDK_NGX_Parameter_SetUI(params, NVSDK_NGX_Parameter_RayReconstruction_Hint_Render_Preset_Balanced, preset);
+    NVSDK_NGX_Parameter_SetUI(params, NVSDK_NGX_Parameter_RayReconstruction_Hint_Render_Preset_Performance, preset);
+    NVSDK_NGX_Parameter_SetUI(params, NVSDK_NGX_Parameter_RayReconstruction_Hint_Render_Preset_UltraPerformance, preset);
+    NVSDK_NGX_Parameter_SetUI(params, NVSDK_NGX_Parameter_RayReconstruction_Hint_Render_Preset_UltraQuality, preset);
 
     NVSDK_NGX_DLSSD_Create_Params createParams;
     std::memset(&createParams, 0, sizeof(createParams));
@@ -417,6 +427,13 @@ NGX_SHIM_EXPORT void* ngxshim_create_dlssd(VkCommandBuffer cmd,
     }
 
     DlssFeature* feature = (DlssFeature*) std::malloc(sizeof(DlssFeature));
+    if (!feature) {
+        NGX_LOG("create_dlssd: wrapper allocation failed; releasing handle=%p", (void*) handle);
+        if (handle) {
+            NVSDK_NGX_VULKAN_ReleaseFeature(handle);
+        }
+        return nullptr;
+    }
     feature->handle = handle;
     feature->params = params;
     feature->ownsParams = false; // shared capability block, freed at shutdown
@@ -424,12 +441,12 @@ NGX_SHIM_EXPORT void* ngxshim_create_dlssd(VkCommandBuffer cmd,
     return feature;
 }
 
-// Records a DLSS Ray Reconstruction evaluation. Guide buffers: HDR color, linear depth, motion
+// Records a DLSS Ray Reconstruction evaluation. Guide buffers: HDR color, hardware depth, motion
 // vectors, diffuse albedo, specular albedo, world-space normals (roughness packed in normals.w),
 // and reflection motion vectors. Particle classification and responsivity are optional render-resolution
 // guides consumed by DLSSD to avoid reusing history for dynamic pixels.
 // Output is the only read-write (storage) resource. All non-output images use the color aspect;
-// depth is a linear value carried in a color image, not a depth-aspect attachment.
+// depth is a non-linear, reversed-Z hardware value carried in a color image, not a depth-aspect attachment.
 NGX_SHIM_EXPORT int ngxshim_evaluate_dlssd_v2(VkCommandBuffer cmd, void* feature,
                                            VkImageView colorView, VkImage colorImage, int colorFormat,
                                            VkImageView depthView, VkImage depthImage, int depthFormat,
@@ -566,6 +583,13 @@ NGX_SHIM_EXPORT void* ngxshim_create_dlssg(VkCommandBuffer cmd,
     }
 
     DlssFeature* feature = (DlssFeature*) std::malloc(sizeof(DlssFeature));
+    if (!feature) {
+        NGX_LOG("create_dlssg: wrapper allocation failed; releasing handle=%p", (void*) handle);
+        if (handle) {
+            NVSDK_NGX_VULKAN_ReleaseFeature(handle);
+        }
+        return nullptr;
+    }
     feature->handle = handle;
     feature->params = params;
     feature->ownsParams = false; // shared capability block, freed at shutdown

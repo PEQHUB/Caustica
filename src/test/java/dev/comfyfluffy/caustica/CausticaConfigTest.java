@@ -60,16 +60,40 @@ final class CausticaConfigTest {
     }
 
     @Test
-    void defaultsProfileBreakerLeavesVersion17AndNewerProfilesAlone() {
+    void oldProfilesRequestOnlyNonDestructiveMigration() {
         assertEquals(17, CausticaConfig.DEFAULTS_PROFILE_VERSION);
-        assertTrue(CausticaConfig.shouldResetToDefaults(null));
-        assertTrue(CausticaConfig.shouldResetToDefaults(16));
-        assertFalse(CausticaConfig.shouldResetToDefaults(17));
-        assertFalse(CausticaConfig.shouldResetToDefaults(18L));
-        assertTrue(CausticaConfig.shouldResetToDefaults("17"));
+        assertTrue(CausticaConfig.needsProfileMigration(null));
+        assertTrue(CausticaConfig.needsProfileMigration(16));
+        assertFalse(CausticaConfig.needsProfileMigration(17));
+        assertFalse(CausticaConfig.needsProfileMigration(18L));
+        assertTrue(CausticaConfig.needsProfileMigration("17"));
         assertEquals(17, CausticaConfig.profileVersionForSave(null));
         assertEquals(17, CausticaConfig.profileVersionForSave(16));
         assertEquals(18, CausticaConfig.profileVersionForSave(18L));
+    }
+
+    @Test
+    void invalidBooleansFallThroughToFileAndThenDefault() {
+        assertTrue(CausticaConfig.resolveBoolean("TRUE", Boolean.FALSE, false));
+        assertFalse(CausticaConfig.resolveBoolean("not-a-boolean", Boolean.FALSE, true));
+        assertTrue(CausticaConfig.resolveBoolean("not-a-boolean", Boolean.TRUE, false));
+        assertFalse(CausticaConfig.resolveBoolean(null, null, false));
+    }
+
+    @Test
+    void zeroValuedFloatSettingsRemainValidWhileNonFiniteValuesUseDefaults() {
+        var floor = CausticaConfig.Rt.Exposure.CENTER_WEIGHT_FLOOR;
+        float previous = floor.value();
+        try {
+            floor.set(0.0f);
+            assertEquals(0.0f, floor.value());
+            floor.set(Float.NaN);
+            assertEquals(floor.defaultValue(), floor.value());
+            floor.set(Float.POSITIVE_INFINITY);
+            assertEquals(floor.defaultValue(), floor.value());
+        } finally {
+            floor.set(previous);
+        }
     }
 
     @Test

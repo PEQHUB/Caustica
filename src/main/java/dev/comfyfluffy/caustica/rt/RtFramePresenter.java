@@ -97,6 +97,11 @@ public final class RtFramePresenter {
     public void prepareExtraFrames(VulkanCommandEncoder enc, VulkanDevice device, long swapchain,
             LongList swapchainImages, long[] presentSemaphores, int swapW, int swapH,
             long backbufferView, long srcImage, int srcW, int srcH, int generatedCount, boolean hdrBackbuffer) {
+        if (pendingCount != 0) {
+            failed = true;
+            CausticaMod.LOGGER.error("DLSS-FG present state was not flushed before the next frame");
+            return;
+        }
         pendingCount = 0;
         if (failed || swapchain == 0L || srcImage == 0L || generatedCount <= 0) {
             return;
@@ -128,22 +133,25 @@ public final class RtFramePresenter {
                 try (MemoryStack stack = MemoryStack.stackPush()) {
                     IntBuffer pIndex = stack.callocInt(1);
                     int r = KHRSwapchain.vkAcquireNextImageKHR(device.vkDevice(), swapchain, ACQUIRE_TIMEOUT_NS, acquireSem, 0L, pIndex);
-                    if (r != VK10.VK_SUCCESS && r != 1000001003 /* SUBOPTIMAL */) {
+                    if (r != VK10.VK_SUCCESS && r != KHRSwapchain.VK_SUBOPTIMAL_KHR) {
                         return; // out-of-date/timeout: present what we have, let MC recover
                     }
                     imageIndex = pIndex.get(0);
                 }
                 long dstImage = swapchainImages.getLong(imageIndex);
+                long acquirePresentSem = acquireSem;
+                int pendingIndex = pendingCount++;
+                pendingImageIndex[pendingIndex] = imageIndex;
+                // An acquired image can still be released safely by presenting it while waiting on the
+                // acquisition semaphore. Replace this with the blit-completion semaphore only after the
+                // command has been recorded successfully.
+                pendingPresentSem[pendingIndex] = acquirePresentSem;
                 long presentSem = presentSemaphores[imageIndex];
                 recordBlit(enc, blitSrc, dstImage, copyW, copyH, acquireSem, presentSem);
-
-                pendingImageIndex[pendingCount] = imageIndex;
-                pendingPresentSem[pendingCount] = presentSem;
-                pendingCount++;
+                pendingPresentSem[pendingIndex] = presentSem;
             }
         } catch (Throwable t) {
             failed = true;
-            pendingCount = 0;
             CausticaMod.LOGGER.error("DLSS-FG present-record failed; frame generation disabled", t);
         }
     }
@@ -155,7 +163,7 @@ public final class RtFramePresenter {
      */
     public void flushPendingPresents(long swapchain, VkQueue presentQueue) {
         int presentedThisFrame = 0;
-        if (!failed && pendingCount != 0) {
+        if (pendingCount != 0) {
             try (MemoryStack stack = MemoryStack.stackPush()) {
                 for (int i = 0; i < pendingCount; i++) {
                     VkPresentInfoKHR present = VkPresentInfoKHR.calloc(stack).sType$Default();
@@ -163,7 +171,12 @@ public final class RtFramePresenter {
                     present.swapchainCount(1);
                     present.pSwapchains(stack.longs(swapchain));
                     present.pImageIndices(stack.ints(pendingImageIndex[i]));
-                    KHRSwapchain.vkQueuePresentKHR(presentQueue, present);
+                    int result = KHRSwapchain.vkQueuePresentKHR(presentQueue, present);
+                    if (result != VK10.VK_SUCCESS && result != KHRSwapchain.VK_SUBOPTIMAL_KHR) {
+                        failed = true;
+                        CausticaMod.LOGGER.error("DLSS-FG present returned {}; frame generation disabled", result);
+                        break;
+                    }
                     presentedThisFrame++;
                 }
             } catch (Throwable t) {
@@ -343,5 +356,10 @@ public final class RtFramePresenter {
                 throw (RuntimeException) failure;
             }
         }
+    }
+
+    /** Drops entries belonging to a swapchain that Minecraft has just replaced. */
+    public void onSwapchainRecreated() {
+        pendingCount = 0;
     }
 }

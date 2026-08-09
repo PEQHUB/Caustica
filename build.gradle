@@ -371,16 +371,44 @@ abstract class CompileShaders extends DefaultTask {
 					new File(scratchDir, "sharc/sharc_resolve.comp.spv"),
 					["-DSHARC_ENABLE_SH_ENCODING=1"] + sharcCapabilities + sharcIncludes)
 		}
-		if (outDirFile.exists() && !outDirFile.deleteDir()) {
-			throw new GradleException("failed to clear generated shaders under ${outDirFile}")
+		def moveDirectory = { File source, File destination ->
+			try {
+				java.nio.file.Files.move(source.toPath(), destination.toPath(),
+						java.nio.file.StandardCopyOption.ATOMIC_MOVE)
+			} catch (java.nio.file.AtomicMoveNotSupportedException ignored) {
+				java.nio.file.Files.move(source.toPath(), destination.toPath())
+			} catch (UnsupportedOperationException ignored) {
+				java.nio.file.Files.move(source.toPath(), destination.toPath())
+			}
 		}
-		outDirFile.mkdirs()
-		scratchDir.eachFileRecurse(groovy.io.FileType.FILES) { src ->
-			def relative = scratchDir.toPath().relativize(src.toPath())
-			def destination = outDirFile.toPath().resolve(relative).toFile()
-			destination.parentFile.mkdirs()
-			java.nio.file.Files.move(src.toPath(), destination.toPath(),
-					java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+		outDirFile.parentFile.mkdirs()
+		def backupDir = new File(temporaryDir.parentFile, "shader-publication-previous-${temporaryDir.name}")
+		if (!outDirFile.exists() && backupDir.exists()) {
+			moveDirectory(backupDir, outDirFile)
+		}
+		if (backupDir.exists() && !backupDir.deleteDir()) {
+			throw new GradleException("failed to clear stale shader backup ${backupDir}")
+		}
+		boolean previousPublished = false
+		boolean currentPublished = false
+		try {
+			if (outDirFile.exists()) {
+				moveDirectory(outDirFile, backupDir)
+				previousPublished = true
+			}
+			moveDirectory(scratchDir, outDirFile)
+			currentPublished = true
+		} catch (Exception failure) {
+			if (currentPublished && outDirFile.exists() && !outDirFile.deleteDir()) {
+				throw new GradleException("failed to roll back generated shaders under ${outDirFile}", failure)
+			}
+			if (previousPublished && backupDir.exists()) {
+				moveDirectory(backupDir, outDirFile)
+			}
+			throw failure
+		}
+		if (backupDir.exists() && !backupDir.deleteDir()) {
+			logger.warn("Could not remove the previous shader publication ${backupDir}; retaining it for cleanup.")
 		}
 	}
 }
@@ -716,6 +744,62 @@ def releasePreflight = tasks.register("releasePreflight") {
 		writeIdentityReceipt(releaseToolchainReceipt.get().asFile, entries)
 		logger.lifecycle("Release preflight receipt: ${releaseToolchainReceipt.get().asFile}")
 	}
+}
+
+def packagedJar = tasks.named("jar", Jar).flatMap { it.archiveFile }
+def releaseArtifactReceiptFile = layout.buildDirectory.file("reproducibility/release-artifact.properties")
+def releaseArtifactReceipt = tasks.register("releaseArtifactReceipt") {
+	group = "verification"
+	description = "Hashes the exact packaged JAR together with the release preflight receipt."
+	dependsOn(releasePreflight, tasks.named("jar"))
+	inputs.file(packagedJar).withPropertyName("packagedArtifact")
+	inputs.file(releaseToolchainReceipt).withPropertyName("releasePreflightReceipt")
+	outputs.file(releaseArtifactReceiptFile)
+	outputs.upToDateWhen { false }
+
+	doLast {
+		def fail = { String message -> throw new GradleException("Release artifact receipt: ${message}") }
+		File artifact = packagedJar.get().asFile
+		File preflight = releaseToolchainReceipt.get().asFile
+		if (!artifact.isFile()) fail("packaged JAR is missing: ${artifact}")
+		if (!preflight.isFile()) fail("release preflight receipt is missing: ${preflight}")
+
+		def preflightProperties = new Properties()
+		preflight.withInputStream { preflightProperties.load(it) }
+		if (preflightProperties.getProperty("sourceStatus") != "clean") {
+			fail("preflight receipt does not prove a clean source tree")
+		}
+		if (!preflightProperties.getProperty("sourceHead")) {
+			fail("preflight receipt is missing sourceHead")
+		}
+
+		def entries = new LinkedHashMap<String, Object>()
+		entries.schema = "caustica-release-artifact-v1"
+		entries["artifact.path"] = artifact.absolutePath
+		entries["artifact.name"] = artifact.name
+		entries["artifact.bytes"] = artifact.length()
+		entries["artifact.sha256"] = sha256File(artifact)
+		entries["artifact.task"] = "jar"
+		entries["preflight.path"] = preflight.absolutePath
+		entries["preflight.sha256"] = sha256File(preflight)
+		entries["source.head"] = preflightProperties.getProperty("sourceHead")
+		writeIdentityReceipt(releaseArtifactReceiptFile.get().asFile, entries)
+		logger.lifecycle("Release artifact receipt: ${releaseArtifactReceiptFile.get().asFile}")
+	}
+}
+
+def release = tasks.register("release") {
+	group = "distribution"
+	description = "Builds the release only after a clean, provenance-bound preflight."
+	dependsOn(tasks.named("build"), releaseArtifactReceipt)
+}
+
+// Keep the clean-tree check ahead of release compilation without making ordinary builds release-only.
+tasks.named("build").configure {
+	mustRunAfter(releasePreflight)
+}
+releaseArtifactReceipt.configure {
+	mustRunAfter(tasks.named("build"))
 }
 
 def ngxShimBuildType = ngxShimConfig == "debug" ? "Debug" : "Release"
