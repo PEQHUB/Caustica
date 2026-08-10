@@ -563,9 +563,13 @@ public final class RtContext {
     }
 
     public static void check(int rc, String what) {
+        check(instance != null ? instance.device : null, rc, what);
+    }
+
+    public static void check(VulkanDevice owner, int rc, String what) {
         if (rc != VK10.VK_SUCCESS) {
-            if (rc == VK10.VK_ERROR_DEVICE_LOST && instance != null) {
-                VulkanDiagnostics.reportDeviceLost(instance.device, what);
+            if (rc == VK10.VK_ERROR_DEVICE_LOST && owner != null) {
+                VulkanDiagnostics.reportDeviceLost(owner, what);
             }
             throw new IllegalStateException(what + " failed: " + rc);
         }

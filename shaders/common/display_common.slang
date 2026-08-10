@@ -97,6 +97,12 @@ public struct DisplayPush {
     public float hdrParam5;
     public float hdrParam6;
     public float hdrParam7;
+    public float4 skyColor;          // captured vanilla sky/clear color in linear BT.709
+    public float4x4 invViewProj;     // unjittered camera-relative inverse projection
+    public uint skybox;              // SKYBOX_NONE, SKYBOX_OVERWORLD, or SKYBOX_END
+    public uint skyFlags;            // SKY_FLAG_END_FLASH when the vanilla End flash is active
+    public float4 skyParams;         // reserved, flash intensity, flash X angle, flash Y angle
+    public float4 endFlashUv;        // celestials-atlas UV rect for end_flash
 };
 
 public struct BloomPush {

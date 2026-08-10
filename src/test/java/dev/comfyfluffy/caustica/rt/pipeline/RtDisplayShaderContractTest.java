@@ -17,11 +17,11 @@ final class RtDisplayShaderContractTest {
     void acesAndAnalyticalModesUseTheirOwnedSceneSignals() throws IOException {
         String source = Files.readString(DISPLAY_SHADER).replaceAll("\\s+", " ");
 
-        assertTrue(source.contains("float3 exposedAcesCg = max(rt.rgb * exposure, float3(0.0));"));
+        assertTrue(source.contains("float3 exposedAcesCg = sceneLinearAcesCg * exposure;"));
         assertTrue(source.contains("exposedAcesCg += sampleBloom(pix, w, h) * max(pc.bloomStrength, 0.0);"));
         assertTrue(source.contains("if (pc.sdrMode == 0 || (pc.hdrEnabled != 0 && pc.hdrMode == 0)) { "
                 + "lookedAcesCg = applyLook(exposedAcesCg); }"));
-        assertTrue(source.contains("? float4(tonemap(lookedAcesCg), 1.0) : float4(localSdrToneMap(exposedAcesCg), 1.0);"));
+        assertTrue(source.contains("? tonemap(lookedAcesCg) : localSdrToneMap(exposedAcesCg);"));
         assertTrue(source.contains("? float4(tonemapHdr(lookedAcesCg), 1.0) : float4(displayGammaHdr(localHdrToneMap(exposedAcesCg)), 1.0);"));
         assertFalse(source.contains("localSdrToneMap(lookedAcesCg)"));
         assertFalse(source.contains("localHdrToneMap(lookedAcesCg)"));

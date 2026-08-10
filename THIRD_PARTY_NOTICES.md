@@ -44,7 +44,7 @@ not licensed under the LGPL.
 
 The NVIDIA SDK components remain subject to the NVIDIA RTX SDKs license:
 
-<https://github.com/NVIDIA/DLSS/blob/main/LICENSE.txt>
+<https://github.com/NVIDIA/DLSS/blob/a291cc7d2cc642a51566f3dfd5376f635cd1b284/LICENSE.txt>
 
 The LGPL license grant for Caustica does not grant rights to NVIDIA SDK
 components. Redistribution and use of those components must comply with
@@ -78,3 +78,17 @@ derived products without prior written permission.
 The data is provided without warranty; the copyright holders are not liable
 for damages arising from its use. The complete notice is retained in the
 source file.
+
+## NVIDIA SHaRC SDK
+
+Caustica can build release artifacts with NVIDIA SHaRC SDK 1.8.0.0 shader
+inputs and runtime resources. SHaRC is proprietary software provided by NVIDIA
+Corporation and is not licensed under Caustica's LGPL-3.0-or-later license.
+
+The SHaRC SDK remains subject to the NVIDIA RTX SDKs license:
+
+<https://github.com/NVIDIA-RTX/SHARC/blob/e19ccacd511f42a3df6f850052d508c13c9e9737/License.md>
+
+The complete accepted SHaRC license is packaged in release artifacts at
+`META-INF/licenses/nvidia/NVIDIA-SHARC-SDK.txt`. The LGPL license grant for
+Caustica does not grant rights to the SHaRC SDK.

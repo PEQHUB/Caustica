@@ -20,6 +20,9 @@
 // The build emits an ordinary TraceRay fallback and an optional EXT SER variant from this source.
 import world_common;
 import world_core;
+#ifdef CAUSTICA_SHARC_VARIANT
+import sharc_types;
+#endif
 import math;
 import medium;
 import segment;
@@ -31,6 +34,12 @@ import trace_ser;
 import lighting;
 import sky;
 import bindings;
+
+#ifdef CAUSTICA_SHARC_VARIANT
+#include "sharc_bridge.slang"
+static SharcParameters sharcParameters;
+static SharcFrame sharcFrame;
+#endif
 
 // Atmospheric transmittance LUT (RtSkyLut), also bound to world.rmiss at the same binding: raygen reads it
 // to colour the NEE sun/moonlight, the miss shader reads it to tint the visible discs and stars.
@@ -67,6 +76,10 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex, uint pathB
     // remains active with its full configured candidate count at every hit. Pass A's primary/interface
     // prefix is outside this SSS quality budget.
     int indirectDepth = 0;
+#ifdef CAUSTICA_SHARC_UPDATE
+    SharcState sharcState;
+    SharcInit(sharcState);
+#endif
     for (int bounce = seg.bounce; bounce <= maxBounces; bounce++) {
         // Radiance SBT records run any-hit only for true alpha cutout. Translucent/water go straight to
         // closest-hit for dielectric handling. Geometry is double-sided; the chit flips the normal.
@@ -77,10 +90,10 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex, uint pathB
         // roulette, and paths guaranteed to end at the bounce cap in separate coherence groups.
         uint pathPhaseHint = bounce >= maxBounces ? 2u : (bounce >= rrStart ? 1u : 0u);
         traceRadianceReordered(bounce == 0 ? CULL_PRIMARY : CULL_SECONDARY, ro, 0.0, rd, 10000.0,
-                               showCelestial, rayConeWidth, rayConeSpread, pathPhaseHint);
+                               showCelestial, false, rayConeWidth, rayConeSpread, pathPhaseHint);
 #else
         traceRadiance(bounce == 0 ? CULL_PRIMARY : CULL_SECONDARY, ro, 0.0, rd, 10000.0,
-                      showCelestial, rayConeWidth, rayConeSpread);
+                      showCelestial, false, rayConeWidth, rayConeSpread);
 #endif
 
         if (payload.hitT < 0.0) {
@@ -96,6 +109,10 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex, uint pathB
             // packed show-celestial flag decides whether this path segment may see the bright disc.
             float3 sky = payloadSky();
             L += throughput * sky; // escaped to sky
+#ifdef CAUSTICA_SHARC_UPDATE
+            causticaSharcUpdateMiss(sharcParameters, sharcState, sky,
+                    (sharcFrame.sharcFlags & 1u) != 0u);
+#endif
             break;
         }
 
@@ -186,6 +203,15 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex, uint pathB
                 }
                 throughput /= q;
             }
+#ifdef CAUSTICA_SHARC_UPDATE
+#if SHARC_ENABLE_SH_ENCODING
+            SharcSetRadianceDirectionWeight(sharcState, 1.0);
+#endif
+            if (!causticaSharcSetThroughput(sharcParameters, sharcState, throughput)) {
+                break;
+            }
+            throughput = float3(1.0, 1.0, 1.0);
+#endif
             continue;
         }
 
@@ -235,6 +261,15 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex, uint pathB
             rd = cosineDir(n, diffuseSampler, PATH_DIM_DIFFUSE_U);
             rayConeSpread = max(rayConeSpread, RAY_CONE_DIFFUSE_SPREAD);
             showCelestial = false; // diffuse receiver: direct sun/moon was handled by NEE above
+#ifdef CAUSTICA_SHARC_UPDATE
+#if SHARC_ENABLE_SH_ENCODING
+            SharcSetRadianceDirectionWeight(sharcState, 0.0);
+#endif
+            if (!causticaSharcSetThroughput(sharcParameters, sharcState, throughput)) {
+                break;
+            }
+            throughput = float3(1.0, 1.0, 1.0);
+#endif
             continue;
         }
 
@@ -255,6 +290,26 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex, uint pathB
         float3 diffAlb = albedo * (1.0 - metal);
         float3 F0 = payload.f0;
 
+#ifdef CAUSTICA_SHARC_VARIANT
+        bool sharcFiniteSurface = causticaFinite3(hitPos, CAUSTICA_SHARC_WORLD_LIMIT)
+                && causticaFinite3(n, 1.0e6) && causticaFinite3(diffAlb, 1.0e6)
+                && causticaFinite3(v, 1.0e6);
+        bool sharcDynamicSurface = (payload.flags & PAYLOAD_SHARC_DYNAMIC) != 0u;
+        // Only stable diffuse secondary surfaces own/query cache entries. Primary pixels, specular-visible
+        // paths, dynamic geometry, metals, and malformed material data remain live. The explicit debug bit
+        // is limited to the camera-terminal segment so it cannot accidentally make reflected paths cacheable.
+        bool sharcPrimaryDebug = seg.bounce == 0 && hitDepth == 0
+                && (pc.sharcDebugFlags & 1u) != 0u;
+        bool sharcPathEligible = !showCelestial || sharcPrimaryDebug;
+        bool sharcDepthEligible = sharcPathEligible && (hitDepth > 0 || sharcPrimaryDebug);
+        bool sharcDiffuseEligible = sharcDepthEligible && sharcFiniteSurface
+                && !sharcDynamicSurface && rough >= 0.0 && rough <= 1.0
+                && metal >= 0.0 && metal <= 0.1
+                && rough > max(MIRROR_ALPHA_MAX, pc.sharcRoughnessThreshold)
+                && all(diffAlb >= float3(0.0, 0.0, 0.0))
+                && luminance(diffAlb) > 1.0e-4 && dot(n, v) > 1.0e-4;
+#endif
+
         // Emissive surfaces (lava, glowstone, torches, ...) add radiance directly, colored by albedo.
         // RIS emitter NEE: the direct-hit emission term is gated only for emitters RIS actually samples
         // (payload emitter-in-list bit) — and then only off diffuse continuation rays (showCelestial
@@ -269,8 +324,19 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex, uint pathB
         // agree: gateEmitter exists only because RIS already accounted for this emitter, so a bounce where
         // RIS is skipped must also gather emission directly or that light is lost outright.
         bool gateEmitter = risOn && payloadEmitterInList();
+#ifdef CAUSTICA_SHARC_VARIANT
+        float3 sharcCacheableDirectLighting = float3(0.0, 0.0, 0.0);
+        float3 sharcLiveDirectLighting = float3(0.0, 0.0, 0.0);
+        float3 sharcMaterialEmissive = float3(0.0, 0.0, 0.0);
+#endif
         if (emission > 0.0 && (!gateEmitter || showCelestial)) {
+#ifdef CAUSTICA_SHARC_VARIANT
+            float3 emissionLighting = albedo * emission;
+            L += throughput * emissionLighting;
+            sharcMaterialEmissive = emissionLighting;
+#else
             L += throughput * albedo * emission;
+#endif
         }
 
         // NEE: direct light from the dominant celestial body (sun by day, moon by night) — Lambert
@@ -295,6 +361,26 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex, uint pathB
                 vis *= waterCaustic(p + lightDir * shadow.waterHitT, lightDir, shadow.waterHitT);
             }
             if (max(vis.r, max(vis.g, vis.b)) > 0.0) {
+#ifdef CAUSTICA_SHARC_VARIANT
+                float3 diffuseBrdf = diffAlb * INV_PI;
+                float3 h = normalize(lightDir + v);
+                float ndh = max(0.0, dot(n, h));
+                float ndv = max(1.0e-4, dot(n, v));
+                float vdh = max(0.0, dot(v, h));
+                float D = ggxD(ndh, rough);
+                float G = ggxG1(ndv, rough) * ggxG1(ndl, rough);
+                float3 directScale = celestialLight.illuminance * ndl * vis;
+                float3 diffuseLighting = diffuseBrdf * directScale;
+                float3 specularLighting = ((D * G) * fresnelSchlick(vdh, F0)
+                        / (4.0 * ndv * ndl)) * directScale;
+                sharcCacheableDirectLighting += diffuseLighting;
+                sharcLiveDirectLighting += specularLighting;
+#ifdef CAUSTICA_SHARC_UPDATE
+                L += throughput * (diffuseLighting + specularLighting);
+#else
+                L += throughput * specularLighting;
+#endif
+#else
                 float3 brdf = diffAlb * INV_PI; // Lambertian diffuse (f = albedo/PI)
                 float3 h = normalize(lightDir + v);
                 float ndh = max(0.0, dot(n, h));
@@ -305,6 +391,7 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex, uint pathB
                 float3 F = fresnelSchlick(vdh, F0);
                 brdf += (D * G) * F / (4.0 * ndv * ndl); // Cook–Torrance specular
                 L += throughput * brdf * celestialLight.illuminance * ndl * vis;
+#endif
             }
         }
 
@@ -318,8 +405,15 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex, uint pathB
             PathSampler risSampler = pathSamplerWithGroup(transportSampler, PATH_GROUP_RIS_BASE);
             Reservoir r = risInitial(hitPos, n, v, rd, diffAlb, F0, rough, false, activeSss,
                                      risSampler);
+#ifdef CAUSTICA_SHARC_VARIANT
+            float3 risLighting = shadeReservoir(r, hitPos, n, v, rd, diffAlb, F0, rough, false,
+                                                activeSss);
+            L += throughput * risLighting;
+            sharcLiveDirectLighting += risLighting;
+#else
             L += throughput * shadeReservoir(r, hitPos, n, v, rd, diffAlb, F0, rough, false,
                                              activeSss);
+#endif
         }
 
         // Thin-surface SSS transmission. Light entering from the back face scatters through toward the
@@ -340,7 +434,14 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex, uint pathB
                 }
                 if (max(visB.r, max(visB.g, visB.b)) > 0.0) {
                     float cosT = dot(lightDir, rd);
+#ifdef CAUSTICA_SHARC_VARIANT
+                    float3 sssLighting = diffAlb * sss * SSS_STRENGTH * hg(cosT, SSS_G) * backNdl
+                            * celestialLight.illuminance * visB;
+                    L += throughput * sssLighting;
+                    sharcLiveDirectLighting += sssLighting;
+#else
                     L += throughput * diffAlb * sss * SSS_STRENGTH * hg(cosT, SSS_G) * backNdl * celestialLight.illuminance * visB;
+#endif
                 }
             }
         }
@@ -348,6 +449,14 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex, uint pathB
         // Preserve all local lighting at the terminal hit, but do not sample a continuation that the
         // bounce loop cannot trace.
         if (bounce >= maxBounces) {
+#ifdef CAUSTICA_SHARC_QUERY
+            L += throughput * sharcCacheableDirectLighting;
+#endif
+#ifdef CAUSTICA_SHARC_UPDATE
+            causticaSharcPropagate(sharcParameters, sharcState,
+                    sharcCacheableDirectLighting + sharcLiveDirectLighting + sharcMaterialEmissive,
+                    (sharcFrame.sharcFlags & 1u) != 0u);
+#endif
             break;
         }
 
@@ -357,7 +466,35 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex, uint pathB
                        ? 1.0
                        : clamp(luminance(F0) / (luminance(F0) + luminance(diffAlb) + 1.0e-4), 0.1, 0.9);
         bool sampledSpecular = pathSample(transportSampler, PATH_DIM_LOBE) < ps;
+#ifdef CAUSTICA_SHARC_UPDATE
+        float3 sharcPropagatedLighting = sharcCacheableDirectLighting
+                + sharcLiveDirectLighting + sharcMaterialEmissive;
+        if (!sampledSpecular && sharcDiffuseEligible) {
+            SharcHitData sharcHit = causticaMakeSharcHit(hitPos, n, diffAlb,
+                    sharcMaterialEmissive, v, 0.0);
+            if (!causticaSharcUpdateHit(sharcParameters, sharcState, sharcHit,
+                    sharcCacheableDirectLighting, sharcLiveDirectLighting,
+                    sharcCacheableDirectLighting + sharcLiveDirectLighting,
+                    (sharcFrame.sharcFlags & 1u) != 0u,
+                    pathSample(pathSamplerWithGroup(transportSampler, PATH_GROUP_SHARC),
+                            PATH_DIM_SHARC_UPDATE))) {
+                break;
+            }
+        } else {
+            causticaSharcPropagate(sharcParameters, sharcState, sharcPropagatedLighting,
+                    (sharcFrame.sharcFlags & 1u) != 0u);
+        }
+#endif
         if (sampledSpecular) {
+#ifdef CAUSTICA_SHARC_UPDATE
+#if SHARC_ENABLE_SH_ENCODING
+            SharcSetRadianceDirectionWeight(sharcState,
+                    causticaSharcDirectionalityWeight(exactSpecular, false, rough));
+#endif
+#endif
+#ifdef CAUSTICA_SHARC_QUERY
+            L += throughput * sharcCacheableDirectLighting;
+#endif
             float3 l;
             if (exactSpecular) {
                 // Authored zero is a delta distribution, not a narrow finite GGX lobe. This avoids the
@@ -381,12 +518,28 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex, uint pathB
             rd = l;
             showCelestial = true; // specular lobe: this ray is a (glossy) mirror — show the disc
         } else {
+#ifdef CAUSTICA_SHARC_QUERY
+            float3 cachedRadiance;
+            if (sharcDiffuseEligible
+                    && causticaSharcTryQuery(sharcParameters, hitPos, n, diffAlb, v, payload.hitT,
+                            cachedRadiance)) {
+                L += throughput * cachedRadiance;
+                break;
+            }
+            // A cold/invalid cache restores the live diffuse direct term and keeps tracing unbiased.
+            L += throughput * sharcCacheableDirectLighting;
+#endif
             throughput *= diffAlb / (1.0 - ps);
             ro = p;
             PathSampler diffuseSampler = pathSamplerWithGroup(transportSampler, PATH_GROUP_TRANSPORT_DIFFUSE);
             rd = cosineDir(n, diffuseSampler, PATH_DIM_DIFFUSE_U);
             rayConeSpread = max(rayConeSpread, RAY_CONE_DIFFUSE_SPREAD);
             showCelestial = false; // diffuse lobe: disc covered by NEE, hide it (anti-firefly)
+#ifdef CAUSTICA_SHARC_UPDATE
+#if SHARC_ENABLE_SH_ENCODING
+            SharcSetRadianceDirectionWeight(sharcState, 0.0);
+#endif
+#endif
         }
 
         // Russian roulette on deeper bounces: survive with prob = max channel, rescale survivors.
@@ -397,6 +550,12 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex, uint pathB
             }
             throughput /= q;
         }
+#ifdef CAUSTICA_SHARC_UPDATE
+        if (!causticaSharcSetThroughput(sharcParameters, sharcState, throughput)) {
+            break;
+        }
+        throughput = float3(1.0, 1.0, 1.0);
+#endif
     }
     return L;
 }
@@ -404,11 +563,51 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex, uint pathB
 [shader("raygeneration")]
 void main() {
     worldPush = ConstPtr<WorldPush>(pc.worldPushAddr)[0];
+#ifdef CAUSTICA_SHARC_VARIANT
+    sharcFrame = ConstPtr<SharcFrame>(pc.sharcFrameAddr)[0];
+    sharcParameters = causticaSharcParameters(sharcFrame.hashEntriesAddr, sharcFrame.accumulationAddr,
+            sharcFrame.resolvedAddr, sharcFrame.capacity, sharcFrame.cameraPosition,
+            sharcFrame.sceneScale, sharcFrame.radianceScale,
+            sharcFrame.gridLogarithmBase, sharcFrame.gridLevelBias);
+#endif
     // Derive this dispatch's directional light once. The same transmittance LUT drives terrain lighting
     // and the visible sun/moon, keeping atmospheric tint consistent across both consumers.
     celestialLight = dominantCelestialLight(skyState(worldPush), transmittanceLut);
     // The path integral is ACEScg end to end; sky.slang works in linear BT.709, so this is the one seam.
     celestialLight.illuminance = bt709ToAcesCg(celestialLight.illuminance);
+#ifdef CAUSTICA_SHARC_UPDATE
+    uint2 tileIndex = DispatchRaysIndex().xy;
+    uint tileSize = max(pc.sharcUpdateTileSize, 1u);
+    uint tileArea = max(tileSize * tileSize, 1u);
+    uint tileSeedInput = tileIndex.x * 1973u + tileIndex.y * 9277u + 26699u;
+    uint tileSeed = pcg(tileSeedInput);
+    uint tileOffset = (tileSeed % tileArea + sharcFrame.frameIndex % tileArea) % tileArea;
+    uint2 updatePixel = tileIndex * tileSize
+            + uint2(tileOffset % tileSize, tileOffset / tileSize);
+    uint2 renderDimensions = uint2(max(pc.sharcRenderWidth, 1u), max(pc.sharcRenderHeight, 1u));
+    if (any(updatePixel >= renderDimensions)) return;
+    float2 updateSize = float2(renderDimensions);
+    float2 updateUv = (float2(updatePixel) + 0.5) / updateSize;
+    float2 updateNdc = (updateUv + worldPush.jitter / updateSize) * 2.0 - 1.0;
+    float4 updateNearH = mul(worldPush.invViewProj, float4(updateNdc.x, updateNdc.y, 1.0, 1.0));
+    float4 updateFarH = mul(worldPush.invViewProj, float4(updateNdc.x, updateNdc.y, 0.0, 1.0));
+    float3 updateNear = updateNearH.xyz / updateNearH.w;
+    float3 updateFar = updateFarH.xyz / updateFarH.w;
+    float3 updateOrigin = updateNear + worldPush.camOffset;
+    float3 updateDirection = normalize(updateFar - updateNear);
+    uint updateSeedInput = tileSeed ^ (updatePixel.x * 1973u + updatePixel.y * 9277u + 26699u)
+            ^ (sharcFrame.frameIndex * 2654435761u);
+    uint updateSeed = pcg(updateSeedInput);
+    MediumStack updateMedium = makeMediumStack((worldPush.flags & 1u) != 0u
+            ? makeDielectricMedium(true, WATER_IOR, worldPush.waterParams.xyz, 1.0)
+            : airMedium());
+    PathSegment updateSegment = makePathSegment(updateOrigin, updateDirection,
+            float3(1.0, 1.0, 1.0), updateMedium, 0.0,
+            primaryRayConeSpread(updateNdc, updateSize, updateDirection), updateSeed, 0, true);
+    tracePath(updateSegment, updatePixel, 0u, 0u);
+    return;
+#endif
+#if !defined(CAUSTICA_SHARC_UPDATE)
     uint2 dispatchIndex = DispatchRaysIndex().xy;
     uint2 dimensions = DispatchRaysDimensions().xy;
     int2 pix = int2(dispatchIndex);
@@ -437,4 +636,5 @@ void main() {
     // white as white, so it costs nothing visible.
     float3 stored = frameRadiance * (worldPush.preExposure / float(spp));
     outImage[pix] = float4(clamp(stored, float3(0.0), float3(HALF_MAX)), 1.0);
+#endif
 }

@@ -56,8 +56,8 @@ public final class CausticaConfig {
     public static void ensureRegistered() {
         @SuppressWarnings("unused")
         Object[] touch = {
-            Rt.ENABLED, Rt.Composite.SPP, Rt.Composite.MAX_BOUNCES, Rt.Terrain.ASYNC_DISPATCH_PER_PASS, Rt.Omm.ENABLED,
-            Rt.Lights.RIS_CANDIDATES,
+            Rt.ENABLED, Rt.Composite.SPP, Rt.Composite.MAX_BOUNCES, Rt.Sharc.ENABLED,
+            Rt.Terrain.ASYNC_DISPATCH_PER_PASS, Rt.Omm.ENABLED, Rt.Lights.RIS_CANDIDATES,
             Rt.Entities.ENABLED, Rt.Entities.GLOW_ENABLED, Rt.EntityTextures.MAX_TEXTURES, Rt.DlssRr.ENABLED, Rt.Fg.ENABLED,
             Rt.Reflex.ENABLED, Rt.Exposure.MODE, Rt.Exposure.LOW_PERCENTILE, Rt.Exposure.HIGH_PERCENTILE,
             Rt.Exposure.PRE_EXPOSURE, Rt.Tonemap.GAMMA,
@@ -537,6 +537,8 @@ public final class CausticaConfig {
         }
 
         public static final class Composite {
+            /** Debug value that exposes the full-resolution path-traced image before reconstruction. */
+            public static final int RAW_DEBUG_VIEW = 10;
             public static final IntSetting DEBUG_VIEW = intValue("caustica.rt.debugView", "composite.debug-view", 0);
             public static final IntSetting SPP = intAtLeast("caustica.rt.spp", "composite.spp", 1, 1);
             public static final IntSetting MAX_BOUNCES =
@@ -553,6 +555,38 @@ public final class CausticaConfig {
                     finiteFloat("caustica.rt.jitterSignY", "composite.jitter-sign-y", -1.0f);
 
             private Composite() {
+            }
+        }
+
+        /** Runtime-safe controls for the optional, separately packaged SHaRC directional cache. */
+        public static final class Sharc {
+            public static final BooleanSetting ENABLED = bool("caustica.rt.sharc.enabled", "sharc.enabled", true);
+            public static final IntSetting CACHE_EXPONENT =
+                    clampedInt("caustica.rt.sharc.cacheExponent", "sharc.cache-exponent", 20, 16, 23);
+            public static final BooleanSetting ANTI_FIREFLY = bool(
+                    "caustica.rt.sharc.antiFirefly", "sharc.anti-firefly", true);
+            /** Developer comparison mode; production keeps camera-visible primary surfaces live. */
+            public static final BooleanSetting PRIMARY_SURFACE_DEBUG = bool(
+                    "caustica.rt.sharc.primarySurfaceDebug", "sharc.primary-surface-debug", false);
+            public static final IntSetting UPDATE_TILE_SIZE =
+                    clampedInt("caustica.rt.sharc.updateTileSize", "sharc.update-tile-size", 8, 2, 64);
+            public static final IntSetting ACCUMULATION_FRAMES =
+                    clampedInt("caustica.rt.sharc.accumulationFrames", "sharc.accumulation-frames", 8, 1, 1024);
+            public static final IntSetting STALE_FRAMES =
+                    clampedInt("caustica.rt.sharc.staleFrames", "sharc.stale-frames", 32, 8, 1024);
+            public static final FloatSetting SCENE_SCALE = finiteClampedFloat(
+                    "caustica.rt.sharc.sceneScale", "sharc.scene-scale", 1.0f, 1.0f, 100.0f);
+            public static final FloatSetting RADIANCE_SCALE = finiteClampedFloat(
+                    "caustica.rt.sharc.radianceScale", "sharc.radiance-scale", 1000.0f, 50.0f, 1000.0f);
+            public static final FloatSetting GRID_LOGARITHM_BASE = finiteClampedFloat(
+                    "caustica.rt.sharc.gridLogarithmBase", "sharc.grid-logarithm-base", 2.0f, 1.01f, 16.0f);
+            public static final FloatSetting GRID_LEVEL_BIAS = finiteClampedFloat(
+                    "caustica.rt.sharc.gridLevelBias", "sharc.grid-level-bias", 0.0f, -16.0f, 16.0f);
+            /** Additional minimum linear roughness for SHaRC diffuse ownership; zero preserves the mirror cutoff. */
+            public static final FloatSetting ROUGHNESS_THRESHOLD = finiteClampedFloat(
+                    "caustica.rt.sharc.roughnessThreshold", "sharc.roughness-threshold", 0.0f, 0.0f, 1.0f);
+
+            private Sharc() {
             }
         }
 
@@ -912,6 +946,7 @@ public final class CausticaConfig {
             private static String sanitizeToneMapper(String value) {
                 return dev.comfyfluffy.caustica.rt.pipeline.RtToneMapping.SdrMode.parse(value).canonicalName();
             }
+
         }
 
         /** Render-frame timing + hitch logging. See {@code RtFrameStats}. */

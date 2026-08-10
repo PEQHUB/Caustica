@@ -138,9 +138,9 @@ public abstract class GameRendererMixin {
 			return projection;
 		}
 
-		var cameraState = this.gameRenderState().levelRenderState.cameraRenderState;
-		RtComposite.INSTANCE.captureFrame(projection, cameraState.viewRotationMatrix,
-				cameraState.pos.x, cameraState.pos.y, cameraState.pos.z);
+        var cameraState = this.gameRenderState().levelRenderState.cameraRenderState;
+        RtComposite.INSTANCE.captureFrame(projection, cameraState.viewRotationMatrix,
+                cameraState.pos.x, cameraState.pos.y, cameraState.pos.z, cameraState.fogData);
 		VanillaRenderController.INSTANCE.markProjectionCaptured();
 		return projection;
 	}

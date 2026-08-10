@@ -18,6 +18,7 @@ import net.fabricmc.fabric.api.client.rendering.v1.InvalidateRenderStateCallback
 
 public final class CausticaClient implements ClientModInitializer {
 	private static boolean rtInitDone = false;
+	private static boolean rtRestartRequired = false;
 
 	@Override
 	public void onInitializeClient() {
@@ -32,6 +33,9 @@ public final class CausticaClient implements ClientModInitializer {
 		// The GpuDevice exists well before the first tick, so a one-shot at tick start
 		// runs on the render thread with the device idle between frames.
 		ClientTickEvents.START_CLIENT_TICK.register(client -> {
+			if (rtRestartRequired) {
+				return;
+			}
 			if (!VanillaRenderController.rtRuntimeWorkRequested()) {
 				if (rtInitDone) {
 					shutdownRt();
@@ -100,7 +104,7 @@ public final class CausticaClient implements ClientModInitializer {
 		if (ctx != null) {
 			RtEntities.INSTANCE.shutdown();
 		}
-		RtComposite.INSTANCE.destroy();
+		boolean rrReleased = RtComposite.INSTANCE.destroy();
 		RtEntityTextures.INSTANCE.reset();
 		RtBlockMaterials.INSTANCE.destroy();
 		dev.comfyfluffy.caustica.rt.pipeline.RtDlssFg.INSTANCE.destroy();
@@ -108,11 +112,26 @@ public final class CausticaClient implements ClientModInitializer {
 			dev.comfyfluffy.caustica.rt.RtFramePresenter.INSTANCE.destroy(ctx.device());
 			dev.comfyfluffy.caustica.rt.RtReflex.INSTANCE.destroy(ctx.device().vkDevice());
 		}
-		// Shut NGX down once, after every feature (RR + FG) has been released above.
-		dev.comfyfluffy.caustica.ngx.NgxRuntime.INSTANCE.shutdown();
-		if (ctx != null) {
+		// NGX and the Vulkan device may be destroyed only after every native feature released its owner.
+		boolean ngxReleased = rrReleased
+				&& dev.comfyfluffy.caustica.ngx.NgxRuntime.INSTANCE.shutdown();
+		boolean restartRequired = teardownRequiresRestart(rrReleased, ngxReleased);
+		if (ctx != null && !restartRequired) {
 			ctx.destroy();
 		}
 		rtInitDone = false;
+		if (restartRequired) {
+			rtRestartRequired = true;
+			CausticaMod.LOGGER.error("RT teardown retained native NGX ownership; restart is required");
+		}
+	}
+
+	static boolean teardownRequiresRestart(boolean rrReleased, boolean ngxReleased) {
+		return !rrReleased || !ngxReleased;
+	}
+
+	/** Native teardown ownership failures keep RT off until process restart. */
+	public static boolean rtRestartRequired() {
+		return rtRestartRequired;
 	}
 }

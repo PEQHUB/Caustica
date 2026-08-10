@@ -81,6 +81,18 @@ final class CausticaConfigTest {
     }
 
     @Test
+    void dlssPresetDefaultsToSdkSelection() {
+        assertEquals(0, CausticaConfig.Rt.DlssRr.PRESET.defaultValue());
+    }
+
+    @Test
+    void registersSharcSettingsForConfigRoundTrips() {
+        CausticaConfig.ensureRegistered();
+        assertTrue(hasSetting("caustica.rt.sharc.enabled"));
+        assertTrue(CausticaConfig.Rt.Sharc.ENABLED.defaultValue());
+    }
+
+    @Test
     void paperWhiteCannotExceedTheSelectedPeak() {
         var paperWhite = CausticaConfig.Rt.Hdr.PAPER_WHITE_NITS;
         var peak = CausticaConfig.Rt.Hdr.PEAK_NITS;
@@ -96,7 +108,6 @@ final class CausticaConfigTest {
             peak.set(previousPeak);
         }
     }
-
     private static boolean hasSetting(String key) {
         return CausticaConfig.settings().stream().anyMatch(setting -> setting.key().equals(key));
     }

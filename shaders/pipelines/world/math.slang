@@ -117,6 +117,7 @@ public static const uint PATH_DIM_RIS_SELECT = 0u;
 public static const uint PATH_DIM_RIS_REPLACE = 2u;
 public static const uint PATH_DIM_RIS_LIGHT_U = 0u;
 public static const uint PATH_DIM_RIS_LIGHT_V = 1u;
+public static const uint PATH_DIM_SHARC_UPDATE = 0u;
 public static const uint PATH_DIM_CELESTIAL_U = 0u;
 
 public static const uint PATH_GROUP_TRANSPORT_CORE = 0u;
@@ -124,8 +125,9 @@ public static const uint PATH_GROUP_TRANSPORT_SPECULAR = 1u;
 public static const uint PATH_GROUP_TRANSPORT_DIFFUSE = 2u;
 public static const uint PATH_GROUP_RIS_BASE = 3u;
 public static const uint PATH_GROUP_RIS_CANDIDATE_FIRST = 4u;
-public static const uint PATH_GROUP_CELESTIAL = 68u;
-public static const uint PATH_GROUP_COUNT = 69u;
+public static const uint PATH_GROUP_SHARC = 68u;
+public static const uint PATH_GROUP_CELESTIAL = 69u;
+public static const uint PATH_GROUP_COUNT = 70u;
 public static const uint PATH_BRANCH_COUNT = 2u;
 public static const uint PATH_BOUNCE_COUNT = 9u;
 public static const uint PATH_SOBOL_DIMENSIONS = 4u;
@@ -163,7 +165,7 @@ public uint pathHash(uint value) {
 }
 
 public uint pathReverseBits(uint value) {
-    // Slang lowers this intrinsic to SPIR-V OpBitReverse.
+    // The pinned Slang toolchain lowers this intrinsic to SPIR-V OpBitReverse.
     return reversebits(value);
 }
 

@@ -187,7 +187,7 @@ public final class RtEntities {
     private CameraRenderState cameraState;
     // Particle capture: a VertexConsumer adapter that funnels MC's billboard quads into `capture` (the
     // shared entity mesh). We extract each live particle into `particleScratch`, accumulate per-vertex
-    // motion-vector displacements in `particleDisp`, and key the previous-frame center off particle
+    // motion-vector displacements in `particleDisp`, and key previous captured positions off particle
     // identity in `particlePrev` (rebuilt each frame → prunes dead particles).
     private final RtParticleCapture particleCapture = new RtParticleCapture(capture);
     private final QuadParticleRenderState particleScratch = new QuadParticleRenderState();
@@ -196,15 +196,17 @@ public final class RtEntities {
     private IdentityHashMap<Particle, ParticlePrev> particleCur = new IdentityHashMap<>();
     private final float[] particleCenterScratch = new float[3];
 
-    /** Previous frame's particle center (rebase-space) + that frame's rebase origin, for the MV diff. */
+    /** Previous frame's particle vertices (rebase-space) + that frame's rebase origin, for the MV diff. */
     private static final class ParticlePrev {
-        float cx, cy, cz;
+        float[] vertices = new float[0];
         int rbx, rby, rbz;
 
-        void set(float cx, float cy, float cz, int rbx, int rby, int rbz) {
-            this.cx = cx;
-            this.cy = cy;
-            this.cz = cz;
+        void set(float[] current, int vertBefore, int vertAfter, int rbx, int rby, int rbz) {
+            int count = (vertAfter - vertBefore) * 3;
+            if (vertices.length != count) {
+                vertices = new float[count];
+            }
+            System.arraycopy(current, vertBefore * 3, vertices, 0, count);
             this.rbx = rbx;
             this.rby = rby;
             this.rbz = rbz;
@@ -929,9 +931,11 @@ public final class RtEntities {
      * Capture this frame's billboard particles as ONE combined mesh + BLAS (cutout, camera-only receiver),
      * with per-particle motion vectors. We iterate the LIVE {@code Particle} objects (via accessor mixins)
      * rather than the public packed render state, because only the live objects carry stable identity —
-     * needed to diff each particle's center against last frame for the MV. Each particle is extracted into
+     * needed to diff each particle's captured vertices against last frame for the MV. Each particle is
+     * extracted into
      * {@link #particleScratch} (its billboard quad), funneled through {@link #particleCapture} into the
-     * shared {@code capture}, and its quad center cached by identity in {@link #particlePrev}. Per-layer
+     * shared {@code capture}, and its captured positions cached by identity in {@link #particlePrev}.
+     * Per-layer
      * texture slot comes from the layer's atlas (block/item/particle) via the bindless registry. One
      * {@code PARTICLE_BIT} instance with mask {@link #PARTICLE_MASK} (primary-ray only).
      */
@@ -1006,7 +1010,7 @@ public final class RtEntities {
                         capture.alphaBuckets.size(abb);
                         continue;
                     }
-                    appendParticleMv(p, particleCenterScratch, vertBefore, vertAfter, rbx, rby, rbz, cur);
+                    appendParticleMv(p, vertBefore, vertAfter, rbx, rby, rbz, cur);
                     build.logicalCount++;
                     particlesCaptured++;
                 }
@@ -1044,27 +1048,32 @@ public final class RtEntities {
     }
 
     /**
-     * Compute one particle's motion-vector displacement (its quad center vs. last frame's, keyed by
-     * identity) and write it for each of the particle's vertices into {@link #particleDisp}. All four
-     * billboard verts share the center displacement (per-particle-rigid MV).
+     * Compute one particle's per-vertex motion-vector displacement against its last captured geometry,
+     * keyed by identity, and write it into {@link #particleDisp}. A new particle or a changed vertex
+     * layout has no reliable correspondence and therefore gets zero motion for that frame.
      */
-    private void appendParticleMv(Particle p, float[] center, int vertBefore, int vertAfter,
+    private void appendParticleMv(Particle p, int vertBefore, int vertAfter,
                                   int rbx, int rby, int rbz, IdentityHashMap<Particle, ParticlePrev> cur) {
         ParticlePrev prev = particlePrev.remove(p);
-        // World displacement = (curCenter − prevCenter) + (rebaseCur − rebasePrev). New particle ⇒ 0 (no MV).
-        float dx = prev == null ? 0f : (center[0] - prev.cx) + (rbx - prev.rbx);
-        float dy = prev == null ? 0f : (center[1] - prev.cy) + (rby - prev.rby);
-        float dz = prev == null ? 0f : (center[2] - prev.cz) + (rbz - prev.rbz);
+        // World displacement is current-minus-previous vertex position plus the rebase-origin delta.
+        float[] vertices = capture.verts.elements();
+        int count = vertAfter - vertBefore;
+        boolean matched = prev != null && prev.vertices.length == count * 3;
+        float rebasedDx = prev == null ? 0f : rbx - prev.rbx;
+        float rebasedDy = prev == null ? 0f : rby - prev.rby;
+        float rebasedDz = prev == null ? 0f : rbz - prev.rbz;
         for (int i = vertBefore; i < vertAfter; i++) {
-            particleDisp.add(dx);
-            particleDisp.add(dy);
-            particleDisp.add(dz);
+            int current = i * 3;
+            int old = (i - vertBefore) * 3;
+            particleDisp.add(matched ? vertices[current] - prev.vertices[old] + rebasedDx : 0f);
+            particleDisp.add(matched ? vertices[current + 1] - prev.vertices[old + 1] + rebasedDy : 0f);
+            particleDisp.add(matched ? vertices[current + 2] - prev.vertices[old + 2] + rebasedDz : 0f);
             particleDisp.add(0f);
         }
         if (prev == null) {
             prev = new ParticlePrev();
         }
-        prev.set(center[0], center[1], center[2], rbx, rby, rbz);
+        prev.set(vertices, vertBefore, vertAfter, rbx, rby, rbz);
         cur.put(p, prev);
     }
 
@@ -1230,13 +1239,19 @@ public final class RtEntities {
         return e;
     }
 
-    /** FNV-1a hash of the currently captured mesh (positions + indices + per-prim data) for rebuild detection. */
+    /** FNV-1a hash of the currently captured mesh (positions, indices, UVs, and per-prim data) for rebuild detection. */
     private long meshHash() {
         long h = 1469598103934665603L;
         float[] v = capture.verts.elements();
         int vn = capture.verts.size();
         for (int i = 0; i < vn; i++) {
             h = (h ^ (Float.floatToRawIntBits(v[i]) & 0xffffffffL)) * 1099511628211L;
+        }
+        float[] uv = capture.uvList.elements();
+        int un = capture.uvList.size();
+        h = (h ^ (un & 0xffffffffL)) * 1099511628211L;
+        for (int i = 0; i < un; i++) {
+            h = (h ^ (Float.floatToRawIntBits(uv[i]) & 0xffffffffL)) * 1099511628211L;
         }
         int[] x = capture.idx.elements();
         int xn = capture.idx.size();
