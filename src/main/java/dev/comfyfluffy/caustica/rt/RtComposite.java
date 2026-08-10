@@ -11,6 +11,8 @@ import com.mojang.blaze3d.vulkan.VulkanGpuTextureView;
 import dev.comfyfluffy.caustica.CausticaConfig;
 import dev.comfyfluffy.caustica.CausticaMod;
 import dev.comfyfluffy.caustica.client.CausticaJitter;
+import dev.comfyfluffy.caustica.client.CaptureSession;
+import dev.comfyfluffy.caustica.client.UltraScreenshot;
 import dev.comfyfluffy.caustica.mixin.CommandEncoderAccessor;
 import dev.comfyfluffy.caustica.rt.gen.WorldPushConstantsData;
 import dev.comfyfluffy.caustica.rt.gen.WorldPushData;
@@ -128,7 +130,7 @@ public final class RtComposite {
     }
 
     private static int spp() {
-        return CausticaConfig.Rt.Composite.SPP.value();
+        return CaptureSession.effectiveSpp(CausticaConfig.Rt.Composite.SPP.value());
     }
 
     private static int maxBounces() {
@@ -336,6 +338,17 @@ public final class RtComposite {
     private double camY;
     private double camZ;
     private boolean frameCaptured;
+    private boolean captureCameraFrozen;
+    private boolean captureWorldPushFrozen;
+    private int captureFlags;
+    private Float4 captureWaterParams;
+    private Float4 captureWaterAnchor;
+    private BreakEntry[] captureBreaking;
+    private SkyPush captureSky;
+    private RtAccel.PreparedTlas captureTlas;
+    private boolean freshRtFrame;
+    private boolean freshDlssRrFrame;
+    private int jitterPhaseCount;
     private long celestialUvAtlasHandle;
     private int celestialUvMoonPhase = -1;
     private float sunU0;
@@ -561,6 +574,10 @@ public final class RtComposite {
     /** Capture one coherent camera, dimension-sky, and vanilla sky-color snapshot for the next composite. */
     public void captureFrame(Matrix4f projection, Matrix4fc viewRotation, double cameraX, double cameraY, double cameraZ,
                              FogData vanillaFogData) {
+        if (CaptureSession.active() && captureCameraFrozen) {
+            frameCaptured = true;
+            return;
+        }
         frameProjection.set(projection);
         frameViewRotation.set(viewRotation);
         camX = cameraX;
@@ -576,6 +593,7 @@ public final class RtComposite {
         frameSkyboxValid = true;
         captureSkyColor(vanillaFogData);
         frameCaptured = true;
+        captureCameraFrozen = CaptureSession.active();
     }
 
     /** Read vanilla's resolved sky color for End-sky compositing without modifying the fog pipeline. */
@@ -599,6 +617,42 @@ public final class RtComposite {
 
     private static float finiteColor(float value) {
         return Float.isFinite(value) ? Math.clamp(value, 0.0f, 1.0f) : 0.0f;
+    }
+
+    /** Freeze renderer-owned scene inputs for a finite multi-frame capture. */
+    public void beginCaptureSession() {
+        captureCameraFrozen = false;
+        captureWorldPushFrozen = false;
+        exposure.beginCapture();
+        captureBreaking = null;
+        captureSky = null;
+        captureTlas = null;
+    }
+
+    public void endCaptureSession() {
+        captureCameraFrozen = false;
+        captureWorldPushFrozen = false;
+        exposure.endCapture();
+        captureBreaking = null;
+        captureSky = null;
+        captureTlas = null;
+    }
+
+    public boolean producedFreshDlssRrFrame() {
+        return freshRtFrame && freshDlssRrFrame;
+    }
+
+    public int currentJitterPhaseCount() {
+        return jitterPhaseCount;
+    }
+
+    /** F4 may retain the current renderer only after a valid RT frame and exposure image exist. */
+    public boolean readyForUltraScreenshot() {
+        return freshRtFrame && !failed && worldPipeline != null && materialBindingsReady
+                && !reloadRebindRequested && output != null && continuationQueue != null
+                && pathSamplerData != null
+                && displayPipeline != null && displayImage != null && hdrDisplayImage != null
+                && rrOutput != null && exposure.ready() && RtTerrain.currentOrNull() != null;
     }
 
     /** Reset exposure filtering after an explicit render-state invalidation such as F3+A. */
@@ -716,6 +770,10 @@ public final class RtComposite {
         }
         RtFrameStats.FRAME.beginIfInactive();
         hdrWrittenThisFrame = false;
+        freshRtFrame = false;
+        freshDlssRrFrame = false;
+        jitterPhaseCount = 0;
+        UltraScreenshot.INSTANCE.beginFrame(Minecraft.getInstance());
     }
 
     /** This frame's completion token, valid until {@link #finishGraphicsUse()} signals it. */
@@ -759,7 +817,9 @@ public final class RtComposite {
         // the ready gate below, because it is what MAKES terrain ready during the initial fill.
         try {
             ctx.gpuExecutor().throwIfFailed();
-            RtTerrain.frame(ctx);
+            if (!CaptureSession.active()) {
+                RtTerrain.frame(ctx);
+            }
         } catch (Throwable t) {
             failed = true;
             CausticaMod.LOGGER.error("RT terrain streaming failed; reverting to vanilla path", t);
@@ -1519,6 +1579,7 @@ public final class RtComposite {
         }
         pendingGraphicsUse = graphicsUse;
         RtEntities.FrameEntities frameEntities = null;
+        boolean rrProduced = false;
         VkCommandBuffer cmd = encoder.allocateAndBeginTransientCommandBuffer();
         RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_COMMAND_BUFFER, cmd.address(), "composite command buffer");
         int debugView = debugView();
@@ -1534,6 +1595,7 @@ public final class RtComposite {
             float jitterY = 0f;
             if (rrPath) {
                 CausticaJitter.INSTANCE.prepare(renderW, renderH, displayW, displayH);
+                jitterPhaseCount = CausticaJitter.INSTANCE.currentPhaseCount();
                 jitterX = CausticaJitter.INSTANCE.jitterPixelsX() * jitterSignX();
                 jitterY = CausticaJitter.INSTANCE.jitterPixelsY() * jitterSignY();
             }
@@ -1607,8 +1669,26 @@ public final class RtComposite {
             // SAME bindless entity-texture array (destroy_stage_N.png is a standalone Sampler0 texture,
             // not a block-atlas sprite — see ModelBakery.BREAKING_LOCATIONS/DESTROY_TYPES), so any newly
             // resolved slot rides along with the uploadPending() call right below.
-            BreakEntry[] breaking = breakingEntries(terrain);
-            SkyPush sky = skyPush();
+            BreakEntry[] breaking;
+            SkyPush sky;
+            if (CaptureSession.active() && captureWorldPushFrozen) {
+                flags = captureFlags;
+                waterParams = captureWaterParams;
+                waterAnchor = captureWaterAnchor;
+                breaking = captureBreaking;
+                sky = captureSky;
+            } else {
+                breaking = breakingEntries(terrain);
+                sky = skyPush();
+                if (CaptureSession.active()) {
+                    captureFlags = flags;
+                    captureWaterParams = waterParams;
+                    captureWaterAnchor = waterAnchor;
+                    captureBreaking = breaking;
+                    captureSky = sky;
+                    captureWorldPushFrozen = true;
+                }
+            }
             if (sharcOn) {
                 updateSharcResetPolicy(terrain, sky);
             }
@@ -1675,10 +1755,18 @@ public final class RtComposite {
                 }
                 VulkanCommandEncoder.memoryBarrier(cmd, stack); // entity BLAS writes visible to the TLAS build
             }
-            RtAccel.PreparedTlas frameTlas;
-            try (RtFrameStats.Scope ignored = RtFrameStats.FRAME.stage("frame.prepareTlas")) {
-                frameTlas = RtAccel.prepareTlas(ctx, fe.baseInstances(), fe.dynamicInstances(), tlasRing,
-                        graphicsUse);
+            RtAccel.PreparedTlas frameTlas = captureTlas;
+            boolean buildTlas = frameTlas == null;
+            if (buildTlas) {
+                try (RtFrameStats.Scope ignored = RtFrameStats.FRAME.stage("frame.prepareTlas")) {
+                    frameTlas = RtAccel.prepareTlas(ctx, fe.baseInstances(), fe.dynamicInstances(), tlasRing,
+                            graphicsUse);
+                }
+                if (CaptureSession.active()) {
+                    captureTlas = frameTlas;
+                }
+            } else {
+                RtAccel.markTlasUsed(frameTlas, graphicsUse);
             }
             active.setTlas(frameTlas.accel.handle, graphicsUse, graphicsUseWaiter);
             if (sharcOn) {
@@ -1686,10 +1774,12 @@ public final class RtComposite {
                 sharcQueryPipeline.setTlas(frameTlas.accel.handle, graphicsUse, graphicsUseWaiter);
             }
             currentTlasHandle = frameTlas.accel.handle;
-            try (RtFrameStats.Scope ignored = RtFrameStats.FRAME.stage("frame.recordTlas")) {
-                RtAccel.recordTlasBuild(ctx, cmd, frameTlas);
+            if (buildTlas) {
+                try (RtFrameStats.Scope ignored = RtFrameStats.FRAME.stage("frame.recordTlas")) {
+                    RtAccel.recordTlasBuild(ctx, cmd, frameTlas);
+                }
+                VulkanCommandEncoder.memoryBarrier(cmd, stack); // TLAS build visible to the trace
             }
-            VulkanCommandEncoder.memoryBarrier(cmd, stack); // TLAS build visible to the trace
 
             // Push the BDA ring slot's address plus the small hot subset used directly by the shaders.
             // Every 64-bit device address the trace needs lives here, not behind worldPushAddr: the
@@ -1798,10 +1888,12 @@ public final class RtComposite {
             // the histogram's log-luminance average biased by Monte-Carlo noise (Jensen's inequality
             // on the concave log()), so the computed exposure drifted with SPP; rrOutput is stable
             // regardless of SPP, keeping exposure consistent.
-            try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "exposure");
-                 RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.exposure")) {
-                exposure.record(ctx, cmd, stack, rrOutput, gDepth, gAlbedo);
-                exposure.recordStateReadback(cmd, stack);
+            if (!exposure.captureFrozen()) {
+                try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "exposure");
+                     RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.exposure")) {
+                    exposure.record(ctx, cmd, stack, rrOutput, gDepth, gAlbedo);
+                    exposure.recordStateReadback(cmd, stack);
+                }
             }
             VulkanCommandEncoder.memoryBarrier(cmd, stack); // exposure image visible to the display mapper
 
@@ -1849,11 +1941,14 @@ public final class RtComposite {
                         dstImage, VK10.VK_IMAGE_LAYOUT_GENERAL, copyRegion(stack, displayW, displayH));
             }
             VulkanCommandEncoder.memoryBarrier(cmd, stack);
+            rrProduced = rrDone;
         }
             if (VK10.vkEndCommandBuffer(cmd) != VK10.VK_SUCCESS) {
                 throw new IllegalStateException("vkEndCommandBuffer(rt composite) failed");
             }
             encoder.execute(cmd); // deferred into the frame's submission — correct for per-frame work
+            freshRtFrame = true;
+            freshDlssRrFrame = rrProduced;
             // Do not attach a merely reserved token: failed recording may never signal it. Once execute succeeds,
             // every owner in this frame's manifest is protected through the final overlay consumer.
             RtEntities.INSTANCE.markGraphicsUse(frameEntities, graphicsUse);

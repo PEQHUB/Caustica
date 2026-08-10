@@ -44,6 +44,9 @@ public final class RtExposure {
     private Mode previousMode;
     /** This frame's latched pre-exposure; see {@link #beginFrame(RtGpuExecutor.GraphicsUseWaiter)}. */
     private float framePreExposure = 1.0f;
+    /** Immutable pre-exposure used by every frame in one finite screenshot capture. */
+    private float capturePreExposure = 1.0f;
+    private boolean captureFrozen;
 
     private static final long DIAG_LOG_INTERVAL_NANOS = 1_000_000_000L;
     private static final int STATE_READBACK_RING = 6;
@@ -71,6 +74,22 @@ public final class RtExposure {
         return state;
     }
 
+    /** Freeze the current display exposure for a finite multi-frame capture. */
+    public void beginCapture() {
+        capturePreExposure = framePreExposure;
+        captureFrozen = true;
+    }
+
+    /** Release the capture latch after the screenshot readback has been scheduled. */
+    public void endCapture() {
+        captureFrozen = false;
+        capturePreExposure = 1.0f;
+    }
+
+    public boolean captureFrozen() {
+        return captureFrozen;
+    }
+
     /** Immutable exposure values attached to a residual-exposed EXR capture. */
     public record CaptureMetadata(
             float preExposure,
@@ -80,8 +99,7 @@ public final class RtExposure {
             float evScene,
             float evTarget,
             float evApplied
-    ) {
-    }
+    ) {}
 
     /**
      * Snapshot the controller after the capture copy has completed.
@@ -154,6 +172,9 @@ public final class RtExposure {
 
     public void record(RtContext ctx, VkCommandBuffer cmd, MemoryStack stack,
                        RtImage traceColor, RtImage guideDepth, RtImage guideAlbedo) {
+        if (captureFrozen) {
+            return;
+        }
         if (image == null) {
             throw new IllegalStateException("RT exposure image not created");
         }
@@ -202,6 +223,8 @@ public final class RtExposure {
         pendingStateReadback = null;
         completedState = null;
         framePreExposure = 1.0f;
+        capturePreExposure = 1.0f;
+        captureFrozen = false;
         previousMode = null;
     }
 
@@ -234,7 +257,7 @@ public final class RtExposure {
      * consumed until its graphics timeline value completes, so the host never races the live storage buffer.
      */
     public void recordStateReadback(VkCommandBuffer cmd, MemoryStack stack) {
-        if (mode() != Mode.AUTO || pendingStateReadback == null) {
+        if (captureFrozen || mode() != Mode.AUTO || pendingStateReadback == null) {
             return;
         }
         VkBufferMemoryBarrier.Buffer toTransfer = VkBufferMemoryBarrier.calloc(1, stack);
@@ -435,6 +458,9 @@ public final class RtExposure {
      * ensures both consumers use one prediction; the residual absorbs whatever it failed to predict.
      */
     public void beginFrame(RtGpuExecutor.GraphicsUseWaiter graphicsUseWaiter) {
+        if (captureFrozen) {
+            return;
+        }
         Mode currentMode = mode();
         if (modeTransitionRequiresReset(previousMode, currentMode)) {
             requestReset();
@@ -482,7 +508,7 @@ public final class RtExposure {
      * no fence is needed. 1.0 disables the mechanism.
      */
     public float preExposure() {
-        return framePreExposure;
+        return captureFrozen ? capturePreExposure : framePreExposure;
     }
 
     private float computePreExposure() {

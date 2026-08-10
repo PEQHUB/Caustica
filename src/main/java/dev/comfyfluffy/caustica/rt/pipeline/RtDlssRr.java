@@ -4,6 +4,7 @@ import com.mojang.blaze3d.systems.RenderSystem;
 import com.mojang.blaze3d.vulkan.VulkanDevice;
 import dev.comfyfluffy.caustica.CausticaConfig;
 import dev.comfyfluffy.caustica.CausticaMod;
+import dev.comfyfluffy.caustica.client.CaptureSession;
 import dev.comfyfluffy.caustica.rt.RtContext;
 import dev.comfyfluffy.caustica.rt.accel.RtImage;
 import dev.comfyfluffy.caustica.mixin.GpuDeviceAccessor;
@@ -46,7 +47,7 @@ public final class RtDlssRr {
     }
 
     public static int quality() {
-        return CausticaConfig.Rt.DlssRr.QUALITY.value();
+        return CaptureSession.effectiveDlssQuality(CausticaConfig.Rt.DlssRr.QUALITY.value());
     }
 
     public boolean hasFailed() {

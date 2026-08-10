@@ -957,7 +957,7 @@ public final class CausticaConfig {
             }
         }
 
-        /** Optional high-dynamic-range screenshot output paired with vanilla's F2 PNG. */
+        /** Optional scene-linear HDR screenshot output paired with vanilla's F2 PNG. */
         public static final class Screenshots {
             public static final BooleanSetting EXR_ENABLED =
                     bool("caustica.rt.screenshots.exr", "screenshots.exr-enabled", false);

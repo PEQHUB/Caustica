@@ -218,6 +218,8 @@ public final class RtEntities {
     private int tableSlot;
 
     private final FrameLists[] frameLists = new FrameLists[FRAME_LIST_RING];
+    private boolean captureSession;
+    private FrameEntities captureSnapshot;
 
     // Previous frame's captured entity-local vertex positions + its interpolated world anchor, keyed by
     // entity id. Maps are swapped/reused each frame: entries not seen this frame fall out, while visible
@@ -609,13 +611,16 @@ public final class RtEntities {
      */
     public FrameEntities beginFrame(RtContext ctx, List<RtAccel.Instance> base, int rbx, int rby, int rbz,
                                     double camX, double camY, double camZ, Matrix4f projection, Matrix4f viewRotation) {
+        if (captureSnapshot != null) {
+            return captureSnapshot;
+        }
         if (!enabled()) {
-            return new FrameEntities(base, List.of(), List.of(), 0L, null);
+            return retainCaptureSnapshot(new FrameEntities(base, List.of(), List.of(), 0L, null));
         }
         Minecraft mc = Minecraft.getInstance();
         ClientLevel level = mc.level;
         if (level == null) {
-            return new FrameEntities(base, List.of(), List.of(), 0L, null);
+            return retainCaptureSnapshot(new FrameEntities(base, List.of(), List.of(), 0L, null));
         }
         float partial = mc.getDeltaTracker().getGameTimeDeltaPartialTick(false);
         setCamera(camX, camY, camZ, projection, viewRotation);
@@ -643,7 +648,7 @@ public final class RtEntities {
         RtFrameStats.FRAME.count("entityRetainedGeometryBytes", retainedGeometryBytes);
 
         if (build.instances == null) {
-            return new FrameEntities(base, List.of(), List.of(), 0L, null);
+            return retainCaptureSnapshot(new FrameEntities(base, List.of(), List.of(), 0L, null));
         }
         try (RtFrameStats.Scope ignored = RtFrameStats.FRAME.stage("entity.uploadFlush")) {
             build.motion.flushWrites();
@@ -652,8 +657,28 @@ public final class RtEntities {
                 RtFrameStats.FRAME.count("entityTableFlushes", 1);
             }
         }
-        return new FrameEntities(base, build.instances, build.blas, build.geomTableAddr,
+        FrameEntities frame = new FrameEntities(base, build.instances, build.blas, build.geomTableAddr,
                 new FrameUse(build.lists, build.table));
+        return retainCaptureSnapshot(frame);
+    }
+
+    public void beginCaptureSession() {
+        captureSession = true;
+        captureSnapshot = null;
+    }
+
+    public void endCaptureSession() {
+        captureSession = false;
+        captureSnapshot = null;
+    }
+
+    private FrameEntities retainCaptureSnapshot(FrameEntities frame) {
+        if (captureSession) {
+            // BLAS work belongs to the first frame. Later frames reuse the same guarded resources.
+            captureSnapshot = new FrameEntities(frame.baseInstances, frame.dynamicInstances, List.of(),
+                    frame.geomTableAddr, frame.use);
+        }
+        return frame;
     }
 
     /** Associate every resource returned for a successfully enqueued frame with its graphics completion. */
@@ -1730,6 +1755,12 @@ public final class RtEntities {
                                  float rigidX, float rigidY, float rigidZ, int[] bucketTris) {
         if (bucketTris == null || bucketTris.length != RtAccel.ENTITY_BUCKETS) {
             throw new IllegalArgumentException("Missing entity BLAS bucket counts");
+        }
+        // An immutable capture reuses this table across its whole accumulation phase. Publish the frozen
+        // geometry as stationary so reconstruction does not reapply the first frame's live displacement.
+        if (captureSession) {
+            dispAddr = 0L;
+            rigidX = rigidY = rigidZ = 0f;
         }
         long entry = build.tableBase + (long) build.count * TABLE_ENTRY_BYTES;
         MemoryUtil.memPutLong(entry, primAddr);

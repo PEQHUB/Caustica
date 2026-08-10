@@ -15,6 +15,7 @@ import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientLifecycleEvents;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.rendering.v1.InvalidateRenderStateCallback;
+import net.minecraft.network.chat.Component;
 
 public final class CausticaClient implements ClientModInitializer {
 	private static boolean rtInitDone = false;
@@ -38,7 +39,7 @@ public final class CausticaClient implements ClientModInitializer {
 			}
 			if (!VanillaRenderController.rtRuntimeWorkRequested()) {
 				if (rtInitDone) {
-					shutdownRt();
+					shutdownRt(false);
 				}
 				return;
 			}
@@ -61,7 +62,9 @@ public final class CausticaClient implements ClientModInitializer {
 					// material flags resolve from the first section (PBR on join, no re-extract). No-op
 					// until we're in a world with the block atlas loaded, or once already created.
 					RtComposite.INSTANCE.ensureResourcesReady(ctx);
-					RtTerrain.update(ctx);
+					if (!CaptureSession.active()) {
+						RtTerrain.update(ctx);
+					}
 					// Log DLSS-FG availability once when frame generation is enabled (capability query only;
 					// the present-loop integration that consumes it is built separately).
 					if (dev.comfyfluffy.caustica.rt.pipeline.RtDlssFg.enabled()) {
@@ -76,17 +79,26 @@ public final class CausticaClient implements ClientModInitializer {
 		// world. Fixes stale geometry persisting across an End→Overworld switch (coords alone aren't
 		// world-unique). Resource reloads do NOT fire this; that path is handled separately.
 		InvalidateRenderStateCallback.EVENT.register(() -> {
+			UltraScreenshot.INSTANCE.abort(
+					Component.translatable("caustica.status.ultraScreenshot.invalidated"));
 			RtTerrain.requestFullClear();
 			RtComposite.INSTANCE.resetExposureHistory();
 			RtComposite.INSTANCE.resetFailureLatch(); // F3+A doubles as manual RT recovery after a latched failure
 		});
 
 		ClientLifecycleEvents.CLIENT_STOPPING.register(client -> {
-			shutdownRt();
+			shutdownRt(true);
 		});
 	}
 
-	private static void shutdownRt() {
+	private static void shutdownRt(boolean finalClientStop) {
+		if (finalClientStop) {
+			UltraScreenshot.INSTANCE.shutdown();
+		} else {
+			// A temporary RT teardown must not release a pending vanilla PNG write. Its callback
+			// remains the owner of the shared lease, preventing a second capture after RT restarts.
+			UltraScreenshot.INSTANCE.stopRenderer();
+		}
 		WorldRenderScaler.INSTANCE.destroy();
 		RtUiOverlay.destroy(); // GUI redirect is not gated by rtInitDone; always release its TextureTarget
 		if (!rtInitDone) {

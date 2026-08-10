@@ -1,4 +1,17 @@
 {
+	"key.category.caustica.controls": "Caustica",
+	"key.caustica.ultra_screenshot": "Ultra Screenshot",
+	"caustica.status.ultraScreenshot.cancelled": "Ultra screenshot cancelled",
+	"caustica.status.ultraScreenshot.requiresWorld": "Ultra screenshot requires an active world",
+	"caustica.status.ultraScreenshot.requiresDlssRr": "Ultra screenshot requires ray tracing, DLSS Ray Reconstruction, and Debug View Off",
+	"caustica.status.ultraScreenshot.busy": "Another capture mode is active",
+	"caustica.status.screenshot.busy": "Screenshot capture is already in progress",
+	"caustica.status.ultraScreenshot.started": "Ultra screenshot: DLAA at %s SPP",
+	"caustica.status.ultraScreenshot.invalidated": "Ultra screenshot cancelled because render state changed",
+	"caustica.status.ultraScreenshot.failed": "Ultra screenshot cancelled because rendering failed",
+	"caustica.status.ultraScreenshot.timedOut": "Ultra screenshot cancelled after 30 seconds without a fresh DLSS frame",
+	"caustica.status.ultraScreenshot.resized": "Ultra screenshot cancelled because resolution changed",
+
 	"caustica.options.rt.header": "Ray Tracing",
 
 	"caustica.options.rt.exposureMode": "Exposure",
