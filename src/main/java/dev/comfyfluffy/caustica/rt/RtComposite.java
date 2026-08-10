@@ -67,6 +67,7 @@ import dev.comfyfluffy.caustica.rt.overlay.RtWorldOverlay;
 import dev.comfyfluffy.caustica.rt.pipeline.RtHdrCompositePipeline;
 import dev.comfyfluffy.caustica.rt.pipeline.RtSdrPresentPipeline;
 import dev.comfyfluffy.caustica.rt.pipeline.RtExposure;
+import dev.comfyfluffy.caustica.rt.pipeline.RtPathSamplerData;
 import dev.comfyfluffy.caustica.rt.pipeline.RtPipeline;
 import dev.comfyfluffy.caustica.rt.pipeline.RtToneLut;
 import dev.comfyfluffy.caustica.rt.pipeline.RtToneMapping;
@@ -106,6 +107,9 @@ public final class RtComposite {
     // generated from the same Slang module and owns this second ABI as well. debugView is no longer
     // part of it -- no world shader reads it anymore; debug views are a downstream compute pass.
     private static final long PATH_RECORD_BYTES = 48L;
+    private static final int PATH_SEGMENTS_PER_PIXEL = RtPathSamplerData.PATH_BRANCH_COUNT;
+    private static final int PATH_PIXEL_AXIS_LIMIT = 1 << 16;
+    private static final long PATH_SAMPLE_INDEX_LIMIT = 1L << Integer.SIZE;
     private static int debugView() {
         return CausticaConfig.Rt.Composite.DEBUG_VIEW.value();
     }
@@ -153,6 +157,11 @@ public final class RtComposite {
     }
 
     private RtPipeline worldPipeline;
+    private RtPathSamplerData pathSamplerData;
+    private long pathSampleCursor;
+    private int pathSampleEpoch;
+    private boolean pathSamplerResetPending = true;
+    private long pathSamplingPolicySignature = Long.MIN_VALUE;
     // Set at the HEAD of Minecraft.reloadResourcePacks() (mixin): a resource reload recreates the block
     // atlas + entity textures. We tear down the world pipeline there (drops all descriptor references) and
     // rebuild it once the NEW atlas is in place — detected by the atlas view handle changing away from
@@ -504,7 +513,75 @@ public final class RtComposite {
 
     /** Reset exposure filtering after an explicit render-state invalidation such as F3+A. */
     public void resetExposureHistory() {
+        pathSamplerResetPending = true;
         exposure.requestReset();
+    }
+
+    private void refreshPathSamplingPolicy(int frameSpp) {
+        long reservation = pathSamplesPerFrame(frameSpp);
+        long signature = pathSamplingPolicySignature(frameSpp);
+        if (pathSamplingPolicySignature != signature) {
+            pathSamplingPolicySignature = signature;
+            pathSamplerResetPending = true;
+            resetPathSamplingConsumers();
+        }
+        if (!pathSamplerResetPending && pathSampleCursor > PATH_SAMPLE_INDEX_LIMIT - reservation) {
+            pathSamplerResetPending = true;
+            resetPathSamplingConsumers();
+        }
+        if (pathSamplerResetPending) {
+            pathSampleCursor = 0L;
+            pathSampleEpoch++;
+            if (pathSampleEpoch == 0) {
+                pathSampleEpoch = 1;
+            }
+            pathSamplerResetPending = false;
+        }
+    }
+
+    private void resetPathSamplingConsumers() {
+        mvHasPrev = false;
+        waterWaveTimeValid = false;
+        fgReset = true;
+    }
+
+    private long pathSamplingPolicySignature(int frameSpp) {
+        int bounceCount = maxBounces();
+        if (bounceCount < 0 || bounceCount > RtPathSamplerData.MAX_SUPPORTED_BOUNCE) {
+            throw new IllegalStateException("Path sampler does not support max-bounces=" + bounceCount);
+        }
+        int risCandidates = CausticaConfig.Rt.Lights.RIS_CANDIDATES.value();
+        if (risCandidates < 0 || risCandidates > RtPathSamplerData.MAX_RIS_CANDIDATES) {
+            throw new IllegalStateException("Path sampler does not support RIS candidates=" + risCandidates);
+        }
+
+        long signature = 17L;
+        signature = signature * 31L + RtPathSamplerData.ALGORITHM_VERSION;
+        signature = signature * 31L + frameSpp;
+        signature = signature * 31L + bounceCount;
+        signature = signature * 31L + risCandidates;
+        return signature;
+    }
+
+    private static long pathSamplesPerFrame(int frameSpp) {
+        if (frameSpp < 1) {
+            throw new IllegalArgumentException("Path-tracing SPP must be positive: " + frameSpp);
+        }
+        long reservation = frameSpp;
+        if (reservation > PATH_SAMPLE_INDEX_LIMIT) {
+            throw new IllegalArgumentException("Path-tracing SPP exhausts the 32-bit sample domain: " + frameSpp);
+        }
+        return reservation;
+    }
+
+    private int reservePathSamples(int frameSpp) {
+        long reservation = pathSamplesPerFrame(frameSpp);
+        if (pathSampleCursor > PATH_SAMPLE_INDEX_LIMIT - reservation) {
+            throw new IllegalStateException("Path sample cursor was not reset before 32-bit exhaustion");
+        }
+        int base = (int) pathSampleCursor;
+        pathSampleCursor += reservation;
+        return base;
     }
 
     /**
@@ -669,8 +746,10 @@ public final class RtComposite {
                 return false;
             }
             refreshMaterialBindingsIfNeeded(ctx);
+            int frameSpp = spp();
+            refreshPathSamplingPolicy(frameSpp);
             updateMotion();
-            recordFrame(ctx, active, nativeColor);
+            recordFrame(ctx, active, nativeColor, frameSpp);
             if (!loggedActive) {
                 loggedActive = true;
                 CausticaMod.LOGGER.info("RT composite active (terrain): {}x{}, RT output replaces the world target", width, height);
@@ -732,6 +811,11 @@ public final class RtComposite {
                     pushRing[i] = new PushSlot(ctx.createBuffer(WORLD_PUSH_SIZE,
                             VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true, "rt world push " + i));
                 }
+            }
+            if (pathSamplerData == null) {
+                pathSamplerData = RtPathSamplerData.create(ctx);
+                CausticaMod.LOGGER.info("Initialized canonical path sampler v{}",
+                        RtPathSamplerData.ALGORITHM_VERSION);
             }
             if (output != null) {
                 worldPipeline.setStorageImage(output.view);
@@ -943,10 +1027,10 @@ public final class RtComposite {
         output = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "trace color " + renderW + "x" + renderH);
         long pixelRecords = Math.multiplyExact((long) renderW, (long) renderH);
         long continuationBytes = Math.multiplyExact(
-                Math.multiplyExact(pixelRecords, 2L), PATH_RECORD_BYTES);
+                Math.multiplyExact(pixelRecords, (long) PATH_SEGMENTS_PER_PIXEL), PATH_RECORD_BYTES);
         continuationQueue = ctx.createBuffer(continuationBytes,
                 VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, false,
-                "path continuation queue " + renderW + "x" + renderH + "x2");
+                "path continuation queue " + renderW + "x" + renderH + "x" + PATH_SEGMENTS_PER_PIXEL);
         displayImage = ctx.createStorageImage(width, height, VK10.VK_FORMAT_R8G8B8A8_UNORM, "RT display image " + width + "x" + height);
         // PQ-encoded ([0,1], ST.2084) HDR display image, written in parallel by display.comp when HDR mode is active.
         hdrDisplayImage = ctx.createStorageImage(width, height, VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "RT HDR display image " + width + "x" + height);
@@ -1025,7 +1109,7 @@ public final class RtComposite {
         mvHasPrev = true;
     }
 
-    private void recordFrame(RtContext ctx, RtPipeline active, GpuTexture nativeColor) {
+    private void recordFrame(RtContext ctx, RtPipeline active, GpuTexture nativeColor, int frameSpp) {
         long dstImage = vkImage(nativeColor);
         var encoder = (VulkanCommandEncoder) ((CommandEncoderAccessor) RenderSystem.getDevice().createCommandEncoder()).caustica$getBackend();
         RtGpuExecutor gpuExecutor = ctx.gpuExecutor();
@@ -1035,6 +1119,17 @@ public final class RtComposite {
         // Reuse a completed readback slot, then latch one pre-exposure value for both raygen and resolve.
         // This belongs after the timeline snapshot and before any world push data is written.
         exposure.beginFrame(graphicsUseWaiter);
+        if (renderW > PATH_PIXEL_AXIS_LIMIT || renderH > PATH_PIXEL_AXIS_LIMIT) {
+            throw new IllegalStateException("Path sampler requires render dimensions at or below 65536: "
+                    + renderW + "x" + renderH);
+        }
+        int pathSampleBase = reservePathSamples(frameSpp);
+        RtPathSamplerData samplerData = Objects.requireNonNull(pathSamplerData,
+                "Path sampler data must exist before recording an RT frame");
+        long pathSampleAddress = samplerData.deviceAddress();
+        if (pathSampleAddress == 0L) {
+            throw new IllegalStateException("Path sampler data lost its device address");
+        }
         pendingGraphicsUse = graphicsUse;
         RtEntities.FrameEntities frameEntities = null;
         VkCommandBuffer cmd = encoder.allocateAndBeginTransientCommandBuffer();
@@ -1131,7 +1226,7 @@ public final class RtComposite {
                     (int) frameCounter,
                     mvPushMatrix,
                     new Float3(mvCamDeltaX, mvCamDeltaY, mvCamDeltaZ),
-                    spp(),
+                    frameSpp,
                     new Float2(jitterX, jitterY),
                     flags,
                     maxBounces(),
@@ -1159,7 +1254,10 @@ public final class RtComposite {
                     CausticaConfig.Rt.Lights.RIS_CANDIDATES.value(),
                     // Must be the SAME value the exposure resolve divides out this frame (it reads it
                     // from the same RtExposure accessor), or the two stop cancelling.
-                    exposure.preExposure()
+                    exposure.preExposure(),
+                    pathSampleBase,
+                    pathSampleEpoch,
+                    pathSampleAddress
             ).write(push);
             pushBuf.flush(0L, WORLD_PUSH_SIZE);
             // Upload any entity textures registered this frame into the bindless set before the trace.
@@ -1497,6 +1595,14 @@ public final class RtComposite {
             continuationQueue.destroy();
             continuationQueue = null;
         }
+        if (pathSamplerData != null) {
+            pathSamplerData.destroy();
+            pathSamplerData = null;
+        }
+        pathSampleCursor = 0L;
+        pathSampleEpoch = 0;
+        pathSamplerResetPending = true;
+        pathSamplingPolicySignature = Long.MIN_VALUE;
         destroyGuideImages();
         exposure.destroy();
         if (displayPipeline != null) {

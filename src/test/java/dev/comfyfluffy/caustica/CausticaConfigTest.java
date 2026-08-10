@@ -54,6 +54,33 @@ final class CausticaConfigTest {
     }
 
     @Test
+    void risCandidatesPreserveTheUpstreamDefaultAndClampAllRuntimeInputs() {
+        CausticaConfig.IntSetting setting = CausticaConfig.Rt.Lights.RIS_CANDIDATES;
+        int previous = setting.value();
+        try {
+            assertEquals(8, setting.defaultValue());
+            setting.set(-1);
+            assertEquals(0, setting.value());
+            setting.set(64);
+            assertEquals(32, setting.value());
+        } finally {
+            setting.set(previous);
+        }
+    }
+
+    @Test
+    void samplingDefaultsMatchTheRendererProfile() {
+        assertEquals(8, CausticaConfig.Rt.Lights.RIS_CANDIDATES.defaultValue());
+        assertEquals(4, CausticaConfig.Rt.Composite.MAX_BOUNCES.defaultValue());
+    }
+
+    @Test
+    void registersSamplingSettingsForConfigRoundTrips() {
+        CausticaConfig.ensureRegistered();
+        assertTrue(hasSetting("caustica.rt.risCandidates"));
+    }
+
+    @Test
     void paperWhiteCannotExceedTheSelectedPeak() {
         var paperWhite = CausticaConfig.Rt.Hdr.PAPER_WHITE_NITS;
         var peak = CausticaConfig.Rt.Hdr.PEAK_NITS;

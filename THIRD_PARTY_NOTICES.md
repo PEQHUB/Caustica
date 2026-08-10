@@ -61,3 +61,20 @@ Bundled NVIDIA SDK runtime libraries may include files matching:
 
 Caustica's `ngxshim` native library is project-owned glue code and follows
 Caustica's project license unless otherwise noted.
+
+## Joe-Kuo Sobol direction numbers
+
+`RtSobolDirectionNumbers.java` expands the first four dimensions of the
+`new-joe-kuo-6.21201` data set by Frances Y. Kuo and Stephen Joe (2008).
+
+Copyright (c) 2008, Frances Y. Kuo and Stephen Joe. All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the copyright notice, conditions,
+and disclaimer are retained. Neither the copyright holders nor the
+University of New South Wales or University of Waikato may be used to endorse
+derived products without prior written permission.
+
+The data is provided without warranty; the copyright holders are not liable
+for damages arising from its use. The complete notice is retained in the
+source file.

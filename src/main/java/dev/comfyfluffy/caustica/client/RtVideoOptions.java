@@ -7,6 +7,7 @@ import dev.comfyfluffy.caustica.CausticaConfig.FloatSetting;
 import dev.comfyfluffy.caustica.CausticaConfig.IntSetting;
 import dev.comfyfluffy.caustica.CausticaConfig.StringSetting;
 import dev.comfyfluffy.caustica.rt.pipeline.RtToneMapping;
+import dev.comfyfluffy.caustica.rt.terrain.RtTerrain;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -72,6 +73,7 @@ public final class RtVideoOptions {
             gamma(),
             spp(),
             maxBounces(),
+            risCandidates(),
             entities(),
             particles(),
             waterWaves(),
@@ -291,6 +293,30 @@ public final class RtVideoOptions {
             new OptionInstance.IntRange(2, 8),
             Math.clamp(setting.value(), 2, 8),
             setting::set);
+    }
+
+    private static OptionInstance<Integer> risCandidates() {
+        IntSetting setting = CausticaConfig.Rt.Lights.RIS_CANDIDATES;
+        return new OptionInstance<>(
+            "caustica.options.rt.risCandidates",
+            OptionInstance.cachedConstantTooltip(Component.translatable("caustica.options.rt.risCandidates.tooltip")),
+            (caption, value) -> Options.genericValueLabel(caption,
+                    value == 0
+                            ? Component.translatable("caustica.options.rt.risCandidates.off")
+                            : Component.literal(value + " candidates")),
+            new OptionInstance.IntRange(0, 32),
+            Math.clamp(setting.value(), 0, 32),
+            value -> {
+                if (setting.value() == value) {
+                    return;
+                }
+                setting.set(value);
+                // Meshing omits emitter records while RIS is disabled; rebuild residency when the
+                // setting changes so the selected light population reaches the next render. DLSS-RR
+                // intentionally keeps its history here: this is a gradual lighting change, not a
+                // camera, dimension, resolution, or feature discontinuity.
+                RtTerrain.requestFullClear();
+            });
     }
 
     private static OptionInstance<Boolean> entities() {

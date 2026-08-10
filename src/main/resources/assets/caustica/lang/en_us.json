@@ -24,6 +24,10 @@
 	"caustica.options.rt.maxBounces": "Path Bounces",
 	"caustica.options.rt.maxBounces.tooltip": "Maximum number of secondary path-tracing bounces after the primary hit. Higher captures more indirect light but costs more.",
 
+	"caustica.options.rt.risCandidates": "RIS Light Candidates",
+	"caustica.options.rt.risCandidates.tooltip": "Emitter candidates tested per diffuse vertex. Higher values reduce torch and glow-light noise but cost more ray-tracing work; zero disables RIS.",
+	"caustica.options.rt.risCandidates.off": "Off",
+
 	"caustica.options.rt.entities": "Ray-Traced Entities",
 	"caustica.options.rt.entities.tooltip": "Include entities and block entities in the ray-traced scene.",
 

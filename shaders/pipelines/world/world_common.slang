@@ -88,6 +88,13 @@ public struct WorldPush {
     // near mid-grey at any scene brightness; the display pass divides it back out, so the two cancel
     // exactly and this cannot change the image. 1.0 disables it.
     public float    preExposure;
+    // Canonical sample progression. pathSampleBase advances once per per-pixel continuation sample;
+    // the two possible continuation leaves have independent branch roots instead of skipping Sobol indices.
+    // pathSampleEpoch changes whenever temporal history and the sequence cursor reset. Every valid RT
+    // dispatch has a nonzero pathSampleAddr -- initialization failure falls back outside RT.
+    public uint      pathSampleBase;
+    public uint      pathSampleEpoch;
+    public uint64_t  pathSampleAddr;
 };
 
 // 32-byte hot area-light record. Linear ACEScg radiance uses packed R11G11B10; the

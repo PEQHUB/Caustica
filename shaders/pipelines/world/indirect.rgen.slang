@@ -34,15 +34,14 @@ import bindings;
 
 // Atmospheric transmittance LUT (RtSkyLut), also bound to world.rmiss at the same binding: raygen reads it
 // to colour the NEE sun/moonlight, the miss shader reads it to tint the visible discs and stars.
-public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex) {
+public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex, uint pathBranch) {
     float3 L = float3(0.0, 0.0, 0.0);
     float3 ro = seg.ro;
     float3 rd = seg.rd;
     float3 throughput = seg.throughput;
-    // Pass A is fixed at one sample per pixel. Decorrelate each Pass B resample here so configured SPP
-    // produces independent lighting/BSDF paths from the shared terminal continuation.
-    uint seed = seg.seed ^ sampleIndex * 2246822519u;
-    seed = pcg(seed);
+    // Pass A is fixed at one sample per pixel. Pass B advances one global Sobol index per continuation
+    // sample; optional groups are keyed from the same immutable transport sampler only when sampled.
+    PathSampler transportSampler = makePathSampler(pix, sampleIndex, pathBranch);
     float rayConeWidth = seg.rayConeWidth;
     float rayConeSpread = max(seg.rayConeSpread, RAY_CONE_MIN_SPREAD);
     int maxBounces = int(worldPush.maxBounces);
@@ -50,13 +49,8 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex) {
     // RIS emitter NEE: direct lighting from block emitters is active when lights are published and the
     // candidate count is non-zero. Otherwise emitters contribute only when a path hits them.
     bool risOn = worldPush.risCandidates > 0u && worldPush.lightCount > 0u && pc.lightBufAddr != 0;
-    // Independent light-proposal RNG. Screen-space coherent selection is intentionally deferred until
-    // there is a real presampled RIS tile buffer; direct sharing made tile-shaped lighting noise visible.
-    // Measured: making a 16x16 tile share this seed recovers at most 1.3ms, so a future pool should share
-    // the POOL rather than the seed — the win is in removing dependent loads, not in coherence.
-    uint proposalSeed = pix.x * 1973u + pix.y * 9277u + 26699u
-            ^ worldPush.frameIndex * 2654435761u ^ sampleIndex * 2246822519u;
-    proposalSeed = pcg(proposalSeed);
+    // Independent light-proposal samples use their own stream. Screen-space coherent selection is
+    // intentionally deferred until there is a real presampled RIS tile buffer.
     // The medium the segment starts in. For the camera segment that is water when the eye is submerged
     // (so the first ray already carries the right relative index and absorption); for a segment split off
     // a dielectric it is whatever the parent was travelling through.
@@ -104,6 +98,8 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex) {
             L += throughput * sky; // escaped to sky
             break;
         }
+
+        beginPathBounce(transportSampler, uint(bounce));
 
         // Beer–Lambert: attenuate along the segment just travelled by the medium it lay inside. Applies
         // to every hit reached while inside a volume dielectric (its own exit face, or whatever content
@@ -166,7 +162,7 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex) {
             // comes from the fluid mesher, which applies no inset, so it takes the ordinary bias.
             float transmitBias = isWater ? SURF_BIAS : INSET_TRANSMIT_BIAS;
 
-            bool chooseReflection = rndf(seed) < F;
+            bool chooseReflection = pathSample(transportSampler, PATH_DIM_INTERFACE) < F;
             if (chooseReflection) {
                 rd = reflect(rd, n);
                 ro = offsetSurfaceOrigin(hitPos, geometricNormal, rd, SURF_BIAS);
@@ -185,7 +181,7 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex) {
             showCelestial = true; // specular interface: the continuation ray may see the sun/moon disc
             if (bounce >= rrStart) {
                 float q = clamp(max(throughput.r, max(throughput.g, throughput.b)), 0.02, 1.0);
-                if (rndf(seed) > q) {
+                if (pathSample(transportSampler, PATH_DIM_RR) > q) {
                     break;
                 }
                 throughput /= q;
@@ -202,7 +198,8 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex) {
             float3 lightDir = celestialLight.dir;
             float lightHalfAngle = celestialLight.halfAngle;
             if (lightHalfAngle > 0.0) {
-                lightDir = sampleSquare(lightDir, lightHalfAngle, seed);
+                PathSampler celestialSampler = pathSamplerWithGroup(transportSampler, PATH_GROUP_CELESTIAL);
+                lightDir = sampleSquare(lightDir, lightHalfAngle, celestialSampler, PATH_DIM_CELESTIAL_U);
             }
             // Billboards are effectively two-sided receivers. Bias from the side facing the light; shadow
             // rays exclude particles anyway, but this keeps the origin sane when the light is behind the
@@ -221,9 +218,10 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex) {
             // sampler as terrain/entities, but two-sided: a billboard has no back face, so light
             // striking either side of the quad should still land (matches the sun/moon NEE above).
             if (risOn) {
+                PathSampler risSampler = pathSamplerWithGroup(transportSampler, PATH_GROUP_RIS_BASE);
                 float3 v = -rd;
                 Reservoir r = risInitial(hitPos, n, v, rd, albedo, float3(0.0, 0.0, 0.0), 1.0,
-                                         true, 0.0, seed, proposalSeed);
+                                         true, 0.0, risSampler);
                 L += throughput * shadeReservoir(r, hitPos, n, v, rd, albedo, float3(0.0, 0.0, 0.0), 1.0,
                                                  true, 0.0);
             }
@@ -233,7 +231,8 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex) {
             }
             throughput *= albedo;
             ro = hitPos + n * SURF_BIAS;
-            rd = cosineDir(n, seed);
+            PathSampler diffuseSampler = pathSamplerWithGroup(transportSampler, PATH_GROUP_TRANSPORT_DIFFUSE);
+            rd = cosineDir(n, diffuseSampler, PATH_DIM_DIFFUSE_U);
             rayConeSpread = max(rayConeSpread, RAY_CONE_DIFFUSE_SPREAD);
             showCelestial = false; // diffuse receiver: direct sun/moon was handled by NEE above
             continue;
@@ -282,7 +281,8 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex) {
         float3 lightDir = celestialLight.dir;
         float lightHalfAngle = celestialLight.halfAngle;
         if (lightHalfAngle > 0.0) {
-            lightDir = sampleSquare(lightDir, lightHalfAngle, seed);
+            PathSampler celestialSampler = pathSamplerWithGroup(transportSampler, PATH_GROUP_CELESTIAL);
+            lightDir = sampleSquare(lightDir, lightHalfAngle, celestialSampler, PATH_DIM_CELESTIAL_U);
         }
         float ndl = max(0.0, dot(n, lightDir));
         if (ndl > 0.0) {
@@ -315,8 +315,9 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex) {
         // sss=0 there (falls back to plain front-only RIS).
         if (risOn) {
             float activeSss = hitDepth <= MAX_SSS_INDIRECT_DEPTH ? sss : 0.0;
+            PathSampler risSampler = pathSamplerWithGroup(transportSampler, PATH_GROUP_RIS_BASE);
             Reservoir r = risInitial(hitPos, n, v, rd, diffAlb, F0, rough, false, activeSss,
-                                     seed, proposalSeed);
+                                     risSampler);
             L += throughput * shadeReservoir(r, hitPos, n, v, rd, diffAlb, F0, rough, false,
                                              activeSss);
         }
@@ -355,7 +356,8 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex) {
         float ps = exactSpecular && luminance(diffAlb) <= 1.0e-6
                        ? 1.0
                        : clamp(luminance(F0) / (luminance(F0) + luminance(diffAlb) + 1.0e-4), 0.1, 0.9);
-        if (rndf(seed) < ps) {
+        bool sampledSpecular = pathSample(transportSampler, PATH_DIM_LOBE) < ps;
+        if (sampledSpecular) {
             float3 l;
             if (exactSpecular) {
                 // Authored zero is a delta distribution, not a narrow finite GGX lobe. This avoids the
@@ -363,7 +365,8 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex) {
                 l = reflect(rd, n);
                 throughput *= fresnelSchlick(clamp(dot(n, v), 0.0, 1.0), F0) / ps;
             } else {
-                float3 h = sampleGGXVNDF(n, v, rough, seed);
+                PathSampler specularSampler = pathSamplerWithGroup(transportSampler, PATH_GROUP_TRANSPORT_SPECULAR);
+                float3 h = sampleGGXVNDF(n, v, rough, specularSampler, PATH_DIM_GGX_U);
                 l = reflect(rd, h); // rd = -v: reflect the incoming ray about the microfacet normal
                 float ndl2 = dot(n, l);
                 if (ndl2 <= 0.0) {
@@ -380,7 +383,8 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex) {
         } else {
             throughput *= diffAlb / (1.0 - ps);
             ro = p;
-            rd = cosineDir(n, seed);
+            PathSampler diffuseSampler = pathSamplerWithGroup(transportSampler, PATH_GROUP_TRANSPORT_DIFFUSE);
+            rd = cosineDir(n, diffuseSampler, PATH_DIM_DIFFUSE_U);
             rayConeSpread = max(rayConeSpread, RAY_CONE_DIFFUSE_SPREAD);
             showCelestial = false; // diffuse lobe: disc covered by NEE, hide it (anti-firefly)
         }
@@ -388,7 +392,7 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex) {
         // Russian roulette on deeper bounces: survive with prob = max channel, rescale survivors.
         if (bounce >= rrStart) {
             float q = clamp(max(throughput.r, max(throughput.g, throughput.b)), 0.02, 1.0);
-            if (rndf(seed) > q) {
+            if (pathSample(transportSampler, PATH_DIM_RR) > q) {
                 break;
             }
             throughput /= q;
@@ -417,7 +421,7 @@ void main() {
         PackedPathSegment packed = queue[recordIndex];
         PathSegment segment = unpackPathSegment(packed);
         for (uint s = 0u; s < spp; ++s) {
-            frameRadiance += tracePath(segment, uint2(pix), s + leaf * spp);
+            frameRadiance += tracePath(segment, uint2(pix), s, leaf);
         }
         if (packed.nextRecord == PATH_NO_NEXT) {
             break;
