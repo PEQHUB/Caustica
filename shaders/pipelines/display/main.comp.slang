@@ -1,10 +1,11 @@
-// Maps the display-res scene-linear ACEScg RT image to sRGB SDR and, when enabled, PQ/BT.2020 HDR,
-// via baked ACES 2.0 display-transform LUTs (see tools/bake_display_lut.py). Tonemap seam: the path tracer and DLSS-RR use scene-linear
-// ACEScg; exposure is applied from the compositor-owned 1x1 image right here, followed by the selected
-// scene-referred ACES look (LMT), then the shared ACES 2.0 output transform for each display.
+// Maps the display-res scene-linear ACEScg RT image to sRGB SDR and, when enabled, PQ/BT.2020 HDR.
+// The path tracer and DLSS-RR use scene-linear ACEScg; exposure is applied from the compositor-owned
+// 1x1 image here. ACES 2.0 uses the baked display-transform LUTs and the package's scene-referred look
+// (LMT); local analytical modes own their complete display rendering.
 
 import display_common;
 import bindings;
+import tone_mapping;
 
 [[vk::push_constant]] DisplayPush pc;
 
@@ -99,6 +100,55 @@ float3 displayGammaSdr(float3 displayColor) {
     return clamp(srgbEncode(luminanceGamma(srgbDecode(code), BT709_LUMA)), 0.0, 1.0);
 }
 
+// Local analytical operators were authored against scene-linear BT.709. The transport and the
+// ACES 2.0 LUTs use ACEScg/AP1, so this conversion is explicit at the opt-in local seam; the default
+// ACES 2.0 path never takes it.
+static const float3 ACESCG_TO_BT709_R = float3(1.70505095, -0.62179214, -0.08325887);
+static const float3 ACESCG_TO_BT709_G = float3(-0.13025641, 1.14080477, -0.01054832);
+static const int PSYCHOV24_SDR_MODE = 8;
+static const float3 ACESCG_TO_BT709_B = float3(-0.02400336, -0.12896897, 1.15297234);
+float3 acescgToBt709Signed(float3 acesCg) {
+    return float3(
+            dot(acesCg, ACESCG_TO_BT709_R),
+            dot(acesCg, ACESCG_TO_BT709_G),
+            dot(acesCg, ACESCG_TO_BT709_B));
+}
+
+ToneMappingParameters sdrToneParameters() {
+    ToneMappingParameters p;
+    p.param0 = pc.sdrParam0;
+    p.param1 = pc.sdrParam1;
+    p.param2 = pc.sdrParam2;
+    p.param3 = pc.sdrParam3;
+    p.param4 = pc.sdrParam4;
+    p.param5 = pc.sdrParam5;
+    p.param6 = pc.sdrParam6;
+    p.param7 = pc.sdrParam7;
+    return p;
+}
+
+ToneMappingParameters hdrToneParameters() {
+    ToneMappingParameters p;
+    p.param0 = pc.hdrParam0;
+    p.param1 = pc.hdrParam1;
+    p.param2 = pc.hdrParam2;
+    p.param3 = pc.hdrParam3;
+    p.param4 = pc.hdrParam4;
+    p.param5 = pc.hdrParam5;
+    p.param6 = pc.hdrParam6;
+    p.param7 = pc.hdrParam7;
+    return p;
+}
+
+float3 localSdrToneMap(float3 exposedAcesCg) {
+    float3 bt709Signed = acescgToBt709Signed(exposedAcesCg);
+    ToneMappingParameters p = sdrToneParameters();
+    float3 mapped = pc.sdrMode == PSYCHOV24_SDR_MODE
+            ? toneMapPsychoV24Sdr(bt709Signed, p)
+            : applyClassicToneMapper(pc.sdrMode, max(bt709Signed, float3(0.0)), p);
+    return displayGammaSdr(srgbEncode(clamp(mapped, 0.0, 1.0)));
+}
+
 static const float PQ_M1 = 0.1593017578125;
 static const float PQ_M2 = 78.84375;
 static const float PQ_C1 = 0.8359375;
@@ -124,6 +174,15 @@ float3 displayGammaHdr(float3 pqColor) {
     float3 normalizedNits = clamp(pqDecode(pqColor) / peak, 0.0, 1.0);
     float3 adjustedNits = peak * luminanceGamma(normalizedNits, BT2020_LUMA);
     return clamp(pqEncode(adjustedNits), 0.0, 1.0);
+}
+
+float3 localHdrToneMap(float3 exposedAcesCg) {
+    float3 bt709Signed = acescgToBt709Signed(exposedAcesCg);
+    ToneMappingParameters p = hdrToneParameters();
+    if (pc.hdrMode == 2) {
+        return toneMapPsychoV24Hdr(bt709Signed, pc.paperWhiteNits, pc.headroom, p);
+    }
+    return toneMapBt2390Hdr(max(bt709Signed, float3(0.0)), pc.paperWhiteNits, pc.headroom);
 }
 
 // Exposure -> log2 shaper -> trilinear LUT fetch. The LUT already bakes in ACES 2.0's gamut mapping to
@@ -155,10 +214,17 @@ void main(uint3 dispatchId : SV_DispatchThreadID) {
     float exposure = max(exposureImage[int2(0, 0)], 0.0);
     float3 exposedAcesCg = max(rt.rgb * exposure, float3(0.0));
     exposedAcesCg += sampleBloom(pix, w, h) * max(pc.bloomStrength, 0.0);
-    float3 lookedAcesCg = applyLook(exposedAcesCg);
-    outputImage[pix] = float4(tonemap(lookedAcesCg), 1.0);
+    float3 lookedAcesCg = exposedAcesCg;
+    if (pc.sdrMode == 0 || (pc.hdrEnabled != 0 && pc.hdrMode == 0)) {
+        lookedAcesCg = applyLook(exposedAcesCg);
+    }
+    outputImage[pix] = pc.sdrMode == 0
+            ? float4(tonemap(lookedAcesCg), 1.0)
+            : float4(localSdrToneMap(exposedAcesCg), 1.0);
 
     if (pc.hdrEnabled != 0) {
-        hdrImage[pix] = float4(tonemapHdr(lookedAcesCg), 1.0);
+        hdrImage[pix] = pc.hdrMode == 0
+                ? float4(tonemapHdr(lookedAcesCg), 1.0)
+                : float4(displayGammaHdr(localHdrToneMap(exposedAcesCg)), 1.0);
     }
 }

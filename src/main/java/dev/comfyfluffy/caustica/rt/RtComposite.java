@@ -69,6 +69,7 @@ import dev.comfyfluffy.caustica.rt.pipeline.RtSdrPresentPipeline;
 import dev.comfyfluffy.caustica.rt.pipeline.RtExposure;
 import dev.comfyfluffy.caustica.rt.pipeline.RtPipeline;
 import dev.comfyfluffy.caustica.rt.pipeline.RtToneLut;
+import dev.comfyfluffy.caustica.rt.pipeline.RtToneMapping;
 import dev.comfyfluffy.caustica.rt.terrain.RtTerrain;
 
 import java.nio.ByteBuffer;
@@ -606,10 +607,13 @@ public final class RtComposite {
             if (sdrToneLut == null) {
                 sdrToneLut = RtToneLut.load(ctx, "sdr_aces2_rec709.bin");
             }
-            // The mastering target is live, so track it each frame.
-            int wantedHdrNits = CausticaConfig.Rt.Hdr.PEAK_NITS.value();
-            if (hdrToneLut == null || loadedHdrLutNits != wantedHdrNits) {
-                RtToneLut newHdrLut = RtToneLut.load(ctx, "hdr_aces2_rec2020_" + wantedHdrNits + "nit.bin");
+            // The display peak is live. ACES 2.0 has four packaged mastering targets, so bind the
+            // nearest one; analytical HDR modes use the exact configured peak in their push constants.
+            int requestedHdrNits = CausticaConfig.Rt.Hdr.PEAK_NITS.value();
+            int wantedHdrLutNits = CausticaConfig.Rt.Hdr.nearestAcesLutNits(requestedHdrNits);
+            if (hdrToneLut == null || loadedHdrLutNits != wantedHdrLutNits) {
+                RtToneLut newHdrLut = RtToneLut.load(ctx,
+                        "hdr_aces2_rec2020_" + wantedHdrLutNits + "nit.bin");
                 if (newHdrLut.size != sdrToneLut.size) {
                     // display.comp's lutSize push constant is shared by both LUT samples (see
                     // lutTexCoord()); bake_display_lut.py currently always sizes both the same, but
@@ -623,11 +627,10 @@ public final class RtComposite {
                     hdrToneLut.destroy();
                 }
                 hdrToneLut = newHdrLut;
-                loadedHdrLutNits = wantedHdrNits;
+                loadedHdrLutNits = wantedHdrLutNits;
             }
-            // The scene-referred LMT is part of the immutable versioned look package and shared by
-            // both SDR and HDR output transforms. It cannot be switched independently from the
-            // package's exposure and photometric anchors.
+            // The package LMT feeds only the ACES 2.0 SDR and HDR output transforms. Analytical
+            // mappers consume the exposed scene signal directly and own their display rendering.
             if (lookLut == null) {
                 lookLut = RtToneLut.loadResource(ctx, LOOK.lmtResource());
             }
@@ -1260,8 +1263,9 @@ public final class RtComposite {
 
             try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "map RT to display");
                  RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.displayMap")) {
-                displayPipeline.dispatch(cmd, displayW, displayH, CausticaConfig.Rt.Hdr.enabled(),
-                        sdrToneLut.size, CausticaConfig.Rt.Tonemap.GAMMA.value(), loadedHdrLutNits,
+                int displayPeakNits = CausticaConfig.Rt.Hdr.effectivePeakNits();
+                displayPipeline.dispatch(cmd, displayW, displayH, RtToneMapping.current(),
+                        sdrToneLut.size, CausticaConfig.Rt.Tonemap.GAMMA.value(), displayPeakNits,
                         true, lookLut.size, LOOK.bloom().strength() / bloomLevels.length);
             }
             hdrWrittenThisFrame = CausticaConfig.Rt.Hdr.enabled();

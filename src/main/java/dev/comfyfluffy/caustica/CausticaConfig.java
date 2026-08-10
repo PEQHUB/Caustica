@@ -58,7 +58,10 @@ public final class CausticaConfig {
         Object[] touch = {
             Rt.ENABLED, Rt.Composite.SPP, Rt.Composite.MAX_BOUNCES, Rt.Terrain.ASYNC_DISPATCH_PER_PASS, Rt.Omm.ENABLED,
             Rt.Entities.ENABLED, Rt.Entities.GLOW_ENABLED, Rt.EntityTextures.MAX_TEXTURES, Rt.DlssRr.ENABLED, Rt.Fg.ENABLED,
-            Rt.Reflex.ENABLED, Rt.Exposure.MODE, Rt.Tonemap.GAMMA, Rt.FrameStats.ENABLED,
+            Rt.Reflex.ENABLED, Rt.Exposure.MODE, Rt.Exposure.LOW_PERCENTILE, Rt.Exposure.HIGH_PERCENTILE,
+            Rt.Exposure.PRE_EXPOSURE, Rt.Tonemap.GAMMA,
+            Rt.Sdr.TONE_MAPPER, Rt.Hdr.TONE_MAPPER,
+            Rt.FrameStats.ENABLED,
             Rt.Screenshots.EXR_ENABLED, Rt.Hdr.ENABLED, Ngx.PATH,
         };
     }
@@ -96,14 +99,18 @@ public final class CausticaConfig {
                 " Controls direct lighting from glowing blocks such as torches, glowstone, and lava.\n"
                         + " Set ris-candidates to 0 to disable it. stats, dump, and dump-radius are debugging options.");
         FILE.setComment("tonemap",
-                " Controls the final image. gamma: 1 is neutral; lower values brighten midtones.");
+                " Controls the final image. ACES 2.0 is the SDR and HDR default;\n"
+                        + " PsychoV24 and the analytical operators are opt-in, with BT.2390 as the standards-based HDR\n"
+                        + " alternative. gamma: 1 is neutral; lower values brighten midtones.");
         FILE.setComment("exposure",
                 " Controls automatic exposure. manual-ev sets exposure in manual mode and adjusts it in auto mode.\n"
+                        + " low/high-percentile define the histogram window; pre-exposure keeps stored radiance near mid-grey.\n"
                         + " adapt-darken and adapt-brighten control adjustment speed in seconds.\n"
                         + " sky-weight-cap and emissive-weight-cap limit how much bright areas affect exposure.");
         FILE.setComment("hdr",
                 " HDR display output. Requires operating system and display support.\n"
-                        + " ui-nits controls UI brightness; peak-nits must be 500, 1000, 2000, or 4000.");
+                        + " ui-nits controls UI brightness; peak-nits uses 50-nit increments from 50 to 5000.\n"
+                        + " ACES 2.0 uses the nearest baked HDR mastering target; analytical HDR modes use the exact value.");
         FILE.setComment("screenshots",
                 " exr-enabled saves an ACEScg EXR beside the normal F2 PNG while ray tracing is active.");
     }
@@ -746,9 +753,9 @@ public final class CausticaConfig {
             public static final FloatSetting ADAPT_BRIGHTEN =
                     exposureScale("caustica.rt.exposure.adaptBrighten", "exposure.adapt-brighten", 0.4f);
             public static final FloatSetting LOW_PERCENTILE =
-                    clampedFloat("caustica.rt.exposure.lowPercentile", "exposure.low-percentile", 0.50f, 0.0f, 1.0f);
+                    percentile("caustica.rt.exposure.lowPercentile", "exposure.low-percentile", 0.50f);
             public static final FloatSetting HIGH_PERCENTILE =
-                    clampedFloat("caustica.rt.exposure.highPercentile", "exposure.high-percentile", 0.95f, 0.0f, 1.0f);
+                    percentile("caustica.rt.exposure.highPercentile", "exposure.high-percentile", 0.95f);
             public static final IntSetting STRIDE =
                     clampedInt("caustica.rt.exposure.stride", "exposure.stride", 2, 1, 8);
             public static final FloatSetting CENTER_WEIGHT_SIGMA =
@@ -798,10 +805,11 @@ public final class CausticaConfig {
             }
 
             private static String sanitizeMode(String value) {
-                if ("auto".equalsIgnoreCase(value)) {
+                String trimmed = value == null ? "" : value.trim();
+                if ("auto".equalsIgnoreCase(trimmed)) {
                     return "auto";
                 }
-                if ("manual".equalsIgnoreCase(value)) {
+                if ("manual".equalsIgnoreCase(trimmed)) {
                     return "manual";
                 }
                 return "auto";
@@ -815,6 +823,93 @@ public final class CausticaConfig {
                     clampedFloat("caustica.rt.tonemap.gamma", "tonemap.gamma", 1.0f, 0.1f, 5.0f);
 
             private Tonemap() {
+            }
+        }
+
+        /** Selectable SDR operators. ACES 2.0 is the default baked-LUT path. */
+        public static final class Sdr {
+            public static final StringSetting TONE_MAPPER =
+                    string("caustica.rt.sdr.toneMapper", "sdr.tone-mapper", "aces2.0",
+                            Sdr::sanitizeToneMapper);
+            public static final FloatSetting AGX_CONTRAST =
+                    finiteClampedFloat("caustica.rt.sdr.agx.contrast", "sdr.agx.contrast", 1.0f, 0.0f, 2.0f);
+            public static final FloatSetting AGX_SATURATION =
+                    finiteClampedFloat("caustica.rt.sdr.agx.saturation", "sdr.agx.saturation", 1.0f, 0.0f, 3.0f);
+            public static final FloatSetting PBR_START_COMPRESSION =
+                    finiteClampedFloat("caustica.rt.sdr.pbrNeutral.startCompression",
+                            "sdr.pbr-neutral.start-compression", 0.76f, 0.0f, 0.99f);
+            public static final FloatSetting PBR_DESATURATION =
+                    finiteClampedFloat("caustica.rt.sdr.pbrNeutral.desaturation",
+                            "sdr.pbr-neutral.desaturation", 0.15f, 0.0f, 1.0f);
+            public static final FloatSetting REINHARD_WHITE_POINT =
+                    finiteClampedFloat("caustica.rt.sdr.reinhard.whitePoint",
+                            "sdr.reinhard.white-point", 4.0f, 1.0f, 20.0f);
+            public static final FloatSetting ACES_EXPOSURE =
+                    finiteClampedFloat("caustica.rt.sdr.aces.exposure",
+                            "sdr.aces.exposure", 1.0f, 0.0f, 4.0f);
+            public static final FloatSetting LOTTES_CONTRAST =
+                    finiteClampedFloat("caustica.rt.sdr.lottes.contrast",
+                            "sdr.lottes.contrast", 1.0f, 0.1f, 5.0f);
+            public static final FloatSetting LOTTES_SHOULDER =
+                    finiteClampedFloat("caustica.rt.sdr.lottes.shoulder",
+                            "sdr.lottes.shoulder", 1.0f, 0.1f, 5.0f);
+            public static final FloatSetting LOTTES_HDR_MAX =
+                    finiteClampedFloat("caustica.rt.sdr.lottes.hdrMax",
+                            "sdr.lottes.hdr-max", 16.0f, 1.0f, 64.0f);
+            public static final FloatSetting LOTTES_MID_IN =
+                    finiteClampedFloat("caustica.rt.sdr.lottes.midIn",
+                            "sdr.lottes.mid-in", 0.18f, 0.01f, 1.0f);
+            public static final FloatSetting LOTTES_MID_OUT =
+                    finiteClampedFloat("caustica.rt.sdr.lottes.midOut",
+                            "sdr.lottes.mid-out", 0.18f, 0.01f, 1.0f);
+            public static final FloatSetting UNCHARTED_A =
+                    finiteClampedFloat("caustica.rt.sdr.uncharted2.a", "sdr.uncharted2.a", 0.15f, 0.01f, 1.0f);
+            public static final FloatSetting UNCHARTED_B =
+                    finiteClampedFloat("caustica.rt.sdr.uncharted2.b", "sdr.uncharted2.b", 0.50f, 0.01f, 2.0f);
+            public static final FloatSetting UNCHARTED_C =
+                    finiteClampedFloat("caustica.rt.sdr.uncharted2.c", "sdr.uncharted2.c", 0.10f, 0.0f, 1.0f);
+            public static final FloatSetting UNCHARTED_D =
+                    finiteClampedFloat("caustica.rt.sdr.uncharted2.d", "sdr.uncharted2.d", 0.20f, 0.01f, 2.0f);
+            public static final FloatSetting UNCHARTED_E =
+                    finiteClampedFloat("caustica.rt.sdr.uncharted2.e", "sdr.uncharted2.e", 0.02f, 0.0f, 1.0f);
+            public static final FloatSetting UNCHARTED_F =
+                    finiteClampedFloat("caustica.rt.sdr.uncharted2.f", "sdr.uncharted2.f", 0.30f, 0.01f, 2.0f);
+            public static final FloatSetting UNCHARTED_WHITE_POINT =
+                    finiteClampedFloat("caustica.rt.sdr.uncharted2.whitePoint",
+                            "sdr.uncharted2.white-point", 11.2f, 1.0f, 32.0f);
+            public static final FloatSetting GT_CONTRAST =
+                    finiteClampedFloat("caustica.rt.sdr.gt.contrast", "sdr.gt.contrast", 1.0f, 0.1f, 4.0f);
+            public static final FloatSetting GT_LINEAR_START =
+                    finiteClampedFloat("caustica.rt.sdr.gt.linearStart", "sdr.gt.linear-start", 0.22f, 0.01f, 0.99f);
+            public static final FloatSetting GT_LINEAR_LENGTH =
+                    finiteClampedFloat("caustica.rt.sdr.gt.linearLength", "sdr.gt.linear-length", 0.40f, 0.01f, 4.0f);
+            public static final FloatSetting GT_BLACK_CURVE =
+                    finiteClampedFloat("caustica.rt.sdr.gt.blackCurve", "sdr.gt.black-curve", 1.33f, 0.1f, 4.0f);
+            public static final FloatSetting GT_BLACK_LIFT =
+                    finiteClampedFloat("caustica.rt.sdr.gt.blackLift", "sdr.gt.black-lift", 0.0f, -0.5f, 0.5f);
+            public static final FloatSetting PSYCHOV24_COMPRESSION =
+                    finiteClampedFloat("caustica.rt.sdr.psychov24.compression",
+                            "sdr.psychov24.compression", 1.0f, 0.0f, 8.0f);
+            public static final FloatSetting PSYCHOV24_GAMUT_COMPRESSION =
+                    finiteClampedFloat("caustica.rt.sdr.psychov24.gamutCompression",
+                            "sdr.psychov24.gamut-compression", 1.0f, 0.0f, 1.0f);
+            public static final FloatSetting PSYCHOV24_HIGHLIGHTS =
+                    finiteClampedFloat("caustica.rt.sdr.psychov24.highlights",
+                            "sdr.psychov24.highlights", 1.0f, 0.0f, 3.0f);
+            public static final FloatSetting PSYCHOV24_SHADOWS =
+                    finiteClampedFloat("caustica.rt.sdr.psychov24.shadows",
+                            "sdr.psychov24.shadows", 1.0f, 0.0f, 3.0f);
+            public static final FloatSetting PSYCHOV24_CONTRAST =
+                    finiteClampedFloat("caustica.rt.sdr.psychov24.contrast",
+                            "sdr.psychov24.contrast", 1.0f, 0.1f, 3.0f);
+            public static final FloatSetting PSYCHOV24_PURITY =
+                    finiteClampedFloat("caustica.rt.sdr.psychov24.purity",
+                            "sdr.psychov24.purity", 1.0f, 0.0f, 3.0f);
+            private Sdr() {
+            }
+
+            private static String sanitizeToneMapper(String value) {
+                return dev.comfyfluffy.caustica.rt.pipeline.RtToneMapping.SdrMode.parse(value).canonicalName();
             }
         }
 
@@ -854,18 +949,46 @@ public final class CausticaConfig {
          * HDR display output. When enabled the swapchain is created in PQ (ST.2084/HDR10 — the display-ready
          * encoding both HDR10 swapchains and DLSS Frame Generation require; whatever pixel format the surface
          * pairs with that color space, commonly a 10-bit UNORM), falling back to SDR if the surface doesn't
-         * advertise it. The ACES LUT owns scene-to-display mapping; {@code uiNits} places SDR-authored UI
-         * in that PQ output, while {@code peakNits} selects the LUT's mastering target.
+         * advertise it. The selected display transform owns scene-to-display mapping; {@code uiNits} places
+         * SDR-authored UI in that PQ output, while {@code peakNits} controls the display peak. ACES 2.0 is
+         * the default and selects the nearest baked HDR LUT; analytical modes use the exact configured peak.
          */
         public static final class Hdr {
             public static final BooleanSetting ENABLED = bool("caustica.rt.hdr", "hdr.enabled", false);
             public static final FloatSetting UI_NITS =
                     clampedFloat("caustica.rt.hdr.uiNits", "hdr.ui-nits", 200.0f, 80.0f, 500.0f);
-
-            // ACES HDR LUTs are available only for these mastering targets.
-            public static final List<Integer> PEAK_NITS_STEPS = List.of(500, 1000, 2000, 4000);
+            public static final FloatSetting PAPER_WHITE_NITS =
+                    finiteClampedFloat("caustica.rt.hdr.paperWhiteNits", "hdr.paper-white-nits", 200.0f, 80.0f, 500.0f);
+            public static final StringSetting TONE_MAPPER =
+                    string("caustica.rt.hdr.toneMapper", "hdr.tone-mapper", "aces2.0",
+                            Hdr::sanitizeToneMapper);
+            public static final FloatSetting PSYCHOV24_COMPRESSION =
+                    finiteClampedFloat("caustica.rt.hdr.psychov24.compression",
+                            "hdr.psychov24.compression", 0.0f, 0.0f, 8.0f);
+            public static final FloatSetting PSYCHOV24_GAMUT_COMPRESSION =
+                    finiteClampedFloat("caustica.rt.hdr.psychov24.gamutCompression",
+                            "hdr.psychov24.gamut-compression", 1.0f, 0.0f, 1.0f);
+            public static final FloatSetting PSYCHOV24_HIGHLIGHTS =
+                    finiteClampedFloat("caustica.rt.hdr.psychov24.highlights",
+                            "hdr.psychov24.highlights", 1.0f, 0.0f, 3.0f);
+            public static final FloatSetting PSYCHOV24_SHADOWS =
+                    finiteClampedFloat("caustica.rt.hdr.psychov24.shadows",
+                            "hdr.psychov24.shadows", 1.0f, 0.0f, 3.0f);
+            public static final FloatSetting PSYCHOV24_CONTRAST =
+                    finiteClampedFloat("caustica.rt.hdr.psychov24.contrast",
+                            "hdr.psychov24.contrast", 1.0f, 0.1f, 3.0f);
+            public static final FloatSetting PSYCHOV24_PURITY =
+                    finiteClampedFloat("caustica.rt.hdr.psychov24.purity",
+                            "hdr.psychov24.purity", 1.0f, 0.0f, 3.0f);
+            public static final int PEAK_NITS_MIN = 50;
+            public static final int PEAK_NITS_MAX = 5000;
+            public static final int PEAK_NITS_STEP = 50;
+            // ACES 2.0 HDR LUTs are baked only for these mastering targets. Analytical HDR modes do
+            // not depend on this list and can use every 50-nit peak exposed by the control.
+            public static final List<Integer> ACES_LUT_NITS = List.of(500, 1000, 2000, 4000);
             public static final IntSetting PEAK_NITS =
-                    intChoice("caustica.rt.hdr.peakNits", "hdr.peak-nits", 1000, PEAK_NITS_STEPS);
+                    quantizedInt("caustica.rt.hdr.peakNits", "hdr.peak-nits", 1000,
+                            PEAK_NITS_MIN, PEAK_NITS_MAX, PEAK_NITS_STEP);
 
             // Surface capability and current swapchain state are separate: HDR controls remain available
             // while the swapchain is native SDR, so enabling HDR can recreate it in PQ.
@@ -910,6 +1033,43 @@ public final class CausticaConfig {
                 return UI_NITS.value();
             }
 
+            public static float paperWhiteNits() {
+                // Keep an invalid persisted paper-white value from exceeding the selected display peak.
+                // The raw setting remains intact so raising the peak restores the user's requested value.
+                return Math.min(PAPER_WHITE_NITS.value(), PEAK_NITS.value());
+            }
+
+            /** Highlight headroom above paper white, in paper-white-referred units. */
+            public static float headroom() {
+                return Math.max(1.0f, PEAK_NITS.value() / Math.max(1.0f, paperWhiteNits()));
+            }
+
+            /** Selects the nearest packaged ACES 2.0 HDR LUT for the requested display peak. */
+            public static int nearestAcesLutNits(int requestedNits) {
+                int nearest = ACES_LUT_NITS.get(0);
+                int nearestDistance = Math.abs(requestedNits - nearest);
+                for (int candidate : ACES_LUT_NITS) {
+                    int distance = Math.abs(requestedNits - candidate);
+                    if (distance < nearestDistance) {
+                        nearest = candidate;
+                        nearestDistance = distance;
+                    }
+                }
+                return nearest;
+            }
+
+            /** Peak represented by the currently active HDR transform and its presentation metadata. */
+            public static int effectivePeakNits() {
+                return dev.comfyfluffy.caustica.rt.pipeline.RtToneMapping.HdrMode.parse(TONE_MAPPER.get())
+                        == dev.comfyfluffy.caustica.rt.pipeline.RtToneMapping.HdrMode.ACES_2_0
+                        ? nearestAcesLutNits(PEAK_NITS.value())
+                        : PEAK_NITS.value();
+            }
+
+            private static String sanitizeToneMapper(String value) {
+                return dev.comfyfluffy.caustica.rt.pipeline.RtToneMapping.HdrMode.parse(value).canonicalName();
+            }
+
         }
     }
 
@@ -944,6 +1104,12 @@ public final class CausticaConfig {
         return new IntSetting(key, tomlPath, fallback, v -> choices.contains(v) ? v : fallback);
     }
 
+    private static IntSetting quantizedInt(String key, String tomlPath, int fallback,
+                                           int min, int max, int step) {
+        return new IntSetting(key, tomlPath, fallback,
+                v -> Math.clamp(Math.round(v / (float) step) * step, min, max));
+    }
+
     private static IntSetting clampedInt(String key, String tomlPath, int fallback, int min, int max) {
         return new IntSetting(key, tomlPath, fallback, v -> Math.clamp(v, min, max));
     }
@@ -956,8 +1122,19 @@ public final class CausticaConfig {
         return new FloatSetting(key, tomlPath, fallback, v -> v, v -> v, v -> Math.clamp(v, 1.0e-4, 1.0e4));
     }
 
+    private static FloatSetting percentile(String key, String tomlPath, float fallback) {
+        return new FloatSetting(key, tomlPath, fallback, v -> v, v -> v,
+                v -> Double.isFinite(v) ? Math.clamp(v, 0.0, 1.0) : fallback);
+    }
+
     private static FloatSetting clampedFloat(String key, String tomlPath, float fallback, float min, float max) {
         return new FloatSetting(key, tomlPath, fallback, v -> v, v -> v, v -> Math.clamp(v, min, max));
+    }
+
+    private static FloatSetting finiteClampedFloat(String key, String tomlPath, float fallback,
+                                                   float min, float max) {
+        return new FloatSetting(key, tomlPath, fallback, v -> v, v -> v,
+                v -> Double.isFinite(v) ? Math.clamp(v, min, max) : fallback);
     }
 
     private static FloatSetting radians(String key, String tomlPath, float fallbackDegrees) {

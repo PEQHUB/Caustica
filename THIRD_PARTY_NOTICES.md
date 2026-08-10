@@ -4,6 +4,37 @@ Caustica's project-owned code is licensed under `LGPL-3.0-or-later`. This file
 documents third-party components and license boundaries that are not changed by
 Caustica's license.
 
+## PsychoV24 Test24 adaptation
+
+The PsychoV24 Test24 tone-mapping adaptation in
+`shaders/pipelines/display/psychov24.slang` is derived from RenoDX commit
+`fc85b7b15585050442ba35412597ecefc9e04cea`.
+
+Copyright (C) 2026 Carlos Lopez. SPDX-License-Identifier: MIT.
+
+The adaptation remains subject to the MIT license. The complete license text is
+available at <https://opensource.org/license/mit/>:
+
+Copyright (c) 2026 Carlos Lopez
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
 ## NVIDIA DLSS / NGX SDK
 
 Caustica can build and distribute release artifacts that include NVIDIA DLSS/NGX

@@ -4,9 +4,11 @@ import dev.comfyfluffy.caustica.CausticaConfig;
 import dev.comfyfluffy.caustica.client.RtVideoOptions;
 import java.util.ArrayList;
 import java.util.List;
+import net.minecraft.client.Minecraft;
 import net.minecraft.client.OptionInstance;
 import net.minecraft.client.Options;
 import net.minecraft.client.gui.components.OptionsList;
+import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.client.gui.screens.options.VideoSettingsScreen;
 import net.minecraft.network.chat.Component;
 import org.spongepowered.asm.mixin.Mixin;
@@ -69,6 +71,12 @@ public abstract class VideoSettingsScreenMixin {
         }
         list.addHeader(CAUSTICA$RT_HEADER);
         list.addSmall(RtVideoOptions.runtimeOptions());
+        list.addSmall(List.of(RtVideoOptions.toneMappingButton(
+                (Screen) (Object) this,
+                () -> {
+                    list.applyUnsavedChanges();
+                    CausticaConfig.save();
+                })));
     }
 
     @Inject(method = "removed", at = @At("TAIL"))

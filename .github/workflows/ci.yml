@@ -7,6 +7,7 @@ on:
     paths:
       - ".github/workflows/**"
       - "build.gradle"
+      - "buildSrc/**"
       - "settings.gradle"
       - "gradle.properties"
       - "gradle/**"
@@ -15,10 +16,12 @@ on:
       - "native/**"
       - "shaders/**"
       - "src/**"
+      - "THIRD_PARTY_NOTICES.md"
   pull_request:
     paths:
       - ".github/workflows/**"
       - "build.gradle"
+      - "buildSrc/**"
       - "settings.gradle"
       - "gradle.properties"
       - "gradle/**"
@@ -27,6 +30,7 @@ on:
       - "native/**"
       - "shaders/**"
       - "src/**"
+      - "THIRD_PARTY_NOTICES.md"
 
 env:
   DLSS_SDK_REF: v310.7.0

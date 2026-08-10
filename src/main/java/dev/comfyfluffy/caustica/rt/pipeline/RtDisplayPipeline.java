@@ -66,6 +66,10 @@ public final class RtDisplayPipeline {
     }
 
     public static RtDisplayPipeline create(RtContext ctx) {
+        if (ctx.maxPushConstantsSize() < PUSH_BYTES) {
+            throw new IllegalStateException("Caustica display pipeline requires at least " + PUSH_BYTES
+                    + " push-constant bytes; device reports " + ctx.maxPushConstantsSize());
+        }
         VkDevice vk = ctx.vk();
         try (MemoryStack stack = MemoryStack.stackPush()) {
             VkDescriptorSetLayoutBinding.Buffer binds = VkDescriptorSetLayoutBinding.calloc(DISPLAY_BINDING_COUNT, stack);
@@ -197,20 +201,35 @@ public final class RtDisplayPipeline {
     }
 
     /**
-     * Run the display mapping through the baked ACES 2.0 LUTs: SDR
-     * (binding 0) always writes; the PQ-encoded HDR image (binding 3) also writes when
-     * {@code hdrEnabled}. The HDR LUT is baked for a fixed mastering-nits peak (see
-     * {@code CausticaConfig.Rt.Hdr.PEAK_NITS_STEPS}), selected host-side by which LUT resource is bound.
+     * Run the selected display transforms. SDR always writes; the PQ-encoded HDR image also writes
+     * when {@code hdrEnabled}. ACES 2.0 uses the bound display LUTs, while analytical modes execute
+     * directly in the display shader.
      */
-    public void dispatch(VkCommandBuffer cmd, int width, int height, boolean hdrEnabled, int lutSize,
-                         float gamma, float hdrPeakNits, boolean lookEnabled, int lookLutSize,
+    public void dispatch(VkCommandBuffer cmd, int width, int height, RtToneMapping.Settings toneMapping,
+                         int lutSize, float gamma, float hdrPeakNits, boolean lookEnabled, int lookLutSize,
                          float bloomStrength) {
         try (MemoryStack stack = MemoryStack.stackPush(); RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "display compute")) {
             VK10.vkCmdBindPipeline(cmd, VK10.VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
             VK10.vkCmdBindDescriptorSets(cmd, VK10.VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayout, 0, stack.longs(descriptorSet), null);
             ByteBuffer push = stack.malloc(DisplayPushData.BYTE_SIZE);
-            new DisplayPushData(hdrEnabled ? 1 : 0, (float) lutSize, gamma, hdrPeakNits,
-                    lookEnabled ? 1 : 0, (float) lookLutSize, bloomStrength).write(push);
+            RtToneMapping.Parameters sdr = toneMapping.sdrParameters();
+            RtToneMapping.Parameters hdr = toneMapping.hdrParameters();
+            new DisplayPushData(
+                    toneMapping.hdrEnabled() ? 1 : 0,
+                    (float) lutSize,
+                    gamma,
+                    hdrPeakNits,
+                    lookEnabled ? 1 : 0,
+                    (float) lookLutSize,
+                    bloomStrength,
+                    toneMapping.sdrMode(),
+                    toneMapping.hdrMode(),
+                    toneMapping.paperWhiteNits(),
+                    toneMapping.headroom(),
+                    sdr.param0(), sdr.param1(), sdr.param2(), sdr.param3(),
+                    sdr.param4(), sdr.param5(), sdr.param6(), sdr.param7(),
+                    hdr.param0(), hdr.param1(), hdr.param2(), hdr.param3(),
+                    hdr.param4(), hdr.param5(), hdr.param6(), hdr.param7()).write(push);
             VK10.vkCmdPushConstants(cmd, pipelineLayout, VK10.VK_SHADER_STAGE_COMPUTE_BIT, 0, push);
             VK10.vkCmdDispatch(cmd, (width + 15) / 16, (height + 15) / 16, 1);
         }
