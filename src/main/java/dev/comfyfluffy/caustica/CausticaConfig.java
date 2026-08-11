@@ -562,24 +562,24 @@ public final class CausticaConfig {
         public static final class Sharc {
             public static final BooleanSetting ENABLED = bool("caustica.rt.sharc.enabled", "sharc.enabled", true);
             public static final IntSetting CACHE_EXPONENT =
-                    clampedInt("caustica.rt.sharc.cacheExponent", "sharc.cache-exponent", 20, 16, 23);
+                    clampedInt("caustica.rt.sharc.cacheExponent", "sharc.cache-exponent", 22, 16, 23);
             public static final BooleanSetting ANTI_FIREFLY = bool(
                     "caustica.rt.sharc.antiFirefly", "sharc.anti-firefly", true);
             /** Developer comparison mode; production keeps camera-visible primary surfaces live. */
             public static final BooleanSetting PRIMARY_SURFACE_DEBUG = bool(
                     "caustica.rt.sharc.primarySurfaceDebug", "sharc.primary-surface-debug", false);
             public static final IntSetting UPDATE_TILE_SIZE =
-                    clampedInt("caustica.rt.sharc.updateTileSize", "sharc.update-tile-size", 8, 2, 64);
+                    clampedInt("caustica.rt.sharc.updateTileSize", "sharc.update-tile-size", 3, 2, 64);
             public static final IntSetting ACCUMULATION_FRAMES =
-                    clampedInt("caustica.rt.sharc.accumulationFrames", "sharc.accumulation-frames", 8, 1, 1024);
+                    clampedInt("caustica.rt.sharc.accumulationFrames", "sharc.accumulation-frames", 384, 1, 1024);
             public static final IntSetting STALE_FRAMES =
-                    clampedInt("caustica.rt.sharc.staleFrames", "sharc.stale-frames", 32, 8, 1024);
+                    clampedInt("caustica.rt.sharc.staleFrames", "sharc.stale-frames", 128, 8, 1024);
             public static final FloatSetting SCENE_SCALE = finiteClampedFloat(
-                    "caustica.rt.sharc.sceneScale", "sharc.scene-scale", 1.0f, 1.0f, 100.0f);
+                    "caustica.rt.sharc.sceneScale", "sharc.scene-scale", 32.0f, 1.0f, 100.0f);
             public static final FloatSetting RADIANCE_SCALE = finiteClampedFloat(
                     "caustica.rt.sharc.radianceScale", "sharc.radiance-scale", 1000.0f, 50.0f, 1000.0f);
             public static final FloatSetting GRID_LOGARITHM_BASE = finiteClampedFloat(
-                    "caustica.rt.sharc.gridLogarithmBase", "sharc.grid-logarithm-base", 2.0f, 1.01f, 16.0f);
+                    "caustica.rt.sharc.gridLogarithmBase", "sharc.grid-logarithm-base", 3.0f, 1.01f, 16.0f);
             public static final FloatSetting GRID_LEVEL_BIAS = finiteClampedFloat(
                     "caustica.rt.sharc.gridLevelBias", "sharc.grid-level-bias", 0.0f, -16.0f, 16.0f);
             /** Additional minimum linear roughness for SHaRC diffuse ownership; zero preserves the mirror cutoff. */

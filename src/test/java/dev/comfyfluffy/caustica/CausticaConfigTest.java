@@ -3,6 +3,7 @@ package dev.comfyfluffy.caustica;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 final class CausticaConfigTest {
@@ -89,7 +90,22 @@ final class CausticaConfigTest {
     void registersSharcSettingsForConfigRoundTrips() {
         CausticaConfig.ensureRegistered();
         assertTrue(hasSetting("caustica.rt.sharc.enabled"));
+    }
+
+    @Test
+    void sharcDefaultsMatchTheValidatedRuntimeProfile() {
         assertTrue(CausticaConfig.Rt.Sharc.ENABLED.defaultValue());
+        assertEquals(22, CausticaConfig.Rt.Sharc.CACHE_EXPONENT.defaultValue());
+        assertTrue(CausticaConfig.Rt.Sharc.ANTI_FIREFLY.defaultValue());
+        assertFalse(CausticaConfig.Rt.Sharc.PRIMARY_SURFACE_DEBUG.defaultValue());
+        assertEquals(3, CausticaConfig.Rt.Sharc.UPDATE_TILE_SIZE.defaultValue());
+        assertEquals(384, CausticaConfig.Rt.Sharc.ACCUMULATION_FRAMES.defaultValue());
+        assertEquals(128, CausticaConfig.Rt.Sharc.STALE_FRAMES.defaultValue());
+        assertEquals(32.0f, CausticaConfig.Rt.Sharc.SCENE_SCALE.defaultValue());
+        assertEquals(1000.0f, CausticaConfig.Rt.Sharc.RADIANCE_SCALE.defaultValue());
+        assertEquals(3.0f, CausticaConfig.Rt.Sharc.GRID_LOGARITHM_BASE.defaultValue());
+        assertEquals(0.0f, CausticaConfig.Rt.Sharc.GRID_LEVEL_BIAS.defaultValue());
+        assertEquals(0.0f, CausticaConfig.Rt.Sharc.ROUGHNESS_THRESHOLD.defaultValue());
     }
 
     @Test
