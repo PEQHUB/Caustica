@@ -9,6 +9,7 @@ import dev.comfyfluffy.caustica.api.scene.SceneId;
 import dev.comfyfluffy.caustica.minecraft.rendering.MinecraftCelestialFrame;
 import dev.comfyfluffy.caustica.minecraft.rendering.MinecraftLightFrame;
 import dev.comfyfluffy.caustica.minecraft.rendering.MinecraftLightingCalibration;
+import dev.comfyfluffy.caustica.minecraft.rendering.MinecraftWeather;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
@@ -20,6 +21,8 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 final class MinecraftLightProviderTest {
+    private static final MinecraftWeather CLEAR = new MinecraftWeather(0, 0);
+
     @Test
     void noonSubmitsOnlyTheAboveHorizonSun() {
         MinecraftLightProvider.CelestialLights lights = MinecraftLightProvider.celestialLights(frame(
@@ -29,6 +32,23 @@ final class MinecraftLightProviderTest {
         assertTrue(lights.moon().isEmpty());
         assertEquals(128_000, lights.sun().orElseThrow().illuminanceRedLux());
         assertEquals(Math.cos(Math.PI / 6.0), lights.sun().orElseThrow().directionY(), 1.0e-12);
+    }
+
+    @Test
+    void rainDarkensSunlightAndPassesOnlyItsShareOfEachBeam() {
+        var halfRain = new MinecraftWeather(.5f, 0);
+        var day = MinecraftLightProvider.celestialLights(frame(0.0, Math.PI, 128_000, 5, 0, halfRain));
+        var night = MinecraftLightProvider.celestialLights(frame(Math.PI, 0.0, 128_000, 5, 0, halfRain));
+
+        // Half rain keeps 1 - 5/32 of daylight and half of each beam; the moon is not daylight.
+        assertEquals(128_000 * 0.84375 * 0.5, day.sun().orElseThrow().illuminanceRedLux(), 1.0e-9);
+        assertEquals(5.0 * 0.5, night.moon().orElseThrow().illuminanceRedLux(), 1.0e-9);
+
+        var thunder = new MinecraftWeather(1, 1);
+        assertTrue(MinecraftLightProvider.celestialLights(frame(0.0, Math.PI, 128_000, 5, 0, thunder))
+                .sun().isEmpty());
+        assertTrue(MinecraftLightProvider.celestialLights(frame(Math.PI, 0.0, 128_000, 5, 0, thunder))
+                .moon().isEmpty());
     }
 
     @Test
@@ -116,7 +136,7 @@ final class MinecraftLightProviderTest {
         RecordingLights channel = new RecordingLights();
         AtomicInteger reads = new AtomicInteger();
         var celestial = new MinecraftCelestialFrame(0, (float) Math.PI, 0, 0,
-                0, 63, 63, 1, new MinecraftLightingCalibration(128_000, 5, 1, 0, 0, .1f));
+                0, 63, 63, 1, new MinecraftLightingCalibration(128_000, 5, 1, 0, 0, .1f), CLEAR);
         var frame = new MinecraftLightFrame(Optional.of(celestial), Optional.empty());
         MinecraftLightProvider provider = new MinecraftLightProvider(channel, new SceneId() { },
                 () -> new MinecraftLightProvider.CelestialSettings(30, .6, 1.5),
@@ -144,8 +164,14 @@ final class MinecraftLightProviderTest {
 
     private static MinecraftLightProvider.CelestialFrame frame(
             double sunAngle, double moonAngle, double sunLux, double moonLux, int moonPhase) {
+        return frame(sunAngle, moonAngle, sunLux, moonLux, moonPhase, CLEAR);
+    }
+
+    private static MinecraftLightProvider.CelestialFrame frame(double sunAngle, double moonAngle, double sunLux,
+                                                               double moonLux, int moonPhase,
+                                                               MinecraftWeather weather) {
         return new MinecraftLightProvider.CelestialFrame(sunAngle, moonAngle, Math.PI / 6.0,
-                sunLux, moonLux, moonPhase, 0.1, Math.toRadians(0.6), Math.toRadians(1.5));
+                sunLux, moonLux, moonPhase, 0.1, Math.toRadians(0.6), Math.toRadians(1.5), weather);
     }
 
     private static final class RecordingLights implements SceneChannel {

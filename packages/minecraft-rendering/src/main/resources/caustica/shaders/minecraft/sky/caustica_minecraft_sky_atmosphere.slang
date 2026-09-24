@@ -427,9 +427,9 @@ public bool celestialSquareLocal(float3 dir, float3 bodyDir, float halfAngle, ou
 // The Overworld sky's own per-frame inputs: only what the CPU alone can know — Minecraft's three eased
 // celestial angles (the 26.2 timeline drives them through a cubic-bezier ease and a datapack may replace
 // the track, so they are read from the attribute probe rather than re-derived from the tick), its star
-// brightness and moon phase, the photometric anchors, and SkyLutPass's own sky.* geometry options. Every
-// direction, colour, level and transmittance is derived from these below, so no atmosphere maths runs on
-// the CPU.
+// brightness, moon phase and weather factors, the photometric anchors, and SkyLutPass's own sky.* geometry
+// options. Every direction, colour, level and transmittance is derived from these below, so no atmosphere
+// maths runs on the CPU.
 //
 // SkyLutPass fills one of these per frame and publishes it two ways: inline in its LUT dispatch push data
 // and through the stable LUT-lifetime device buffer referenced by every live environment binding. The
@@ -450,7 +450,9 @@ public struct SkyInputs {
     // x drawn sun half-angle (rad), y drawn moon half-angle (rad), z viewer altitude (km),
     // w moon phase index (0 full .. 4 new).
     public float4 skyLook2;
-    public float4 skyLook3;         // x ground albedo, y horizon soften (rad), zw reserved
+    // x ground albedo, y horizon soften (rad), z weather daylight factor, w weather beam transmittance
+    // (both 0..1, from MinecraftWeather).
+    public float4 skyLook3;
     public float4 sunUv;            // vanilla sun sprite atlas rect (u0,v0,u1,v1)
     public float4 moonUv;           // vanilla current-moon-phase sprite atlas rect
 };
@@ -458,15 +460,17 @@ public struct SkyInputs {
 // ---- Per-frame sky state ------------------------------------------------------------------------
 //
 // SkyInputs carries Minecraft's three eased celestial
-// angles, its star brightness, the moon phase, the photometric anchors, and SkyLutPass's sky.* options.
+// angles, its star brightness, the moon phase, the weather factors, the photometric anchors, and
+// SkyLutPass's sky.* options.
 // Every direction, colour, level, and transmittance is derived here so atmospheric physics has one
 // implementation — shared by the LUT bakes and the sky slot's LUT-lifetime device-address buffer.
 
 public struct SkyState {
     public float3 sunDir;
     public float3 moonDir;
-    public float  sunIlluminance;      // lux, top of atmosphere
+    public float  sunIlluminance;      // lux, top of atmosphere, after the weather's daylight darkening
     public float  moonIlluminance;     // lux, already scaled by the visible phase
+    public float  beamTransmittance;   // fraction of each body's direct beam that passes the rain
     public float  viewerRadiusKm;      // planet centre to viewer
     public float  sunAngularRadius;    // physical half-angle, also the planet-shadow softness
     public float  moonAngularRadius;
@@ -492,7 +496,10 @@ public SkyState skyState(SkyInputs push) {
     s.noonTilt = push.skyLook1.x;
     s.sunDir = celestialDirection(push.celestial.x, s.noonTilt);
     s.moonDir = celestialDirection(push.celestial.y, s.noonTilt);
-    s.sunIlluminance = push.skyLook0.x;
+    // Weather darkens only sunlight, which drives the whole daylit sky; the moonlit sky and airglow are the
+    // night floor that vanilla's weather keeps. Rain's zero star brightness arrives through the probe.
+    s.sunIlluminance = push.skyLook0.x * push.skyLook3.z;
+    s.beamTransmittance = push.skyLook3.w;
     // A fixed floor plus the visible phase: a new moon still casts a little directional light, which is
     // a gameplay calibration independent of the astronomical phase.
     float phaseFixed = push.skyLook1.w;
