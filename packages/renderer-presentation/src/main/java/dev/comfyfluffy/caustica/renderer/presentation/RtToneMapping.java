@@ -1,5 +1,6 @@
 package dev.comfyfluffy.caustica.renderer.presentation;
 
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 
@@ -132,6 +133,7 @@ public final class RtToneMapping {
             Arrays.stream(SdrMode.values()).map(SdrMode::configName).toList();
     private static final List<String> HDR_CONFIG_NAMES =
             Arrays.stream(HdrMode.values()).map(HdrMode::configName).toList();
+    private static final List<String> QUICK_TOGGLE_NAMES = sdrThenHdrOnlyNames();
 
     /** SDR config names in selection order. */
     public static List<String> sdrConfigNames() {
@@ -141,5 +143,20 @@ public final class RtToneMapping {
     /** HDR config names in selection order. */
     public static List<String> hdrConfigNames() {
         return HDR_CONFIG_NAMES;
+    }
+
+    /** SDR config names, then the HDR-only names: every name a quick-toggle preselect may hold. */
+    public static List<String> quickToggleNames() {
+        return QUICK_TOGGLE_NAMES;
+    }
+
+    private static List<String> sdrThenHdrOnlyNames() {
+        List<String> names = new ArrayList<>(SDR_CONFIG_NAMES);
+        for (String name : HDR_CONFIG_NAMES) {
+            if (!names.contains(name)) {
+                names.add(name);
+            }
+        }
+        return List.copyOf(names);
     }
 }
