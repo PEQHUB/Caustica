@@ -36,13 +36,11 @@ public final class WorldShaderCompiler implements ProgramBackend.CompiledProgram
     private static final Logger LOGGER = LoggerFactory.getLogger(WorldShaderCompiler.class);
     public static final String ENVIRONMENT_MISS_MODULE = "environment_miss";
     public static final String CLOSEST_HIT_MODULE = "closest_hit";
-    public static final String SHADOW_CLOSEST_HIT_MODULE = "shadow_closest_hit";
     public static final String BUILD_STABLE_PLANES_MODULE = "build_stable_planes";
     public static final String VISIBILITY_RAYS_MODULE = "visibility_rays";
     public static final String FILL_STABLE_PLANES_MODULE = "fill_stable_planes";
     public static final String FILL_STABLE_PLANES_SER_MODULE = "fill_stable_planes_ser";
     public static final String RADIANCE_ANY_HIT_MODULE = "radiance_any_hit_rahit";
-    public static final String SHADOW_ANY_HIT_MODULE = "shadow_any_hit_rahit";
     public static final String ENTRY_POINT = "main";
 
     private static final String WORLD_SHADER_ROOT = "/caustica/shaders/world/";
@@ -56,8 +54,7 @@ public final class WorldShaderCompiler implements ProgramBackend.CompiledProgram
     private static final List<String> WORLD_MODULES = List.of(
             "bindings.slang", "world_common.slang", "world_minimal.slang", "build_stable_planes.slang",
             "fill_stable_planes.slang", "fill_stable_planes_ser.slang", "resolve_stable_planes.slang", "closest_hit.slang", "environment_miss.slang",
-            "radiance_any_hit.rahit.slang", "shadow_any_hit.rahit.slang", "guide.rmiss.slang",
-            "shadow_closest_hit.slang", "shadow.rmiss.slang", "shadow_blocker.slang",
+            "radiance_any_hit.rahit.slang", "guide.rmiss.slang",
             "retained_lights.slang", "surface_bsdf.slang", "path_queue_types.slang",
             "trace_transport.slang", "visibility_rays.slang",
             "trace_diagnostics.slang", "trace_diagnostics_types.slang", "trace_diagnostics_config.slang", "path_tracer.slang", "retained_trace_policy.slang",
@@ -129,7 +126,6 @@ public final class WorldShaderCompiler implements ProgramBackend.CompiledProgram
         Files.write(worldDirectory.resolve("trace_diagnostics_config.slang"), diagnosticsConfig);
         sources.put("world/trace_diagnostics_config.slang", diagnosticsConfig);
         writeSpecializedModuleAlias(worldDirectory, "radiance_any_hit.rahit.slang", RADIANCE_ANY_HIT_MODULE);
-        writeSpecializedModuleAlias(worldDirectory, "shadow_any_hit.rahit.slang", SHADOW_ANY_HIT_MODULE);
         extractClasspath(API_ROOT, API_MODULES, apiDirectory, "api", sources);
         extractClasspath(FALLBACK_ROOT, FALLBACK_MODULES, fallbackDirectory, "fallback", sources);
 
@@ -173,9 +169,7 @@ public final class WorldShaderCompiler implements ProgramBackend.CompiledProgram
 
     public byte[] compileEnvironmentMiss() { return compileSpecialized(ENVIRONMENT_MISS_MODULE, ENTRY_POINT); }
     public byte[] compileClosestHit() { return compileSpecialized(CLOSEST_HIT_MODULE, ENTRY_POINT); }
-    public byte[] compileShadowClosestHit() { return compileSpecialized(SHADOW_CLOSEST_HIT_MODULE, ENTRY_POINT); }
     public byte[] compileRadianceAnyHit() { return compileSpecialized(RADIANCE_ANY_HIT_MODULE, ENTRY_POINT); }
-    public byte[] compileShadowAnyHit() { return compileSpecialized(SHADOW_ANY_HIT_MODULE, ENTRY_POINT); }
     public byte[] compileBuildStablePlanes() { return compileSpecialized(BUILD_STABLE_PLANES_MODULE, ENTRY_POINT); }
     public byte[] compileVisibilityRays() { return compileSpecialized(VISIBILITY_RAYS_MODULE, ENTRY_POINT); }
     public byte[] compileVolumeLighting() { return compileSpecialized(VISIBILITY_RAYS_MODULE, "volumeLighting"); }

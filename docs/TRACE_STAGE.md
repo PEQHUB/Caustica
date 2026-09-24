@@ -11,7 +11,7 @@ The trace stage runs global light preparation, `BuildStablePlanes`, local NEE-AT
 
 The build writes every restart slot each frame. Extent-owned scratch is reused on the ordered graphics queue; resize requires drained GPU use. The local-bake barriers make Build's records/guides visible to compute and make both Build's records and compute's local distribution visible to Fill.
 
-Smooth surface lobes are integrated delta events. Thick transmissive boundaries use Fresnel/refraction and update absorption/IOR. Shadow visibility visits nearest boundaries in order and accumulates each medium segment, including the remaining segment to the light; any-hit only handles coverage. The medium state holds one active medium, not a nested medium stack.
+Smooth surface lobes are integrated delta events. Thick transmissive boundaries use Fresnel/refraction and update absorption/IOR. Shadow visibility visits nearest boundaries in order and accumulates each medium segment, including the remaining segment to the light; any-hit only handles coverage. The medium state holds one active medium, not a nested medium stack. Visibility uses inline ray queries, so the ray-tracing pipeline has only the radiance closest-hit, coverage any-hit, and environment miss stages, and the retained hit table has one record per geometry.
 
 ## Validation, 2026-09-05
 

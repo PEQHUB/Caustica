@@ -89,24 +89,11 @@ final class WorldShaderCompilerTest {
             assertVulkan14(cache.resolve("radiance-closest.spv"), closest);
             assertVulkan14(cache.resolve("radiance-any.spv"), radianceAny);
             assertVulkan14(cache.resolve("environment-miss.spv"), environment);
-            assertSpirv(compiler.compileShadowAnyHit());
-            byte[] shadowClosest = compiler.compileShadowClosestHit();
-            byte[] shadowAny = compiler.compileShadowAnyHit();
-            byte[] shadowMiss = compiler.compilePlain("shadow.rmiss.slang", WorldShaderCompiler.ENTRY_POINT);
-            byte[] shadowBlocker = compiler.compilePlain("shadow_blocker.slang", WorldShaderCompiler.ENTRY_POINT);
-            for (byte[] stage : List.of(shadowClosest, shadowAny, shadowMiss, shadowBlocker)) {
-                assertSpirv(stage);
-                assertEquals(36, incomingPayloadBytes(stage));
-            }
-            assertVulkan14(cache.resolve("shadow-closest.spv"), shadowClosest);
-            assertVulkan14(cache.resolve("shadow-any.spv"), shadowAny);
-            assertVulkan14(cache.resolve("shadow-miss.spv"), shadowMiss);
-            assertVulkan14(cache.resolve("shadow-blocker.spv"), shadowBlocker);
-            assertEquals(1, countOpcode(shadowBlocker, 4449)); // OpTerminateRayKHR
-            assertEquals(0, countOpcode(shadowBlocker, 4448)); // OpIgnoreIntersectionKHR
             assertSpirv(compiler.compileEnvironmentMiss());
             assertSpirv(compiler.compilePlain("guide.rmiss.slang", WorldShaderCompiler.ENTRY_POINT));
-            assertSpirv(compiler.compileBuildStablePlanes());
+            byte[] build = compiler.compileBuildStablePlanes();
+            assertSpirv(build);
+            assertTrue(assertRadianceTraceRouting(build) > 0);
             byte[] resolve = compiler.compilePlain("resolve_stable_planes.slang", WorldShaderCompiler.ENTRY_POINT);
             assertSpirv(resolve);
             assertVulkan14(cache.resolve("resolve-stable-planes.spv"), resolve);
@@ -221,20 +208,35 @@ final class WorldShaderCompilerTest {
                 .mapToInt(instruction -> typeBytes(definitions, instruction[1])).findFirst().orElseThrow();
     }
 
+    /** Returns the radiance trace count after checking each trace's SBT routing and payload. */
+    private static int assertRadianceTraceRouting(byte[] spirv) {
+        var definitions = spirvDefinitions(spirv);
+        var words = ByteBuffer.wrap(spirv).order(ByteOrder.LITTLE_ENDIAN).asIntBuffer();
+        int traces = 0;
+        for (int offset = 5; offset < words.limit(); offset += words.get(offset) >>> 16) {
+            int opcode = words.get(offset) & 65535;
+            if (opcode != 4445 && opcode != 5316) continue; // OpTraceRayKHR, OpHitObjectTraceRayEXT
+            // Radiance rays address one hit record per geometry and the only miss record, the environment.
+            int flags = offset + (opcode == 4445 ? 2 : 3);
+            int[] payload = definitions.get(words.get(flags + 9));
+            assertEquals(28, typeBytes(definitions, payload[1]));
+            assertEquals(0, definitions.get(words.get(flags))[3]);
+            assertEquals(0, definitions.get(words.get(flags + 2))[3]);
+            assertEquals(1, definitions.get(words.get(flags + 3))[3]);
+            assertEquals(0, definitions.get(words.get(flags + 4))[3]);
+            traces++;
+        }
+        return traces;
+    }
+
     private static void assertShadowTraceRouting(byte[] spirv) {
+        assertRadianceTraceRouting(spirv);
         var definitions = spirvDefinitions(spirv);
         var words = ByteBuffer.wrap(spirv).order(ByteOrder.LITTLE_ENDIAN).asIntBuffer();
         int shadowQueries = 0;
         for (int offset = 5; offset < words.limit();) {
             int count = words.get(offset) >>> 16;
-            if ((words.get(offset) & 65535) == 4445) {
-                int[] payload = definitions.get(words.get(offset + 11));
-                assertEquals(28, typeBytes(definitions, payload[1]));
-                assertEquals(0, definitions.get(words.get(offset + 2))[3]);
-                assertEquals(0, definitions.get(words.get(offset + 4))[3]);
-                assertEquals(2, definitions.get(words.get(offset + 5))[3]);
-                assertEquals(0, definitions.get(words.get(offset + 6))[3]);
-            } else if ((words.get(offset) & 65535) == 4473) { // OpRayQueryInitializeKHR
+            if ((words.get(offset) & 65535) == 4473) { // OpRayQueryInitializeKHR
                 assertEquals(2, definitions.get(words.get(offset + 3))[3]); // NoOpaqueKHR
                 assertEquals(1, definitions.get(words.get(offset + 4))[3]); // Secondary mask
                 shadowQueries++;

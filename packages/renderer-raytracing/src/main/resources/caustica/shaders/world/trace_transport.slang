@@ -164,7 +164,6 @@ public ShadowPayload traceShadowQuery<TComposition : IComposition>(RayDesc ray,
         uint seed, float3 absorption, float ior, inout ShadowDiagnosticTrace diagnostics, out float3 geometricNormal) {
     geometricNormal = float3(0.0);
     ShadowPayload shadow = {};
-    shadow.seed = seed;
     shadow.volumeAbsorption = absorption;
     shadow.volumeIor = ior;
     RayQuery<RAY_FLAG_FORCE_NON_OPAQUE> query;

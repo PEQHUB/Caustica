@@ -62,8 +62,7 @@ def worldShaderNames = [
         "path_tracer.slang", "retained_lights.slang", "trace_transport.slang", "visibility_rays.slang",
         "trace_diagnostics.slang", "trace_diagnostics_types.slang", "trace_diagnostics_config.slang",
         "retained_trace_ordinary.slang", "retained_trace_policy.slang",
-        "retained_trace_reordered.slang", "shadow_any_hit.rahit.slang", "environment_miss.slang",
-        "shadow_closest_hit.slang", "shadow.rmiss.slang", "shadow_blocker.slang",
+        "retained_trace_reordered.slang", "environment_miss.slang",
         "stable_planes.slang", "stable_plane_types.slang", "nrd_compose_types.slang", "surface_bsdf.slang", "nrd_signals.slang",
         "world_common.slang", "world_minimal.slang"
 ] as Set
