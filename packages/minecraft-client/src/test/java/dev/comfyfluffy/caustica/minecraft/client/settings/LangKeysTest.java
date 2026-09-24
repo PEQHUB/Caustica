@@ -115,8 +115,8 @@ final class LangKeysTest {
     }
 
     /**
-     * Pages also show ungrouped renderer options and one denoiser's rows at a time, so this walks every page in
-     * every HDR and denoiser state rather than the declarations alone.
+     * Pages also show ungrouped renderer options and one mapper's and one denoiser's rows at a time, so this walks
+     * every page in every HDR, tone-mapper and denoiser state rather than the declarations alone.
      */
     @Test
     void everyPageRowAndHeadingHasAnEnglishEntry() throws IOException {
@@ -156,6 +156,8 @@ final class LangKeysTest {
         assertTrue(missing.isEmpty(), "missing en_us.json entries: " + missing);
         assertTrue(checked.contains("caustica.setting.exposure.adapt-darken.tooltip"), checked.toString());
         assertTrue(checked.contains("caustica.page.upscaling.nrd"), checked.toString());
+        assertTrue(checked.contains("caustica.page.tone-mapping.mapper"), checked.toString());
+        assertTrue(checked.contains("caustica.setting.hdr.psychov69.source-awareness.tooltip"), checked.toString());
         assertTrue(checked.contains("caustica.group.engine.entities"), checked.toString());
         assertTrue(checked.contains("caustica.group.caustica.minecraft.fog"), checked.toString());
         assertTrue(checked.contains("feature.caustica.bloom.description"), checked.toString());
