@@ -14,7 +14,7 @@ public final class RendererOptions {
                 Rt.DlssRr.PRESET, Rt.DlssRr.QUALITY, Rt.DlssSr.PRESET, Rt.DlssSr.QUALITY,
                 Rt.Denoising.ROUTE, Rt.Denoising.METHOD, Rt.Fg.ENABLED,
                 Rt.Reflex.ENABLED, Rt.Reflex.LOW_LATENCY_BOOST, Rt.Reflex.MINIMUM_INTERVAL_US,
-                Rt.Exposure.MODE, Rt.Exposure.MANUAL_EV, Rt.Exposure.KEY,
+                Rt.Exposure.MODE, Rt.Exposure.RESPONSE, Rt.Exposure.MANUAL_EV, Rt.Exposure.KEY,
                 Rt.Exposure.ADAPT_DARKEN, Rt.Exposure.ADAPT_BRIGHTEN,
                 Rt.Exposure.LOW_PERCENTILE, Rt.Exposure.HIGH_PERCENTILE, Rt.Exposure.STRIDE,
                 Rt.Exposure.CENTER_WEIGHT_SIGMA, Rt.Exposure.CENTER_WEIGHT_FLOOR,
@@ -70,6 +70,9 @@ public final class RendererOptions {
             private Exposure() { }
             public static final List<String> MODES = List.of("auto", "manual");
             public static final Option<String> MODE = stringChoice("caustica.rt.exposure.mode", "exposure.mode", "auto", MODES).inGroup("exposure");
+            /** Auto-exposure response names; {@code RtExposure.Response} owns their knots and bounds. */
+            public static final List<String> RESPONSES = List.of("adaptation", "curve");
+            public static final Option<String> RESPONSE = stringChoice("caustica.rt.exposure.response", "exposure.response", "adaptation", RESPONSES).inGroup("exposure");
             public static final Option<Float> MANUAL_EV = clampedFloat("caustica.rt.exposure.manualEv", "exposure.manual-ev", 0.0f, -15.0f, 15.0f).inGroup("exposure");
             public static final Option<Float> KEY = exposureScale("caustica.rt.exposure.key", "exposure.key", 0.18f);
             public static final Option<Float> ADAPT_DARKEN = exposureScale("caustica.rt.exposure.adaptDarken", "exposure.adapt-darken", 2.0f);
