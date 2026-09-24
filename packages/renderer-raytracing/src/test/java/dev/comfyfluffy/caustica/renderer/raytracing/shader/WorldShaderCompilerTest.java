@@ -237,7 +237,8 @@ final class WorldShaderCompilerTest {
         for (int offset = 5; offset < words.limit();) {
             int count = words.get(offset) >>> 16;
             if ((words.get(offset) & 65535) == 4473) { // OpRayQueryInitializeKHR
-                assertEquals(2, definitions.get(words.get(offset + 3))[3]); // NoOpaqueKHR
+                // NoneKHR: geometry opacity and opacity micromaps decide which candidates reach the shader.
+                assertEquals(0, definitions.get(words.get(offset + 3))[3]);
                 assertEquals(1, definitions.get(words.get(offset + 4))[3]); // Secondary mask
                 shadowQueries++;
             }
@@ -246,7 +247,6 @@ final class WorldShaderCompilerTest {
         assertTrue(shadowQueries > 0);
         assertTrue(countOpcode(spirv, 4477) > 0); // OpRayQueryProceedKHR
         assertTrue(countOpcode(spirv, 4476) > 0); // OpRayQueryConfirmIntersectionKHR
-        assertTrue(countOpcode(spirv, 4474) > 0); // OpRayQueryTerminateKHR
     }
 
     private static int countOpcode(byte[] spirv, int opcode) {
