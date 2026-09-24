@@ -32,6 +32,7 @@
 		"VideoSettingsScreenMixin",
 		"VulkanBackendMixin",
 		"VulkanQueueResultMixin",
+		"VulkanQueueWaitMixin",
 		"VulkanCommandPoolResultMixin",
 		"VulkanCommandEncoderAccessor",
 		"VulkanSerialFramesMixin",

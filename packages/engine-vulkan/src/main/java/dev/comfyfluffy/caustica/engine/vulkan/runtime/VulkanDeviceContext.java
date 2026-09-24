@@ -48,6 +48,7 @@ import java.nio.LongBuffer;
 import java.nio.ByteBuffer;
 import java.util.Map;
 import java.util.function.Consumer;
+import java.util.function.IntSupplier;
 
 import static org.lwjgl.vulkan.KHRRayTracingPipeline.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_PROPERTIES_KHR;
 
@@ -66,7 +67,10 @@ public final class VulkanDeviceContext implements GpuDevice {
     private final VulkanDescriptorHeap descriptorHeap;
     private final VulkanQueueRef graphicsQueue;
     private final VulkanQueueRef computeQueue;
-    /** Serializes device-wide host waits against submissions from the Caustica compute thread. */
+    /**
+     * Externally synchronizes every queue submit, present, and wait on this device, from renderer threads
+     * and the host, with {@code vkDeviceWaitIdle}, which requires all of the device's queues.
+     */
     private final Object deviceQueueHostLock = new Object();
     private final RtGpuExecutor gpuExecutor;
     private final GraphicsQueue graphics;
@@ -267,6 +271,13 @@ public final class VulkanDeviceContext implements GpuDevice {
 
     Object deviceQueueHostLock() {
         return deviceQueueHostLock;
+    }
+
+    /** Runs one host-issued queue submit, present, or wait under the device queue lock. */
+    public int synchronizedQueueOperation(IntSupplier operation) {
+        synchronized (deviceQueueHostLock) {
+            return operation.getAsInt();
+        }
     }
 
     public int shaderGroupHandleSize() {

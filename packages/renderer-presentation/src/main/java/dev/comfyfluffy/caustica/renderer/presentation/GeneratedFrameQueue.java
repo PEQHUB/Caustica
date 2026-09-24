@@ -3,6 +3,7 @@ package dev.comfyfluffy.caustica.renderer.presentation;
 
 import dev.comfyfluffy.caustica.api.vulkan.GpuImage;
 import dev.comfyfluffy.caustica.engine.frame.UiPresentationResources;
+import dev.comfyfluffy.caustica.engine.vulkan.runtime.VulkanDeviceContext;
 import dev.comfyfluffy.caustica.spi.vulkan.GraphicsSubmission;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -32,12 +33,17 @@ final class GeneratedFrameQueue {
     private static final Logger LOGGER = LoggerFactory.getLogger(GeneratedFrameQueue.class);
     private static final long ACQUIRE_TIMEOUT_NS = 5_000_000_000L;
 
+    private final VulkanDeviceContext context;
     private long[] acquireSemaphores = new long[0];
     private int acquireCursor;
     private PendingPresent pending;
     private boolean failed;
 
     private record PendingPresent(int imageIndex, long semaphore) { }
+
+    GeneratedFrameQueue(VulkanDeviceContext context) {
+        this.context = context;
+    }
 
     boolean failed() {
         return failed;
@@ -95,7 +101,8 @@ final class GeneratedFrameQueue {
                 present.swapchainCount(1);
                 present.pSwapchains(stack.longs(swapchain.swapchain()));
                 present.pImageIndices(stack.ints(pending.imageIndex()));
-                int result = KHRSwapchain.vkQueuePresentKHR(presentQueue, present);
+                int result = context.synchronizedQueueOperation(
+                        () -> KHRSwapchain.vkQueuePresentKHR(presentQueue, present));
                 if (result != VK10.VK_SUCCESS && result != VK_SUBOPTIMAL_KHR
                         && result != VK_ERROR_OUT_OF_DATE_KHR) {
                     throw new IllegalStateException("vkQueuePresentKHR(FG) failed: " + result);
