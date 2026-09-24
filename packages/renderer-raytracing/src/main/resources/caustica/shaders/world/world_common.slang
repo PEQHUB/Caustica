@@ -174,4 +174,6 @@ public struct WorldPush {
     public uint previousInstanceTableMask;
     // Previous revision origin minus current revision origin, subtracted in host double precision.
     public float3 previousOriginDelta;
+    // DLSS-RR responsivity in [0, 1] for pixels whose history remains reusable; 0 keeps full accumulation.
+    public float responsivityFloor;
 };

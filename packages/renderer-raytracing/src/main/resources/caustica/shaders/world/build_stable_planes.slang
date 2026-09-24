@@ -49,7 +49,8 @@ StableBranch branchAdvance(StableBranch branch, WorldHit hit, TraceLobes lobes, 
     float3 movement = hit.previousPosition - hit.position;
     branch.motion += mul(branch.imageTransform, movement - mul(transform, movement));
     branch.imageTransform = mul(branch.imageTransform, transform);
-    branch.identity = (branch.identity << 2u) | (transmission ? 2u : 1u);
+    branch.identity = (branch.identity << 2u)
+            | (transmission ? STABLE_PLANE_BRANCH_TRANSMISSION : STABLE_PLANE_BRANCH_REFLECTION);
     branch.transmitted |= transmission;
     return branch;
 }

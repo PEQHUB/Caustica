@@ -11,7 +11,7 @@ public final class RendererOptions {
         return List.of(
                 Rt.Composite.DEBUG_VIEW, Rt.Composite.MAX_BOUNCES,
                 Rt.Composite.JITTER_SIGN_X, Rt.Composite.JITTER_SIGN_Y,
-                Rt.DlssRr.PRESET, Rt.DlssRr.QUALITY, Rt.DlssSr.PRESET, Rt.DlssSr.QUALITY,
+                Rt.DlssRr.PRESET, Rt.DlssRr.QUALITY, Rt.DlssRr.RESPONSIVITY, Rt.DlssSr.PRESET, Rt.DlssSr.QUALITY,
                 Rt.Denoising.ROUTE, Rt.Denoising.METHOD, Rt.Fg.ENABLED,
                 Rt.Reflex.ENABLED, Rt.Reflex.LOW_LATENCY_BOOST, Rt.Reflex.MINIMUM_INTERVAL_US,
                 Rt.Exposure.MODE, Rt.Exposure.MANUAL_EV, Rt.Exposure.KEY,
@@ -39,6 +39,12 @@ public final class RendererOptions {
             public static final Option<Integer> PRESET = intChoice("caustica.rt.dlssRr.preset", "dlss-rr.preset", 5, PRESET_STEPS);
             public static final List<Integer> QUALITY_STEPS = List.of(3, 0, 1, 2, 5);
             public static final Option<Integer> QUALITY = intChoice("caustica.rt.dlssRr.quality", "dlss-rr.quality", 1, QUALITY_STEPS).inGroup("upscaling");
+            /**
+             * Responsivity-mask value for every pixel whose history RR may reuse: 0 keeps the most accumulated
+             * history, 1 favors the current frame everywhere. Sky that the camera sees directly or through
+             * delta transmission is always 1.
+             */
+            public static final Option<Float> RESPONSIVITY = clampedFloat("caustica.rt.dlssRr.responsivity", "dlss-rr.responsivity", 0.0f, 0.0f, 1.0f).inGroup("upscaling");
         }
 
         public static final class DlssSr {
