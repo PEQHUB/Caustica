@@ -49,7 +49,7 @@ final class RtToneMappingTest {
     }
 
     @Test
-    void theSuiteIsSelectableWithAces20AsTheDefault() {
+    void theSuiteIsSelectableWithPsychoV31AsTheDefault() {
         assertEquals(List.of("agx", "pbr-neutral", "reinhard", "aces2.0", "aces", "lottes", "uncharted2",
                         "gt", "psychovisual", "prism", "reinhard-jodie", "psychov31", "psychov30",
                         "psychov69", "psychov24"),
@@ -57,8 +57,8 @@ final class RtToneMappingTest {
         assertEquals(List.of("caustica", "aces2.0", "psychovisual", "prism", "bt2390", "psychov31",
                         "psychov30", "psychov69", "psychov24"),
                 RtToneMapping.hdrConfigNames());
-        assertEquals("aces2.0", RendererOptions.Rt.Tonemap.SDR_MAPPER.defaultValue());
-        assertEquals("aces2.0", RendererOptions.Rt.Tonemap.HDR_MAPPER.defaultValue());
+        assertEquals("psychov31", RendererOptions.Rt.Tonemap.SDR_MAPPER.defaultValue());
+        assertEquals("psychov31", RendererOptions.Rt.Tonemap.HDR_MAPPER.defaultValue());
     }
 
     @Test
@@ -115,12 +115,14 @@ final class RtToneMappingTest {
     }
 
     @Test
-    void defaultsCaptureAces20WithoutParameters() {
+    void defaultsCapturePsychoV31WithTheReferenceHdrShoulder() {
         var settings = RtRenderSettings.capture(options(Map.of()), true);
-        assertEquals(RtToneMapping.SdrMode.ACES_2_0, settings.toneMapping().sdrMode());
-        assertEquals(RtToneMapping.HdrMode.ACES_2_0, settings.toneMapping().hdrMode());
-        assertEquals(RtToneMapping.Parameters.of(), settings.toneMapping().sdrParameters());
-        assertEquals(RtToneMapping.Parameters.of(), settings.toneMapping().hdrParameters());
+        assertEquals(RtToneMapping.SdrMode.PSYCHOV31, settings.toneMapping().sdrMode());
+        assertEquals(RtToneMapping.HdrMode.PSYCHOV31, settings.toneMapping().hdrMode());
+        assertEquals(RtToneMapping.Parameters.of(1.0f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f),
+                settings.toneMapping().sdrParameters());
+        assertEquals(RtToneMapping.Parameters.of(1.5f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f),
+                settings.toneMapping().hdrParameters());
         assertEquals(200.0f, settings.toneMapping().paperWhiteNits());
         assertEquals(5.0f, settings.toneMapping().headroom());
     }
