@@ -189,8 +189,17 @@ public final class MinecraftRtRuntime {
     public boolean swapchainPqAvailable() { return swapchainPqAvailable; }
     public boolean hdrEnabled() { return swapchainPqActive && settings.get(RendererOptions.Rt.Hdr.ENABLED); }
     public boolean settingAvailable(Option<?> option) {
+        if (RendererOptions.Rt.Sharc.OPTIONS.contains(option)) return sharcAvailable();
         return (option != RendererOptions.Rt.Hdr.ENABLED && option != RendererOptions.Rt.Hdr.UI_NITS
                 && option != RendererOptions.Rt.Hdr.PEAK_NITS) || swapchainPqAvailable;
+    }
+
+    /** SHaRC runs in a build whose SHaRC headers verified, on a device that enabled their features. */
+    private boolean sharcAvailable() {
+        VulkanDeviceContext context = vulkanContextOrNull();
+        return SharcSdk.includeDirectory() != null && context != null
+                && context.backend().capabilities().shaderBufferInt64Atomics()
+                && context.backend().capabilities().storageBuffer16BitAccess();
     }
 
     private NgxRuntime requireNgxRuntime() {

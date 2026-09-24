@@ -27,7 +27,8 @@ public final class CausticaSections {
      * list to maintain.
      */
     private static final List<String> ENGINE_GROUPS =
-            List.of("general", "quality", "upscaling", "exposure", "look", "output", "entities", "debug");
+            List.of("general", "quality", "radiance-cache", "upscaling", "exposure", "look", "output", "entities",
+                    "debug");
 
     private static final int ACCENT_ENGINE = 0xFF4FC3F7;
     private static final int ACCENT_BLOOM = 0xFFFFB74D;

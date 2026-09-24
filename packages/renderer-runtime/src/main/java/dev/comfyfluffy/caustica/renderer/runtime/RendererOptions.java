@@ -106,22 +106,22 @@ public final class RendererOptions {
         /** The SHaRC radiance cache; it runs only in a SHaRC SDK build on a device with its features. */
         public static final class Sharc {
             private Sharc() { }
-            public static final Option<Boolean> ENABLED = bool("caustica.rt.sharc.enabled", "sharc.enabled", true);
+            public static final Option<Boolean> ENABLED = bool("caustica.rt.sharc.enabled", "sharc.enabled", true).inGroup("radiance-cache");
             /** Entries per cache table as a power of two. */
-            public static final Option<Integer> CACHE_EXPONENT = clampedInt("caustica.rt.sharc.cacheExponent", "sharc.cache-exponent", 22, 16, 23);
-            public static final Option<Integer> UPDATE_TILE_SIZE = clampedInt("caustica.rt.sharc.updateTileSize", "sharc.update-tile-size", 3, 2, 64);
-            public static final Option<Integer> ACCUMULATION_FRAMES = clampedInt("caustica.rt.sharc.accumulationFrames", "sharc.accumulation-frames", 384, 1, 1024);
-            public static final Option<Integer> STALE_FRAMES = clampedInt("caustica.rt.sharc.staleFrames", "sharc.stale-frames", 128, 8, 1024);
-            public static final Option<Float> SCENE_SCALE = clampedFloat("caustica.rt.sharc.sceneScale", "sharc.scene-scale", 32.0f, 1.0f, 100.0f);
-            public static final Option<Float> GRID_LOGARITHM_BASE = clampedFloat("caustica.rt.sharc.gridLogarithmBase", "sharc.grid-logarithm-base", 3.0f, 1.01f, 16.0f);
-            public static final Option<Float> GRID_LEVEL_BIAS = clampedFloat("caustica.rt.sharc.gridLevelBias", "sharc.grid-level-bias", 0.0f, -16.0f, 16.0f);
+            public static final Option<Integer> CACHE_EXPONENT = clampedInt("caustica.rt.sharc.cacheExponent", "sharc.cache-exponent", 22, 16, 23).inGroup("radiance-cache");
+            public static final Option<Integer> UPDATE_TILE_SIZE = clampedInt("caustica.rt.sharc.updateTileSize", "sharc.update-tile-size", 3, 2, 64).inGroup("radiance-cache");
+            public static final Option<Integer> ACCUMULATION_FRAMES = clampedInt("caustica.rt.sharc.accumulationFrames", "sharc.accumulation-frames", 384, 1, 1024).inGroup("radiance-cache");
+            public static final Option<Integer> STALE_FRAMES = clampedInt("caustica.rt.sharc.staleFrames", "sharc.stale-frames", 128, 8, 1024).inGroup("radiance-cache");
+            public static final Option<Float> SCENE_SCALE = clampedFloat("caustica.rt.sharc.sceneScale", "sharc.scene-scale", 32.0f, 1.0f, 100.0f).inGroup("radiance-cache");
+            public static final Option<Float> GRID_LOGARITHM_BASE = clampedFloat("caustica.rt.sharc.gridLogarithmBase", "sharc.grid-logarithm-base", 3.0f, 1.01f, 16.0f).inGroup("radiance-cache");
+            public static final Option<Float> GRID_LEVEL_BIAS = clampedFloat("caustica.rt.sharc.gridLevelBias", "sharc.grid-level-bias", 0.0f, -16.0f, 16.0f).inGroup("radiance-cache");
             /** Accumulator quantization steps per unit of pre-exposed radiance. */
-            public static final Option<Float> RADIANCE_SCALE = clampedFloat("caustica.rt.sharc.radianceScale", "sharc.radiance-scale", 1000.0f, 50.0f, 1000.0f);
+            public static final Option<Float> RADIANCE_SCALE = clampedFloat("caustica.rt.sharc.radianceScale", "sharc.radiance-scale", 1000.0f, 50.0f, 1000.0f).inGroup("radiance-cache");
             /** Perceptual roughness a surface must exceed to own cache entries. */
-            public static final Option<Float> ROUGHNESS_THRESHOLD = clampedFloat("caustica.rt.sharc.roughnessThreshold", "sharc.roughness-threshold", 0.0f, 0.0f, 1.0f);
-            public static final Option<Boolean> ANTI_FIREFLY = bool("caustica.rt.sharc.antiFirefly", "sharc.anti-firefly", true);
+            public static final Option<Float> ROUGHNESS_THRESHOLD = clampedFloat("caustica.rt.sharc.roughnessThreshold", "sharc.roughness-threshold", 0.0f, 0.0f, 1.0f).inGroup("radiance-cache");
+            public static final Option<Boolean> ANTI_FIREFLY = bool("caustica.rt.sharc.antiFirefly", "sharc.anti-firefly", true).inGroup("radiance-cache");
             /** Primary surfaces query the cache too, showing its content directly on screen. */
-            public static final Option<Boolean> PRIMARY_SURFACE_DEBUG = bool("caustica.rt.sharc.primarySurfaceDebug", "sharc.primary-surface-debug", false);
+            public static final Option<Boolean> PRIMARY_SURFACE_DEBUG = bool("caustica.rt.sharc.primarySurfaceDebug", "sharc.primary-surface-debug", false).inGroup("debug");
             public static final List<Option<?>> OPTIONS = List.of(ENABLED, CACHE_EXPONENT, UPDATE_TILE_SIZE,
                     ACCUMULATION_FRAMES, STALE_FRAMES, SCENE_SCALE, GRID_LOGARITHM_BASE, GRID_LEVEL_BIAS,
                     RADIANCE_SCALE, ROUGHNESS_THRESHOLD, ANTI_FIREFLY, PRIMARY_SURFACE_DEBUG);
