@@ -174,7 +174,13 @@ public final class WorldShaderCompiler implements ProgramBackend.CompiledProgram
                 StandardCharsets.UTF_8);
         List<Path> searchPaths = new ArrayList<>(List.of(worldDirectory, apiDirectory, fallbackDirectory,
                 extensionDirectory, compositionDirectory));
-        if (sharcHeaders != null) searchPaths.add(sharcHeaders);
+        if (sharcHeaders != null) {
+            searchPaths.add(sharcHeaders);
+            // Stored binaries are keyed by source content, and the SHaRC stages include these headers.
+            for (String header : SharcSdk.HEADERS.keySet().stream().sorted().toList()) {
+                sources.put("sharc/" + header, Files.readAllBytes(sharcHeaders.resolve(header)));
+            }
+        }
         Composition composition = Composition.create(generated.data(),
                 COMPOSITION_MODULE, COMPOSITION_TYPE, generated.source(), sources);
         return new WorldShaderCompiler(runtimes, searchPaths, binaries, worldDirectory, cleanupDirectory,
