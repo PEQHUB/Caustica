@@ -532,7 +532,7 @@ public final class RtFrameRenderer {
         }
         if (!execution.frame.historyContinuous()) {
             reconstruction.resetHistory();
-            telemetry.frame().count("frame.historyBreak", 1L);
+            telemetry.frame().count(execution.frame.historyBreak().metric, 1L);
         }
         int debugView = settings.debugView();
         try (RtFrameCommands commands = new RtFrameCommands(ctx, gpuTiming, graphicsUse,
