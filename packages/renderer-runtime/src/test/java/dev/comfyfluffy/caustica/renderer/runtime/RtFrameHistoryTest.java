@@ -72,9 +72,9 @@ final class RtFrameHistoryTest {
     }
 
     @Test
-    void frameGapsAndExplicitResetDiscardCameraHistory() {
+    void longInterruptionsAndExplicitResetDiscardCameraHistory() {
         var history = seeded();
-        assertReset(capture(history, snapshot(1, .02), 2));
+        assertReset(history.capture(snapshot(1, .02), 2, 300_000_000L, EXTENT, ROUTE, 1, 1, 1));
         history.reset();
         var reset = capture(history, snapshot(1, .02), 1);
         assertReset(reset);
@@ -211,6 +211,18 @@ final class RtFrameHistoryTest {
         var history = new RtFrameHistory();
         history.submitted(capture(history, snapshot(0, 0), 0));
         return history;
+    }
+
+    @Test
+    void renderFramesWithoutAnRtCompositeKeepHistory() {
+        var history = new RtFrameHistory();
+        history.submitted(capture(history, snapshot(1, 1), 10));
+        // Frame 11 was a screen transition's redraw with no RT composite.
+        var next = capture(history, snapshot(1, 1.03), 12);
+        assertTrue(next.historyContinuous());
+        history.submitted(next);
+        var afterPause = history.capture(snapshot(1, 2), 13, 12 * 16_000_000L + 300_000_000L, EXTENT, ROUTE, 1, 1, 1);
+        assertFalse(afterPause.historyContinuous());
     }
 
     private static RtFrameInput capture(RtFrameHistory history, FrameSnapshot snapshot, long number) {

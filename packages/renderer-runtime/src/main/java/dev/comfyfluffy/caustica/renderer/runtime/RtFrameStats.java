@@ -58,7 +58,7 @@ public final class RtFrameStats {
             "frame.sceneEffects",
             "frame.displayMap",
             "frame.debugPresent",
-            "frame.copyOutput"), List.of());
+            "frame.copyOutput"), List.of("frame.historyBreak"));
 
     private volatile long frameSerial;
     private boolean renderFrameStarted;

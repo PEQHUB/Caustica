@@ -104,11 +104,15 @@ public final class RtFrameRenderer {
     private float debugCapturePreExposure;
     private RtDenoisingSettings debugCaptureDenoising;
     private DebugProjection debugCaptureProjection;
+    // Advances by one per submitted frame that continues history and by two across a break, so temporal
+    // passes comparing consecutive indices follow RT history rather than raw render frames.
+    private long temporalFrameIndex;
 
     private static final class FrameExecution {
         final GraphicsUse graphicsUse;
         final ResourceOwners resources = new ResourceOwners();
         RtFrameInput frame;
+        long temporalFrameIndex;
         RtRetainedSceneBackend.PreparedTrace trace;
         RtProgramBackend.Published program;
         VulkanDeviceAddress worldPushAddress;
@@ -519,13 +523,17 @@ public final class RtFrameRenderer {
         presentationResources().exposure().beginFrame(graphicsUse, telemetry.frameSerial());
         execution.frame = history.capture(snapshot, frameCounter, System.nanoTime(), traceExtent(),
                 reconstruction.settings().route(), exposure().preExposure(), settings.jitterSignX(), settings.jitterSignY());
+        execution.temporalFrameIndex = temporalFrameIndex + (execution.frame.historyContinuous() ? 1 : 2);
         try (RtTelemetry.Scope ignored = telemetry.frame().stage("frame.assembleScenes")) {
             try (var previous = execution.frame.historyContinuous() ? submittedScenes.acquire() : null) {
                 scenes.beginFrame(revision.get().traceScenes(),
                         previous == null ? null : previous.get().traceScenes(), graphicsUse);
             }
         }
-        if (!execution.frame.historyContinuous()) reconstruction.resetHistory();
+        if (!execution.frame.historyContinuous()) {
+            reconstruction.resetHistory();
+            telemetry.frame().count("frame.historyBreak", 1L);
+        }
         int debugView = settings.debugView();
         try (RtFrameCommands commands = new RtFrameCommands(ctx, gpuTiming, graphicsUse,
                 telemetry.frameSerial(), telemetry.frame());
@@ -552,6 +560,7 @@ public final class RtFrameRenderer {
             debugCaptureDenoising = reconstruction.settings();
             debugCaptureProjection = DebugProjection.capture(execution.frame);
             history.submitted(execution.frame);
+            temporalFrameIndex = execution.temporalFrameIndex;
             submittedScenes.submitted(revision);
             reconstruction.submitted(execution.frame);
         }
@@ -810,7 +819,8 @@ public final class RtFrameRenderer {
 
     private RtPassSchedulerBackend.FrameState passFrame(VkCommandBuffer commandBuffer, GraphicsUse graphicsUse,
             RtPassSchedulerBackend.UiState ui, GpuImage output, GpuImage targetA, GpuImage targetB) {
-        return new RtPassSchedulerBackend.FrameState(commandBuffer, graphicsUse, execution.resources, frameCounter,
+        return new RtPassSchedulerBackend.FrameState(commandBuffer, graphicsUse, execution.resources,
+                execution.temporalFrameIndex,
                 execution.frame.snapshot().view(), execution.frame.snapshot().timeSeconds(),
                 execution.frame.snapshot().metersPerWorldUnit(),
                 traceExtent().renderWidth(), traceExtent().renderHeight(), output,

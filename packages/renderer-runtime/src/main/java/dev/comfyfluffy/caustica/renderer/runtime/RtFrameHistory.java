@@ -15,6 +15,9 @@ final class RtFrameHistory {
     private static final double MAX_CAMERA_DISTANCE_SQUARED_METERS = 64;
     private static final double ANIMATION_PERIOD_SECONDS = 3600;
     private static final float MAX_ANIMATION_GAP_SECONDS = .25f;
+    // Render frames without an RT composite (a screen transition's synchronous redraw) leave the last
+    // submitted frame a valid predecessor; an interruption longer than this does not.
+    private static final long MAX_PREDECESSOR_AGE_NANOS = 250_000_000L;
 
     private RtFrameInput previous;
     private long samples;
@@ -24,7 +27,8 @@ final class RtFrameHistory {
         Matrix4f projection = snapshot.copyProjection();
         Matrix4f rotation = snapshot.copyViewRotation();
         Matrix4f projectionView = new Matrix4f(projection).mul(rotation);
-        boolean continuous = previous != null && previous.number() + 1 == number
+        boolean continuous = previous != null && number > previous.number()
+                && nanos - previous.nanos() <= MAX_PREDECESSOR_AGE_NANOS
                 && previous.snapshot().view().entryScene() == snapshot.view().entryScene()
                 && previous.snapshot().metersPerWorldUnit() == snapshot.metersPerWorldUnit()
                 && previous.extent().equals(extent) && previous.route() == route
