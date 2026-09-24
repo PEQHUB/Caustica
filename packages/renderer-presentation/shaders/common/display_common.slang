@@ -86,7 +86,6 @@ public struct DisplayPush {
     public uint hdrToneSamplerIndex;
     public uint lookLutIndex;
     public uint lookSamplerIndex;
-    public int hdrEnabled;      // 0 = SDR only, 1 = also write the PQ HDR image
     public float lutSize;       // toneLut/hdrToneLut texels per axis; both LUTs share one size (asserted at load)
     public float gamma;         // post-display artistic gamma; below 1 brightens midtones
     public float hdrPeakNits;   // mastering peak baked into the currently bound HDR ACES LUT
