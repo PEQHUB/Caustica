@@ -189,7 +189,8 @@ public final class MinecraftRtRuntime {
     public boolean hdrEnabled() { return swapchainPqActive && settings.get(RendererOptions.Rt.Hdr.ENABLED); }
     public boolean settingAvailable(Option<?> option) {
         return (option != RendererOptions.Rt.Hdr.ENABLED && option != RendererOptions.Rt.Hdr.UI_NITS
-                && option != RendererOptions.Rt.Hdr.PEAK_NITS) || swapchainPqAvailable;
+                && option != RendererOptions.Rt.Hdr.PEAK_NITS && option != RendererOptions.Rt.Tonemap.HDR_MAPPER
+                && option != RendererOptions.Rt.Tonemap.PAPER_WHITE_NITS) || swapchainPqAvailable;
     }
 
     private NgxRuntime requireNgxRuntime() {
