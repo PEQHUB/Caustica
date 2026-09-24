@@ -28,7 +28,9 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 final class WorldShaderCompilerTest {
     private static final ShaderSource BUILTINS = ShaderSource.classpath(WorldShaderCompilerTest.class,
@@ -164,6 +166,47 @@ final class WorldShaderCompilerTest {
             assertVulkan14(cache.resolve("spatial-build.spv"), build);
             assertVulkan14(cache.resolve("spatial-fill.spv"), fill);
         }
+    }
+
+    @Test
+    void sharcStagesCompileAgainstThePinnedSdk(@TempDir Path cache) throws Exception {
+        String sdk = System.getProperty("caustica.test.sharcSdk");
+        assumeTrue(sdk != null, "built without -PsharcSdk");
+        Path headers = Path.of(sdk).resolve("include");
+        assertNull(SharcSdk.difference(headers));
+        var program = new ProgramComposition(List.of(new ProgramComposition.Surface(
+                new ProgramKey(ProgramKey.Kind.SURFACE, 1), SurfaceDefinition.of(
+                        shader("caustica_error_surface", "ErrorSurface"),
+                        shader("caustica_error_coverage", "ErrorCoverage"), DATA.data(7), BINDING, INSTANCE))));
+        try (WorldShaderCompiler compiler = WorldShaderCompiler.create(runtime, cache, program, headers)) {
+            for (boolean reordered : new boolean[]{false, true}) {
+                byte[] query = compiler.compileSharcFill(reordered, false);
+                byte[] update = compiler.compileSharcFill(reordered, true);
+                assertSpirv(query);
+                assertSpirv(update);
+                assertVulkan14(cache.resolve("sharc-query-" + reordered + ".spv"), query);
+                assertVulkan14(cache.resolve("sharc-update-" + reordered + ".spv"), update);
+                assertShadowTraceRouting(query);
+                assertShadowTraceRouting(update);
+                // Only the update inserts hash grid keys, a 64-bit compare-exchange.
+                assertEquals(0, countOpcode(query, 230));
+                assertTrue(countOpcode(update, 230) > 0);
+            }
+            byte[] resolve = compiler.compileSharcResolve();
+            assertSpirv(resolve);
+            assertVulkan14(cache.resolve("sharc-resolve.spv"), resolve);
+            // A descriptor-heap shader object carries no set or binding decoration.
+            assertEquals(0, countDecorations(resolve, 33) + countDecorations(resolve, 34));
+        }
+    }
+
+    private static int countDecorations(byte[] spirv, int decoration) {
+        var words = ByteBuffer.wrap(spirv).order(ByteOrder.LITTLE_ENDIAN).asIntBuffer();
+        int found = 0;
+        for (int offset = 5; offset < words.limit(); offset += words.get(offset) >>> 16) {
+            if ((words.get(offset) & 65535) == 71 && words.get(offset + 2) == decoration) found++; // OpDecorate
+        }
+        return found;
     }
 
     private static ShaderDefinition shader(String module, String type) {

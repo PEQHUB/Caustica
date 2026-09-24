@@ -1,9 +1,9 @@
-module fill_stable_planes;
+module fill_sharc_update;
 import caustica_api;
 import path_tracer;
-import sharc_policy;
 import retained_trace_ordinary;
+import sharc_bridge;
 [shader("raygeneration")]
 void main<TComposition : IComposition>() {
-    runFillStablePlanes<TComposition, RetainedOrdinaryTrace, SharcDisabled>();
+    runFillStablePlanes<TComposition, RetainedOrdinaryTrace, SharcUpdatePolicy>();
 }

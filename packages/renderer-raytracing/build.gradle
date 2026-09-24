@@ -64,7 +64,9 @@ def worldShaderNames = [
         "retained_trace_ordinary.slang", "retained_trace_policy.slang",
         "retained_trace_reordered.slang", "environment_miss.slang",
         "stable_planes.slang", "stable_plane_types.slang", "nrd_compose_types.slang", "surface_bsdf.slang", "nrd_signals.slang",
-        "world_common.slang", "world_minimal.slang"
+        "world_common.slang", "world_minimal.slang",
+        "sharc_types.slang", "sharc_policy.slang", "sharc_bridge.slang", "sharc_resolve.slang",
+        "fill_sharc_query.slang", "fill_sharc_query_ser.slang", "fill_sharc_update.slang", "fill_sharc_update_ser.slang"
 ] as Set
 
 def fallbackShaderNames = ["surface/caustica_error_surface.slang", "surface/caustica_error_coverage.slang",
@@ -139,6 +141,7 @@ def rayTracingRecordSpecs = [
         "buffer|neeAtStateLayoutProbe|NeeAtState|dev.comfyfluffy.caustica.renderer.raytracing.gen|NeeAtStateData|false",
         "buffer|packedPathSegmentLayoutProbe|PackedPathSegment|dev.comfyfluffy.caustica.renderer.raytracing.gen|PackedPathSegmentData|false",
         "buffer|stablePlaneRecordLayoutProbe|StablePlaneRecord|dev.comfyfluffy.caustica.renderer.raytracing.gen|StablePlaneRecordData|false",
+        "buffer|sharcFrameLayoutProbe|SharcFrame|dev.comfyfluffy.caustica.renderer.raytracing.gen|SharcFrameData|false",
         "push|nrdComposePushProbe|NrdComposePush|dev.comfyfluffy.caustica.renderer.raytracing.gen|NrdComposePushData|false",
         "buffer|nrdPlaneFrameLayoutProbe|NrdPlaneFrame|dev.comfyfluffy.caustica.renderer.raytracing.gen|NrdPlaneFrameData|false"
 ]
@@ -306,7 +309,8 @@ def verifyRendererRayTracingJar = tasks.register("verifyRendererRayTracingJar") 
         } as Set
         def expectedGeneratedTopLevelClasses = ["WorldPushData", "RetainedGeometryRecordData", "RetainedInstanceRecordData",
                 "RetainedLightRecordData", "NeeAtStateData", "NeeAtBakePushData", "PackedPathSegmentData",
-                "StablePlaneRecordData", "NrdComposePushData", "NrdPlaneFrameData", "ShadowDiagnosticsData"].collect {
+                "StablePlaneRecordData", "SharcFrameData", "NrdComposePushData", "NrdPlaneFrameData",
+                "ShadowDiagnosticsData"].collect {
             "${generatedRecordClassRoot}${it}.class"
         } as Set
         def packagedShaders = names.findAll {

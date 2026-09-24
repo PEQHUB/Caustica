@@ -3,6 +3,7 @@ import trace_diagnostics_types;
 import world_common;
 import path_queue_types;
 import stable_plane_types;
+import sharc_types;
 
 struct WorldPushLayoutProbe { WorldPush values[2]; };
 struct RetainedGeometryRecordLayoutProbe { RetainedGeometryRecord values[2]; };
@@ -74,5 +75,17 @@ void probeShadowDiagnostics(uint3 id : SV_DispatchThreadID) {
     if (id.x == 0xFFFFFFFFu) {
         uint sink = shadowDiagnosticsLayoutProbe[0].values[0].maxShadowRestartsAbove32
                 + shadowDiagnosticsLayoutProbe[0].values[1].firstAnomalyFlags;
+    }
+}
+
+struct SharcFrameLayoutProbe { SharcFrame values[2]; };
+[[vk::binding(9, 0)]] StructuredBuffer<SharcFrameLayoutProbe, Std430DataLayout> sharcFrameLayoutProbe;
+
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void probeSharcFrame(uint3 id : SV_DispatchThreadID) {
+    if (id.x == 0xFFFFFFFFu) {
+        float sink = sharcFrameLayoutProbe[0].values[0].roughnessThreshold
+                + float(sharcFrameLayoutProbe[0].values[1].flags);
     }
 }

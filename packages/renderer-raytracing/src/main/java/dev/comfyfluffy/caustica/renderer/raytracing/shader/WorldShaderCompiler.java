@@ -59,7 +59,9 @@ public final class WorldShaderCompiler implements ProgramBackend.CompiledProgram
             "trace_transport.slang", "visibility_rays.slang",
             "trace_diagnostics.slang", "trace_diagnostics_types.slang", "trace_diagnostics_config.slang", "path_tracer.slang", "retained_trace_policy.slang",
             "retained_trace_ordinary.slang", "retained_trace_reordered.slang", "stable_planes.slang",
-            "stable_plane_types.slang", "nrd_signals.slang");
+            "stable_plane_types.slang", "nrd_signals.slang", "sharc_types.slang", "sharc_policy.slang",
+            "sharc_bridge.slang", "sharc_resolve.slang", "fill_sharc_query.slang", "fill_sharc_query_ser.slang",
+            "fill_sharc_update.slang", "fill_sharc_update_ser.slang");
     private static final List<String> API_MODULES = List.of(
             "caustica_api.slang", "caustica_color.slang", "caustica_coverage.slang",
             "caustica_environment.slang", "caustica_resources.slang", "caustica_surface.slang",
@@ -89,17 +91,25 @@ public final class WorldShaderCompiler implements ProgramBackend.CompiledProgram
     public static WorldShaderCompiler create(SlangRuntime runtime, Path cacheDirectory,
                                              ProgramComposition program)
             throws IOException {
-        return create(runtime, cacheDirectory, program, null);
+        return create(runtime, cacheDirectory, program, null, null);
     }
 
+    /** @param sharcHeaders verified SHaRC SDK headers ({@link SharcSdk}), which the SHaRC stages include */
+    public static WorldShaderCompiler create(SlangRuntime runtime, Path cacheDirectory,
+                                             ProgramComposition program, Path sharcHeaders)
+            throws IOException {
+        return create(runtime, cacheDirectory, program, null, sharcHeaders);
+    }
+
+    /** @param sharcHeaders verified SHaRC SDK headers, or null for a program without SHaRC stages */
     public static WorldShaderCompiler createIsolated(SlangRuntime runtime, Path cacheRoot,
-                                                     ProgramComposition program)
+                                                     ProgramComposition program, Path sharcHeaders)
             throws IOException {
         Objects.requireNonNull(runtime, "runtime");
         Files.createDirectories(cacheRoot);
         Path directory = Files.createTempDirectory(cacheRoot, "runtime-");
         try {
-            return create(runtime, directory, program, directory);
+            return create(runtime, directory, program, directory, sharcHeaders);
         } catch (IOException | RuntimeException | Error failure) {
             deleteDirectory(directory);
             throw failure;
@@ -107,8 +117,8 @@ public final class WorldShaderCompiler implements ProgramBackend.CompiledProgram
     }
 
     private static WorldShaderCompiler create(SlangRuntime runtime, Path cacheDirectory,
-                                              ProgramComposition program,
-                                              Path cleanupDirectory) throws IOException {
+                                              ProgramComposition program, Path cleanupDirectory,
+                                              Path sharcHeaders) throws IOException {
         Objects.requireNonNull(runtime, "runtime");
         Objects.requireNonNull(cacheDirectory, "cacheDirectory");
         Objects.requireNonNull(program, "program");
@@ -143,8 +153,9 @@ public final class WorldShaderCompiler implements ProgramBackend.CompiledProgram
         Files.createDirectories(compositionDirectory);
         Files.writeString(compositionDirectory.resolve(COMPOSITION_MODULE + ".slang"), generated.source(),
                 StandardCharsets.UTF_8);
-        List<Path> searchPaths = List.of(worldDirectory, apiDirectory, fallbackDirectory,
-                extensionDirectory, compositionDirectory);
+        List<Path> searchPaths = new ArrayList<>(List.of(worldDirectory, apiDirectory, fallbackDirectory,
+                extensionDirectory, compositionDirectory));
+        if (sharcHeaders != null) searchPaths.add(sharcHeaders);
         Composition composition = Composition.create(generated.data(),
                 COMPOSITION_MODULE, COMPOSITION_TYPE, generated.source(), sources);
         SlangSession session = runtime.openSession(searchPaths, true, true);
@@ -175,6 +186,17 @@ public final class WorldShaderCompiler implements ProgramBackend.CompiledProgram
     public byte[] compileVolumeLighting() { return compileSpecialized(VISIBILITY_RAYS_MODULE, "volumeLighting"); }
     public byte[] compileFillStablePlanes(boolean reordered) {
         return compileSpecialized(reordered ? FILL_STABLE_PLANES_SER_MODULE : FILL_STABLE_PLANES_MODULE, ENTRY_POINT);
+    }
+
+    /** The SHaRC update or query variant of the fill; the compiler must have the SHaRC headers. */
+    public byte[] compileSharcFill(boolean reordered, boolean update) {
+        return compileSpecialized("fill_sharc_" + (update ? "update" : "query") + (reordered ? "_ser" : ""),
+                ENTRY_POINT);
+    }
+
+    /** The SHaRC resolve compute; the compiler must have the SHaRC headers. */
+    public byte[] compileSharcResolve() {
+        return compilePlain("sharc_resolve.slang", ENTRY_POINT);
     }
 
     public byte[] compilePlain(String moduleFileName, String entryPoint) {
