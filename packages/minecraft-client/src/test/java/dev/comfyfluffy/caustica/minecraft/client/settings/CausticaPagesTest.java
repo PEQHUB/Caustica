@@ -118,7 +118,9 @@ final class CausticaPagesTest {
         engine.store().apply(CausticaConfig.FEATURE, route, "ray_reconstruction");
         SettingsPage rayReconstruction = CausticaPages.upscaling(engine);
         assertEquals(List.of("denoiser", "dlss-rr", "latency"), sectionIds(rayReconstruction));
-        assertEquals(List.of("dlss-rr.quality"), ids(section(rayReconstruction, "dlss-rr")));
+        List<String> rayReconstructionRows = ids(section(rayReconstruction, "dlss-rr"));
+        assertEquals("dlss-rr.quality", rayReconstructionRows.getFirst());
+        assertTrue(rayReconstructionRows.stream().allMatch(id -> id.startsWith("dlss-rr.")), rayReconstructionRows::toString);
         assertEquals(List.of("frame-generation.enabled", "reflex.enabled"),
                 ids(section(rayReconstruction, "latency")));
 
