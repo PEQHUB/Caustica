@@ -35,7 +35,7 @@ public final class CausticaPages {
             "entities.enabled", "particles.enabled");
     private static final String HDR_ENABLED = "hdr.enabled";
     private static final String DENOISING_ROUTE = "denoising.route";
-    private static final List<String> EXPOSURE_EVERYDAY = List.of("exposure.mode", "exposure.manual-ev",
+    private static final List<String> EXPOSURE_EVERYDAY = List.of("exposure.mode", "exposure.response", "exposure.manual-ev",
             "exposure.key", "exposure.adapt-darken", "exposure.adapt-brighten");
 
     private static final Predicate<Option<?>> TONE_MAPPING = prefix("tonemap.", "hdr.");
