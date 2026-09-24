@@ -2,13 +2,14 @@ package dev.comfyfluffy.caustica.renderer.runtime;
 
 import dev.comfyfluffy.caustica.settings.Option;
 import java.util.List;
+import java.util.stream.Stream;
 
 /** Renderer-owned option declarations; registration and persistence belong to the host. */
 public final class RendererOptions {
     private RendererOptions() { }
 
     public static List<Option<?>> settings() {
-        return List.of(
+        return Stream.<Option<?>>concat(Stream.of(
                 Rt.Composite.DEBUG_VIEW, Rt.Composite.MAX_BOUNCES,
                 Rt.Composite.JITTER_SIGN_X, Rt.Composite.JITTER_SIGN_Y,
                 Rt.DlssRr.PRESET, Rt.DlssRr.QUALITY, Rt.DlssSr.PRESET, Rt.DlssSr.QUALITY,
@@ -20,7 +21,7 @@ public final class RendererOptions {
                 Rt.Exposure.CENTER_WEIGHT_SIGMA, Rt.Exposure.CENTER_WEIGHT_FLOOR,
                 Rt.Exposure.ENVIRONMENT_WEIGHT_CAP, Rt.Exposure.EMISSIVE_WEIGHT_CAP, Rt.Exposure.PRE_EXPOSURE,
                 Rt.Tonemap.GAMMA, Rt.Screenshots.EXR_ENABLED,
-                Rt.Hdr.ENABLED, Rt.Hdr.UI_NITS, Rt.Hdr.PEAK_NITS);
+                Rt.Hdr.ENABLED, Rt.Hdr.UI_NITS, Rt.Hdr.PEAK_NITS), Rt.Sharc.OPTIONS.stream()).toList();
     }
 
     public static final class Rt {
@@ -100,6 +101,30 @@ public final class RendererOptions {
             public static final Option<Float> UI_NITS = clampedFloat("caustica.rt.hdr.uiNits", "hdr.ui-nits", 200.0f, 80.0f, 500.0f).inGroup("output");
             public static final List<Integer> PEAK_NITS_STEPS = List.of(500, 1000, 2000, 4000);
             public static final Option<Integer> PEAK_NITS = intChoice("caustica.rt.hdr.peakNits", "hdr.peak-nits", 1000, PEAK_NITS_STEPS).inGroup("output");
+        }
+
+        /** The SHaRC radiance cache; it runs only in a SHaRC SDK build on a device with its features. */
+        public static final class Sharc {
+            private Sharc() { }
+            public static final Option<Boolean> ENABLED = bool("caustica.rt.sharc.enabled", "sharc.enabled", true);
+            /** Entries per cache table as a power of two. */
+            public static final Option<Integer> CACHE_EXPONENT = clampedInt("caustica.rt.sharc.cacheExponent", "sharc.cache-exponent", 22, 16, 23);
+            public static final Option<Integer> UPDATE_TILE_SIZE = clampedInt("caustica.rt.sharc.updateTileSize", "sharc.update-tile-size", 3, 2, 64);
+            public static final Option<Integer> ACCUMULATION_FRAMES = clampedInt("caustica.rt.sharc.accumulationFrames", "sharc.accumulation-frames", 384, 1, 1024);
+            public static final Option<Integer> STALE_FRAMES = clampedInt("caustica.rt.sharc.staleFrames", "sharc.stale-frames", 128, 8, 1024);
+            public static final Option<Float> SCENE_SCALE = clampedFloat("caustica.rt.sharc.sceneScale", "sharc.scene-scale", 32.0f, 1.0f, 100.0f);
+            public static final Option<Float> GRID_LOGARITHM_BASE = clampedFloat("caustica.rt.sharc.gridLogarithmBase", "sharc.grid-logarithm-base", 3.0f, 1.01f, 16.0f);
+            public static final Option<Float> GRID_LEVEL_BIAS = clampedFloat("caustica.rt.sharc.gridLevelBias", "sharc.grid-level-bias", 0.0f, -16.0f, 16.0f);
+            /** Accumulator quantization steps per unit of pre-exposed radiance. */
+            public static final Option<Float> RADIANCE_SCALE = clampedFloat("caustica.rt.sharc.radianceScale", "sharc.radiance-scale", 1000.0f, 50.0f, 1000.0f);
+            /** Perceptual roughness a surface must exceed to own cache entries. */
+            public static final Option<Float> ROUGHNESS_THRESHOLD = clampedFloat("caustica.rt.sharc.roughnessThreshold", "sharc.roughness-threshold", 0.0f, 0.0f, 1.0f);
+            public static final Option<Boolean> ANTI_FIREFLY = bool("caustica.rt.sharc.antiFirefly", "sharc.anti-firefly", true);
+            /** Primary surfaces query the cache too, showing its content directly on screen. */
+            public static final Option<Boolean> PRIMARY_SURFACE_DEBUG = bool("caustica.rt.sharc.primarySurfaceDebug", "sharc.primary-surface-debug", false);
+            public static final List<Option<?>> OPTIONS = List.of(ENABLED, CACHE_EXPONENT, UPDATE_TILE_SIZE,
+                    ACCUMULATION_FRAMES, STALE_FRAMES, SCENE_SCALE, GRID_LOGARITHM_BASE, GRID_LEVEL_BIAS,
+                    RADIANCE_SCALE, ROUGHNESS_THRESHOLD, ANTI_FIREFLY, PRIMARY_SURFACE_DEBUG);
         }
     }
 
