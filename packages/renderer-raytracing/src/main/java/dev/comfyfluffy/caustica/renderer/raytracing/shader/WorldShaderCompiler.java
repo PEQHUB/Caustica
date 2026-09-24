@@ -26,12 +26,21 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.function.Supplier;
+import java.util.function.Function;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-/** Compiles one immutable engine {@link ProgramComposition} into specialized world shader stages. */
+/**
+ * Compiles one immutable engine {@link ProgramComposition} into specialized world shader stages.
+ *
+ * <p>Stage methods may run concurrently. Each compile borrows an idle runtime and uses that runtime's
+ * session, opened on first use; the native layer serializes compiles per runtime, so distinct runtimes
+ * compile in parallel. A stored binary replaces the compile whose inputs it matches. {@link #close()}
+ * requires that no compile is in progress.
+ */
 public final class WorldShaderCompiler implements ProgramBackend.CompiledProgram, AutoCloseable {
     private static final Logger LOGGER = LoggerFactory.getLogger(WorldShaderCompiler.class);
     public static final String ENVIRONMENT_MISS_MODULE = "environment_miss";
@@ -72,7 +81,11 @@ public final class WorldShaderCompiler implements ProgramBackend.CompiledProgram
             "environment/caustica_builtin_environment.slang", "environment/caustica_error_environment.slang");
     private static final Set<String> PROVIDED_MODULES = moduleNames(WORLD_MODULES, API_MODULES, FALLBACK_MODULES);
 
-    private final SlangSession session;
+    private final BlockingQueue<SlangRuntime> idleRuntimes;
+    /** A runtime's session is opened and used only by the thread that borrowed that runtime. */
+    private final Map<SlangRuntime, SlangSession> sessions = new ConcurrentHashMap<>();
+    private final List<Path> searchPaths;
+    private final ShaderBinaryCache binaries;
     private final Path worldDirectory;
     private final Path cleanupDirectory;
     private final Composition composition;
@@ -81,9 +94,11 @@ public final class WorldShaderCompiler implements ProgramBackend.CompiledProgram
     /** Composition identity is fixed by the compiler that owns this cache. */
     private record StageKey(String module, String entryPoint, boolean specialized) { }
 
-    private WorldShaderCompiler(SlangSession session, Path worldDirectory, Path cleanupDirectory,
-                                Composition composition) {
-        this.session = session;
+    private WorldShaderCompiler(List<SlangRuntime> runtimes, List<Path> searchPaths, ShaderBinaryCache binaries,
+                                Path worldDirectory, Path cleanupDirectory, Composition composition) {
+        this.idleRuntimes = new ArrayBlockingQueue<>(runtimes.size(), false, runtimes);
+        this.searchPaths = searchPaths;
+        this.binaries = binaries;
         this.worldDirectory = worldDirectory;
         this.cleanupDirectory = cleanupDirectory;
         this.composition = composition;
@@ -92,27 +107,29 @@ public final class WorldShaderCompiler implements ProgramBackend.CompiledProgram
     public static WorldShaderCompiler create(SlangRuntime runtime, Path cacheDirectory,
                                              ProgramComposition program)
             throws IOException {
-        return create(runtime, cacheDirectory, program, null);
+        return create(List.of(runtime), cacheDirectory, program, null, null);
     }
 
-    public static WorldShaderCompiler createIsolated(SlangRuntime runtime, Path cacheRoot,
-                                                     ProgramComposition program)
+    /**
+     * Creates a compiler over its own temporary source tree, deleted on close. Stages compile concurrently on
+     * up to one session per runtime; a stage stored in {@code binaries}, when given, is loaded instead.
+     */
+    public static WorldShaderCompiler createIsolated(List<SlangRuntime> runtimes, Path cacheRoot,
+                                                     ProgramComposition program, ShaderBinaryCache binaries)
             throws IOException {
-        Objects.requireNonNull(runtime, "runtime");
         Files.createDirectories(cacheRoot);
         Path directory = Files.createTempDirectory(cacheRoot, "runtime-");
         try {
-            return create(runtime, directory, program, directory);
+            return create(runtimes, directory, program, directory, binaries);
         } catch (IOException | RuntimeException | Error failure) {
             deleteDirectory(directory);
             throw failure;
         }
     }
 
-    private static WorldShaderCompiler create(SlangRuntime runtime, Path cacheDirectory,
-                                              ProgramComposition program,
-                                              Path cleanupDirectory) throws IOException {
-        Objects.requireNonNull(runtime, "runtime");
+    private static WorldShaderCompiler create(List<SlangRuntime> runtimes, Path cacheDirectory,
+                                              ProgramComposition program, Path cleanupDirectory,
+                                              ShaderBinaryCache binaries) throws IOException {
         Objects.requireNonNull(cacheDirectory, "cacheDirectory");
         Objects.requireNonNull(program, "program");
         Path worldDirectory = cacheDirectory.resolve("world");
@@ -151,8 +168,8 @@ public final class WorldShaderCompiler implements ProgramBackend.CompiledProgram
                 extensionDirectory, compositionDirectory);
         Composition composition = Composition.create(generated.data(),
                 COMPOSITION_MODULE, COMPOSITION_TYPE, generated.source(), sources);
-        SlangSession session = runtime.openSession(searchPaths, true, true);
-        return new WorldShaderCompiler(session, worldDirectory, cleanupDirectory, composition);
+        return new WorldShaderCompiler(runtimes, searchPaths, binaries, worldDirectory, cleanupDirectory,
+                composition);
     }
 
     Composition composition() {
@@ -166,7 +183,7 @@ public final class WorldShaderCompiler implements ProgramBackend.CompiledProgram
 
     public byte[] compileSpecialized(String engineModule, String entryPoint) {
         var key = new StageKey(engineModule, entryPoint, true);
-        return cached(key, () -> session.compileSpecialized(engineModule, entryPoint,
+        return cached(key, session -> session.compileSpecialized(engineModule, entryPoint,
                 composition.rootModule(), composition.rootType()).spirv(),
                 engineModule + ':' + entryPoint + " for " + composition.contentHash().substring(0, 12));
     }
@@ -186,7 +203,7 @@ public final class WorldShaderCompiler implements ProgramBackend.CompiledProgram
     public byte[] compilePlain(String moduleFileName, String entryPoint) {
         Objects.requireNonNull(moduleFileName, "moduleFileName");
         Objects.requireNonNull(entryPoint, "entryPoint");
-        return cached(new StageKey(moduleFileName, entryPoint, false), () -> {
+        return cached(new StageKey(moduleFileName, entryPoint, false), session -> {
             Path file = worldDirectory.resolve(moduleFileName);
             try {
                 String source = Files.readString(file, StandardCharsets.UTF_8);
@@ -198,11 +215,20 @@ public final class WorldShaderCompiler implements ProgramBackend.CompiledProgram
         }, moduleFileName + ':' + entryPoint);
     }
 
-    private byte[] cached(StageKey key, Supplier<byte[]> compile, String label) {
-        return spirvByKey.computeIfAbsent(key, ignored -> {
+    private byte[] cached(StageKey key, Function<SlangSession, byte[]> compile, String label) {
+        byte[] known = spirvByKey.get(key);
+        if (known != null) return known;
+        String dumpDirectory = System.getProperty("caustica.debug.shader-dump-directory");
+        // A dump exports what this process compiles, so it bypasses stored binaries.
+        String storedKey = binaries == null || dumpDirectory != null ? null
+                : binaries.key(composition.contentHash(), key.module(), key.entryPoint(), key.specialized());
+        byte[] spirv = storedKey == null ? null : binaries.load(storedKey);
+        if (spirv != null) {
+            LOGGER.info("Loaded cached world shader {} ({} bytes SPIR-V)", label, spirv.length);
+        } else {
             long startNanos = System.nanoTime();
-            byte[] spirv = compile.get();
-            String dumpDirectory = System.getProperty("caustica.debug.shader-dump-directory");
+            spirv = withSession(compile);
+            if (storedKey != null) binaries.store(storedKey, spirv);
             if (dumpDirectory != null) {
                 try {
                     Path directory = Files.createDirectories(Path.of(dumpDirectory));
@@ -216,8 +242,30 @@ public final class WorldShaderCompiler implements ProgramBackend.CompiledProgram
             LOGGER.info(String.format(Locale.ROOT,
                     "Compiled world shader %s in %.1f ms (%d bytes SPIR-V)", label,
                     (System.nanoTime() - startNanos) / 1.0e6, spirv.length));
-            return spirv;
-        });
+        }
+        // computeIfAbsent would compile under a map bin lock and serialize stages whose keys share a bin.
+        byte[] raced = spirvByKey.putIfAbsent(key, spirv);
+        return raced == null ? spirv : raced;
+    }
+
+    private byte[] withSession(Function<SlangSession, byte[]> compile) {
+        SlangRuntime runtime;
+        try {
+            runtime = idleRuntimes.take();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("Interrupted while waiting for a Slang runtime", e);
+        }
+        try {
+            SlangSession session = sessions.get(runtime);
+            if (session == null) {
+                session = runtime.openSession(searchPaths, true, true);
+                sessions.put(runtime, session);
+            }
+            return compile.apply(session);
+        } finally {
+            idleRuntimes.add(runtime);
+        }
     }
 
     private static GeneratedComposition compositionRoot(ProgramComposition program) {
@@ -418,7 +466,7 @@ public final class WorldShaderCompiler implements ProgramBackend.CompiledProgram
 
     @Override
     public void close() {
-        session.retainUntilProcessExit();
+        sessions.values().forEach(SlangSession::retainUntilProcessExit);
         if (cleanupDirectory != null) deleteDirectory(cleanupDirectory);
     }
 

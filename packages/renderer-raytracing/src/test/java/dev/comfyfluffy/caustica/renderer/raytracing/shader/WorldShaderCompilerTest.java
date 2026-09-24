@@ -21,11 +21,18 @@ import java.nio.ByteOrder;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -176,6 +183,64 @@ final class WorldShaderCompilerTest {
             byte[] fill = compiler.compileFillStablePlanes(false);
             assertVulkan14(cache.resolve("spatial-build.spv"), build);
             assertVulkan14(cache.resolve("spatial-fill.spv"), fill);
+        }
+    }
+
+    @Test
+    @ResourceLock("java.lang.System.properties")
+    void storedBinariesReplaceMatchingCompilesExceptForDumps(@TempDir Path cache) throws Exception {
+        String property = "caustica.debug.shader-dump-directory";
+        String previous = System.getProperty(property);
+        var program = new ProgramComposition(List.of());
+        ShaderBinaryCache binaries = ShaderBinaryCache.open(cache.resolve("spirv"), runtime.compilerIdentity());
+        byte[] stored = ByteBuffer.allocate(20).order(ByteOrder.LITTLE_ENDIAN).putInt(0x07230203).array();
+        try {
+            System.clearProperty(property);
+            try (WorldShaderCompiler compiler = WorldShaderCompiler.createIsolated(
+                    List.of(runtime), cache.resolve("sources"), program, binaries)) {
+                byte[] compiled = compiler.compilePlain("guide.rmiss.slang", WorldShaderCompiler.ENTRY_POINT);
+                String key = binaries.key(compiler.composition().contentHash(),
+                        "guide.rmiss.slang", WorldShaderCompiler.ENTRY_POINT, false);
+                assertArrayEquals(compiled, binaries.load(key));
+                binaries.store(key, stored);
+            }
+            try (WorldShaderCompiler compiler = WorldShaderCompiler.createIsolated(
+                    List.of(runtime), cache.resolve("sources"), program, binaries)) {
+                assertArrayEquals(stored, compiler.compilePlain("guide.rmiss.slang", WorldShaderCompiler.ENTRY_POINT));
+            }
+
+            System.setProperty(property, cache.resolve("dumps").toString());
+            try (WorldShaderCompiler compiler = WorldShaderCompiler.createIsolated(
+                    List.of(runtime), cache.resolve("sources"), program, binaries)) {
+                byte[] dumped = compiler.compilePlain("guide.rmiss.slang", WorldShaderCompiler.ENTRY_POINT);
+                assertSpirv(dumped);
+                try (var dumps = Files.list(cache.resolve("dumps"))) {
+                    assertArrayEquals(dumped, Files.readAllBytes(dumps.findFirst().orElseThrow()));
+                }
+            }
+        } finally {
+            if (previous == null) System.clearProperty(property);
+            else System.setProperty(property, previous);
+        }
+    }
+
+    @Test
+    void stagesCompileConcurrentlyOnSiblingRuntimes(@TempDir Path cache) throws Exception {
+        List<SlangRuntime> runtimes = new ArrayList<>(List.of(runtime));
+        runtimes.addAll(runtime.siblings(1));
+        ExecutorService threads = Executors.newFixedThreadPool(4);
+        try (WorldShaderCompiler compiler = WorldShaderCompiler.createIsolated(
+                runtimes, cache, new ProgramComposition(List.of()), null)) {
+            List<Callable<byte[]>> compiles = List.of(
+                    () -> compiler.compilePlain("guide.rmiss.slang", WorldShaderCompiler.ENTRY_POINT),
+                    () -> compiler.compilePlain("resolve_stable_planes.slang", WorldShaderCompiler.ENTRY_POINT),
+                    compiler::compileClosestHit,
+                    compiler::compileEnvironmentMiss);
+            List<Future<byte[]>> stages = new ArrayList<>();
+            for (Callable<byte[]> compile : compiles) stages.add(threads.submit(compile));
+            for (Future<byte[]> stage : stages) assertSpirv(stage.get(2, TimeUnit.MINUTES));
+        } finally {
+            threads.shutdown();
         }
     }
 
