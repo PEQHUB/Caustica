@@ -41,6 +41,7 @@ import dev.comfyfluffy.caustica.renderer.presentation.BorrowedImage;
 import dev.comfyfluffy.caustica.renderer.presentation.PresentationSwapchain;
 import dev.comfyfluffy.caustica.renderer.presentation.RtFramePresenter;
 import dev.comfyfluffy.caustica.slang.SlangRuntime;
+import dev.comfyfluffy.caustica.vulkan.ResourceLifetime;
 
 import java.io.IOException;
 import java.nio.file.Path;
@@ -689,7 +690,7 @@ public final class MinecraftRtRuntime {
                         requireDenoiserFactory(), denoising, telemetry, RtRenderSettings.capture(settings, swapchainPqActive));
                 worldEpoch = epoch;
             } catch (Throwable failure) {
-                closeWorld();
+                ResourceLifetime.closeAfterFailure(failure, this::closeWorld);
                 throw failure;
             }
         }
@@ -703,53 +704,60 @@ public final class MinecraftRtRuntime {
             LOGGER.warn("Resource-pack reload failed; rebuilding from the prior resource-pack epoch", failure);
         }
 
+        /**
+         * Detaches the world first, then runs every teardown step even after an earlier one fails, so a
+         * failure cannot strand device resources; the first failure is rethrown with the rest suppressed.
+         */
         private void closeWorld() {
             if (world == null && programs == null && scenes == null
                     && renderer == null && rayReconstruction == null && superResolution == null) return;
-            host().resetFrameBridge();
-            if (renderer != null) renderer.releaseCapturedFrame();
-            if (world != null) {
-                world.close();
-                world = null;
-            }
-            telemetry.resetPublications();
-            if (context != null) context.drainAndWaitIdle();
-            if (renderer != null) {
-                renderer.destroy();
-                renderer = null;
-                rayReconstruction = null;
-                superResolution = null;
-            } else {
-                if (rayReconstruction != null) {
-                    rayReconstruction.destroyAfterDeviceIdle();
-                    rayReconstruction = null;
-                }
-                if (superResolution != null) {
-                    superResolution.destroyAfterDeviceIdle();
-                    superResolution = null;
-                }
-            }
-            if (scenes != null) {
-                scenes.shutdownAfterDeviceIdle();
-                scenes = null;
-            }
-            if (programs != null) {
-                programs.close();
-                programs = null;
-            }
+            MinecraftEngineWorldSession closingWorld = world;
+            RtFrameRenderer closingRenderer = renderer;
+            DlssRayReconstruction closingRayReconstruction = rayReconstruction;
+            DlssSuperResolution closingSuperResolution = superResolution;
+            RtRetainedSceneBackend closingScenes = scenes;
+            RtProgramBackend closingPrograms = programs;
+            world = null;
+            renderer = null;
+            rayReconstruction = null;
+            superResolution = null;
+            scenes = null;
+            programs = null;
             passes = null;
             worldEpoch = 0L;
+            new ResourceLifetime(
+                    host()::resetFrameBridge,
+                    () -> { if (closingRenderer != null) closingRenderer.releaseCapturedFrame(); },
+                    () -> { if (closingWorld != null) closingWorld.close(); },
+                    telemetry::resetPublications,
+                    () -> { if (context != null) context.drainAndWaitIdle(); },
+                    // A constructed renderer owns the DLSS features and destroys them itself.
+                    () -> { if (closingRenderer != null) closingRenderer.destroy(); },
+                    () -> {
+                        if (closingRenderer == null && closingRayReconstruction != null) {
+                            closingRayReconstruction.destroyAfterDeviceIdle();
+                        }
+                    },
+                    () -> {
+                        if (closingRenderer == null && closingSuperResolution != null) {
+                            closingSuperResolution.destroyAfterDeviceIdle();
+                        }
+                    },
+                    () -> { if (closingScenes != null) closingScenes.shutdownAfterDeviceIdle(); },
+                    () -> { if (closingPrograms != null) closingPrograms.close(); }).close();
         }
 
         void close() {
-            closeWorld();
-            host().destroyUiPresentation();
-            if (context != null) {
-                context.waitIdle();
-                presenter.destroy(context.vk());
-                context.backend().lowLatency().destroy(context.vk());
-            }
-            context = null;
+            VulkanDeviceContext closingContext = context;
+            new ResourceLifetime(
+                    this::closeWorld,
+                    host()::destroyUiPresentation,
+                    () -> { if (closingContext != null) closingContext.waitIdle(); },
+                    () -> { if (closingContext != null) presenter.destroy(closingContext.vk()); },
+                    () -> {
+                        if (closingContext != null) closingContext.backend().lowLatency().destroy(closingContext.vk());
+                    },
+                    () -> context = null).close();
         }
     }
 }

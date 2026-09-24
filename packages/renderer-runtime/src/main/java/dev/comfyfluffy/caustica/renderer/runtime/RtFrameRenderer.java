@@ -1,6 +1,7 @@
 package dev.comfyfluffy.caustica.renderer.runtime;
 
 import dev.comfyfluffy.caustica.support.SharedResource;
+import dev.comfyfluffy.caustica.vulkan.ResourceLifetime;
 import dev.comfyfluffy.caustica.renderer.denoising.DenoiserBackendFactory;
 import dev.comfyfluffy.caustica.renderer.denoising.DenoiserRoute;
 import dev.comfyfluffy.caustica.renderer.denoising.DenoiserSignalEncoding;
@@ -965,19 +966,21 @@ public final class RtFrameRenderer {
         return image.descriptor(GpuImageDescriptorKind.STORAGE).index().value();
     }
 
+    /** Releases renderer resources after device idle; each step runs even after an earlier one fails. */
     public void destroy() {
-        scenePublication.close();
-        scenes.releaseView(this);
-        gpuTiming.close();
-        shadowDiagnostics.close();
-        reconstruction.close();
-        presenter.invalidateRenderedFrame();
-        frameResources.destroy();
-        history.reset();
-        submittedScenes.close();
-        loggedActive = false;
-        releaseCapturedFrame();
-        execution = null;
+        new ResourceLifetime(
+                scenePublication::close,
+                () -> scenes.releaseView(this),
+                gpuTiming::close,
+                shadowDiagnostics::close,
+                reconstruction::close,
+                presenter::invalidateRenderedFrame,
+                frameResources::destroy,
+                history::reset,
+                submittedScenes::close,
+                () -> loggedActive = false,
+                this::releaseCapturedFrame,
+                () -> execution = null).close();
     }
 
     private static VkImageCopy2.Buffer copyRegion(MemoryStack stack, int width, int height) {
