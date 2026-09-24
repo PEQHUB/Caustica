@@ -113,7 +113,7 @@ public void runBuildStablePlanes<TComposition : IComposition>() {
             intersection.pathFlags = WORLD_PATH_GUIDE;
             RayDesc ray = traceRay(branch.path);
             uint mask = branch.path.depth == 0u ? WORLD_RAY_MASK_PRIMARY : WORLD_RAY_MASK_SECONDARY;
-            TraceRay(worldAccelerationStructure(), RAY_FLAG_NONE, mask, 0u, 2u, 0u, ray, intersection);
+            TraceRay(worldAccelerationStructure(), RAY_FLAG_NONE, mask, 0u, 1u, 0u, ray, intersection);
             bool environment = (intersection.pathFlags & WORLD_PATH_MISS) != 0u;
             float distance = environment ? TRACE_MAX_DISTANCE : intersection.hitDistance;
             float3 transmission = exp(-branch.path.absorption * distance);

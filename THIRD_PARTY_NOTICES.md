@@ -63,6 +63,27 @@ NRI license and source:
 
 <https://github.com/NVIDIA-RTX/NRI/blob/main/LICENSE.txt>
 
+## NVIDIA SHaRC (Spatially Hashed Radiance Cache) SDK
+
+Caustica can use the NVIDIA SHaRC 1.8.0.0 shader headers (commit
+`e19ccacd511f42a3df6f850052d508c13c9e9737`) when a build is made with
+`-PsharcSdk=<SDK checkout>`. The headers are an external input supplied by
+whoever builds or runs Caustica: they are not part of this repository, and no
+build artifact contains them or code compiled from them. A `-PsharcSdk` build
+records only the SDK location, in `caustica/sharc.properties`. At run time
+Caustica verifies the SHA-256 of `SharcCommon.h`, `SharcTypes.h`,
+`HashGridCommon.h` and `HashGridTypes.h` at that location and compiles them on
+the local machine. Without the property, nothing SHaRC-related is read or
+packaged.
+
+SHaRC is proprietary software provided by NVIDIA Corporation and is not
+licensed under the LGPL. Use of the SDK is subject to the NVIDIA RTX SDKs
+license:
+
+<https://github.com/NVIDIA-RTX/SHARC/blob/e19ccacd511f42a3df6f850052d508c13c9e9737/License.md>
+
+The LGPL license grant for Caustica does not grant rights to the SHaRC SDK.
+
 ## Slang
 
 Caustica bundles the Slang 2026.14.1 compiler shared libraries and standard module

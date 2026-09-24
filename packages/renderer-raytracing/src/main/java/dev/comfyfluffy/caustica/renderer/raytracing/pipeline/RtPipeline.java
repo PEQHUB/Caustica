@@ -53,16 +53,12 @@ public final class RtPipeline {
 
     /** Creates a KHR ray-tracing pipeline whose shaders directly address the two descriptor heaps. */
     public static RtPipeline create(VulkanDeviceContext context, RtShaderCode[] raygen, RtShaderCode[] miss,
-                                    RtShaderCode closestHit, RtShaderCode radianceAnyHit,
-                                    RtShaderCode shadowAnyHit, RtShaderCode shadowClosestHit, RtShaderCode shadowBlocker) {
+                                    RtShaderCode closestHit, RtShaderCode radianceAnyHit) {
         if (raygen.length == 0 || miss.length == 0) throw new IllegalArgumentException("empty RT stage array");
         for (RtShaderCode shader : raygen) requireDescriptorHeapCompatible(shader);
         for (RtShaderCode shader : miss) requireDescriptorHeapCompatible(shader);
         requireDescriptorHeapCompatible(closestHit);
         requireDescriptorHeapCompatible(radianceAnyHit);
-        requireDescriptorHeapCompatible(shadowAnyHit);
-        requireDescriptorHeapCompatible(shadowClosestHit);
-        requireDescriptorHeapCompatible(shadowBlocker);
         VkDevice device = context.vk();
         try (MemoryStack stack = MemoryStack.stackPush()) {
             int raygenCount = raygen.length;
@@ -70,10 +66,7 @@ public final class RtPipeline {
             int hitCount = HIT_GROUPS.length;
             int closestStage = raygenCount + missCount;
             int radianceStage = closestStage + 1;
-            int shadowStage = closestStage + 2;
-            int shadowClosestStage = closestStage + 3;
-            int blockerStage = closestStage + 4;
-            int stageCount = closestStage + 5;
+            int stageCount = closestStage + 2;
             int groupCount = raygenCount + missCount + hitCount;
             long[] modules = new long[stageCount];
             try {
@@ -81,9 +74,6 @@ public final class RtPipeline {
                 for (int i = 0; i < missCount; i++) modules[raygenCount + i] = module(device, stack, miss[i]);
                 modules[closestStage] = module(device, stack, closestHit);
                 modules[radianceStage] = module(device, stack, radianceAnyHit);
-                modules[shadowStage] = module(device, stack, shadowAnyHit);
-                modules[shadowClosestStage] = module(device, stack, shadowClosestHit);
-                modules[blockerStage] = module(device, stack, shadowBlocker);
 
                 ByteBuffer entry = stack.UTF8("main");
                 TlasPushIndexMapping tlasMapping = tlasPushIndexMapping(
@@ -103,12 +93,6 @@ public final class RtPipeline {
                         mappingInfo);
                 stage(stages.get(radianceStage), VK_SHADER_STAGE_ANY_HIT_BIT_KHR, modules[radianceStage], entry,
                         mappingInfo);
-                stage(stages.get(shadowStage), VK_SHADER_STAGE_ANY_HIT_BIT_KHR, modules[shadowStage], entry,
-                        mappingInfo);
-                stage(stages.get(shadowClosestStage), VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR,
-                        modules[shadowClosestStage], entry, mappingInfo);
-                stage(stages.get(blockerStage), VK_SHADER_STAGE_ANY_HIT_BIT_KHR,
-                        modules[blockerStage], entry, mappingInfo);
 
                 VkRayTracingShaderGroupCreateInfoKHR.Buffer groups = VkRayTracingShaderGroupCreateInfoKHR.calloc(groupCount, stack);
                 for (int i = 0; i < raygenCount + missCount; i++) {
@@ -120,8 +104,8 @@ public final class RtPipeline {
                 for (int i = 0; i < hitCount; i++) {
                     groups.get(firstHit + i).sType$Default().type(VK_RAY_TRACING_SHADER_GROUP_TYPE_TRIANGLES_HIT_GROUP_KHR)
                             .generalShader(VK_SHADER_UNUSED_KHR)
-                            .closestHitShader(closestHitStage(HIT_GROUPS[i], closestStage, shadowClosestStage))
-                            .anyHitShader(anyHitStage(HIT_GROUPS[i], radianceStage, shadowStage, blockerStage))
+                            .closestHitShader(closestStage)
+                            .anyHitShader(anyHitStage(HIT_GROUPS[i], radianceStage))
                             .intersectionShader(VK_SHADER_UNUSED_KHR);
                 }
 
@@ -351,20 +335,10 @@ public final class RtPipeline {
         info.sType$Default().pNext(mappingInfo).stage(stage).module(module).pName(entry);
     }
 
-    static int anyHitStage(HitGroup group, int radiance, int shadow, int blocker) {
+    static int anyHitStage(HitGroup group, int radiance) {
         return switch (group) {
-            case RADIANCE_OPAQUE, SHADOW_OPAQUE -> VK_SHADER_UNUSED_KHR;
+            case RADIANCE_OPAQUE -> VK_SHADER_UNUSED_KHR;
             case RADIANCE_CUTOUT -> radiance;
-            case SHADOW_CUTOUT, SHADOW_TRANSMISSIVE -> shadow;
-            case SHADOW_BLOCKER -> blocker;
-        };
-    }
-
-    static int closestHitStage(HitGroup group, int radiance, int shadow) {
-        return switch (group) {
-            case RADIANCE_OPAQUE, RADIANCE_CUTOUT -> radiance;
-            case SHADOW_OPAQUE, SHADOW_CUTOUT, SHADOW_TRANSMISSIVE -> shadow;
-            case SHADOW_BLOCKER -> VK_SHADER_UNUSED_KHR;
         };
     }
 
