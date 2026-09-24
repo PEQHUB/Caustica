@@ -159,5 +159,7 @@ final class LangKeysTest {
         assertTrue(checked.contains("caustica.group.engine.entities"), checked.toString());
         assertTrue(checked.contains("caustica.group.caustica.minecraft.fog"), checked.toString());
         assertTrue(checked.contains("feature.caustica.bloom.description"), checked.toString());
+        assertTrue(checked.contains("caustica.page.radiance-cache.tooltip"), checked.toString());
+        assertTrue(checked.contains("caustica.setting.sharc.anti-firefly.tooltip"), checked.toString());
     }
 }

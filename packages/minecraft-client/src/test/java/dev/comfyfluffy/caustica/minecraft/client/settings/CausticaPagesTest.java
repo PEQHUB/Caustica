@@ -111,6 +111,63 @@ final class CausticaPagesTest {
         assertEquals(List.of("exposure.future-meter"), ids(section(synthetic, "exposure.advanced")));
     }
 
+    private static SettingsPage linkedPage(List<CausticaPages.Link> links, String id) {
+        return links.stream().filter(link -> link.id().equals(id)).findFirst().orElseThrow().page().get();
+    }
+
+    @Test
+    void theRadianceCachePageLeadsWithTheCacheSwitchAndFoldsItsTuningUnderAdvanced() {
+        SettingsPage page = CausticaPages.radianceCache(renderer());
+        SettingGroup basic = section(page, "radiance-cache");
+        SettingGroup advanced = section(page, "radiance-cache.advanced");
+        assertFalse(basic.advanced());
+        assertTrue(advanced.advanced());
+        assertEquals(List.of("sharc.enabled"), ids(basic));
+        assertEquals(List.of("sharc.cache-exponent", "sharc.update-tile-size", "sharc.accumulation-frames",
+                "sharc.stale-frames", "sharc.scene-scale", "sharc.grid-logarithm-base", "sharc.grid-level-bias",
+                "sharc.radiance-scale", "sharc.roughness-threshold", "sharc.anti-firefly"), ids(advanced));
+    }
+
+    @Test
+    void everySharcOptionIsOnExactlyOneLinkedPageWithTheCacheViewAmongTheDiagnostics() {
+        SettingsRegistry registry = new SettingsRegistry();
+        MinecraftOptions.register(registry);
+        CausticaOptions store = CausticaOptions.load(directory.resolve("sharc.toml"), registry);
+        List<CausticaPages.Link> links = CausticaPages.links(registry, store, ignored -> true);
+        for (Option<?> option : RendererOptions.Rt.Sharc.OPTIONS) {
+            List<String> pages = links.stream().filter(link -> ids(link.page().get()).contains(option.id()))
+                    .map(CausticaPages.Link::id).toList();
+            String owner = option == RendererOptions.Rt.Sharc.PRIMARY_SURFACE_DEBUG ? "overlays" : "radiance-cache";
+            assertEquals(List.of(owner), pages, option.id());
+        }
+        assertTrue(ids(section(linkedPage(links, "overlays"), "debug")).contains("sharc.primary-surface-debug"));
+    }
+
+    /** A build without the SHaRC SDK, or a device without its features, reports every SHaRC option unavailable. */
+    @Test
+    void sharcRowsStayVisibleButDisabledWhereSharcCannotRun() {
+        SettingsRegistry registry = new SettingsRegistry();
+        MinecraftOptions.register(registry);
+        CausticaOptions store = CausticaOptions.load(directory.resolve("stock.toml"), registry);
+        Predicate<Option<?>> withoutSharc = option -> !RendererOptions.Rt.Sharc.OPTIONS.contains(option);
+        List<CausticaPages.Link> links = CausticaPages.links(registry, store, withoutSharc);
+
+        SettingsPage cache = linkedPage(links, "radiance-cache");
+        assertEquals(RendererOptions.Rt.Sharc.OPTIONS.size() - 1, cache.allControls().size());
+        cache.allControls().forEach(row -> assertFalse(row.enabled(), row.id()));
+        assertEquals(LangKeys.optionTooltip(CausticaConfig.FEATURE, RendererOptions.Rt.Sharc.ENABLED),
+                section(cache, "radiance-cache").rows().getFirst().tooltip());
+        linkedPage(links, "overlays").allControls().forEach(row ->
+                assertEquals(!row.id().equals("sharc.primary-surface-debug"), row.enabled(), row.id()));
+
+        store.apply(CausticaConfig.FEATURE, RendererOptions.Rt.Sharc.CACHE_EXPONENT, 20);
+        cache.reset();
+        assertEquals(20, store.options(CausticaConfig.FEATURE).get(RendererOptions.Rt.Sharc.CACHE_EXPONENT));
+
+        SettingsPage available = linkedPage(CausticaPages.links(registry, store, ignored -> true), "radiance-cache");
+        available.allControls().forEach(row -> assertTrue(row.enabled(), row.id()));
+    }
+
     @Test
     void theUpscalingPageShowsOnlyTheSelectedRoutesSettings() {
         CausticaPages.Engine engine = renderer();
@@ -145,7 +202,8 @@ final class CausticaPagesTest {
             engine.store().apply(CausticaConfig.FEATURE, RendererOptions.Rt.Denoising.ROUTE, route);
             pages.add(CausticaPages.upscaling(engine));
         }
-        pages.addAll(List.of(CausticaPages.exposure(engine), CausticaPages.overlays(engine)));
+        pages.addAll(List.of(CausticaPages.exposure(engine), CausticaPages.radianceCache(engine),
+                CausticaPages.overlays(engine)));
         return pages;
     }
 
@@ -175,7 +233,7 @@ final class CausticaPagesTest {
         CausticaPages.Engine engine = renderer();
         engine.store().apply(CausticaConfig.FEATURE, RendererOptions.Rt.Hdr.ENABLED, true);
         List<SettingsPage> pages = List.of(CausticaPages.toneMapping(engine), CausticaPages.exposure(engine),
-                CausticaPages.upscaling(engine), CausticaPages.overlays(engine));
+                CausticaPages.upscaling(engine), CausticaPages.radianceCache(engine), CausticaPages.overlays(engine));
         Set<String> seen = new HashSet<>();
         for (SettingsPage page : pages) {
             for (String id : ids(page)) {
@@ -183,7 +241,7 @@ final class CausticaPagesTest {
             }
         }
         assertEquals(List.of("entities.glow.enabled", "overlay.block-outline.enabled", "composite.debug-view",
-                "screenshots.exr-enabled"), ids(CausticaPages.overlays(engine)));
+                "screenshots.exr-enabled", "sharc.primary-surface-debug"), ids(CausticaPages.overlays(engine)));
     }
 
     @Test
@@ -202,10 +260,10 @@ final class CausticaPagesTest {
                 CausticaPages.videoSettings(registry, store, ignored -> true).stream()
                         .map(SettingControl::id).toList());
         List<CausticaPages.Link> links = CausticaPages.links(registry, store, ignored -> true);
-        assertEquals(List.of("tone-mapping", "exposure", "upscaling", bloom.toString(), "overlays"),
+        assertEquals(List.of("tone-mapping", "exposure", "upscaling", "radiance-cache", bloom.toString(), "overlays"),
                 links.stream().map(CausticaPages.Link::id).toList());
 
-        SettingsPage page = links.get(3).page().get();
+        SettingsPage page = links.get(4).page().get();
         SettingGroup section = page.sections().getFirst();
         assertEquals(List.of("bloom.enabled", "bloom.strength"), ids(section));
         assertSame(section.rows().getFirst(), section.gate());
