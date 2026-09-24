@@ -1,7 +1,7 @@
 package dev.comfyfluffy.caustica.minecraft.client.mixin;
 
 import dev.comfyfluffy.caustica.minecraft.client.MinecraftHostTelemetry;
-import dev.comfyfluffy.caustica.renderer.runtime.RendererOptions;
+import dev.comfyfluffy.caustica.renderer.runtime.RtRenderSettings;
 
 import com.mojang.blaze3d.systems.CommandEncoderBackend;
 import com.mojang.blaze3d.systems.GpuSurface;
@@ -403,7 +403,7 @@ public abstract class VulkanGpuSurfaceMixin {
 				|| !backend.capabilities().hdrMetadata() || this.swapchain == 0L) {
 			return;
 		}
-		int peakNits = CausticaConfig.get(RendererOptions.Rt.Hdr.PEAK_NITS);
+		int peakNits = RtRenderSettings.effectivePeakNits(CausticaConfig.snapshot());
 		if (this.caustica$metadataSwapchain == this.swapchain
 				&& this.caustica$metadataPeakNits == peakNits) {
 			return;

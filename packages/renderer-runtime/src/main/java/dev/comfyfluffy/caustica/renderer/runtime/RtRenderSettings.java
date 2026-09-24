@@ -3,30 +3,41 @@ package dev.comfyfluffy.caustica.renderer.runtime;
 import dev.comfyfluffy.caustica.settings.Option;
 import dev.comfyfluffy.caustica.settings.OptionValues;
 import dev.comfyfluffy.caustica.renderer.presentation.RtExposure;
+import dev.comfyfluffy.caustica.renderer.presentation.RtToneLut;
 import dev.comfyfluffy.caustica.renderer.presentation.RtToneMapping;
 
 import java.util.List;
 
 /** Renderer settings captured together at the host frame or resource-configuration boundary. */
 public record RtRenderSettings(int debugView, int maxBounces, float jitterSignX, float jitterSignY,
-                               int peakNits, boolean hdr, RtExposure.Settings exposure,
+                               int hdrLutNits, boolean hdr, RtExposure.Settings exposure,
                                RtToneMapping.Settings toneMapping) {
     public static RtRenderSettings capture(OptionValues options, boolean pqActive) {
         return new RtRenderSettings(options.get(RendererOptions.Rt.Composite.DEBUG_VIEW),
                 options.get(RendererOptions.Rt.Composite.MAX_BOUNCES),
                 options.get(RendererOptions.Rt.Composite.JITTER_SIGN_X),
                 options.get(RendererOptions.Rt.Composite.JITTER_SIGN_Y),
-                options.get(RendererOptions.Rt.Hdr.PEAK_NITS),
+                RtToneLut.nearestHdrLutNits(options.get(RendererOptions.Rt.Hdr.PEAK_NITS)),
                 pqActive && options.get(RendererOptions.Rt.Hdr.ENABLED), exposure(options),
                 toneMapping(options));
+    }
+
+    /**
+     * The peak the active HDR transform targets, for the display's mastering metadata: the bound
+     * LUT's mastering peak for ACES 2.0, the configured peak for the analytic mappers.
+     */
+    public static int effectivePeakNits(OptionValues options) {
+        float peak = options.get(RendererOptions.Rt.Hdr.PEAK_NITS);
+        return RtToneMapping.HdrMode.of(options.get(RendererOptions.Rt.Tonemap.HDR_MAPPER))
+                == RtToneMapping.HdrMode.ACES_2_0 ? RtToneLut.nearestHdrLutNits(peak) : Math.round(peak);
     }
 
     private static RtToneMapping.Settings toneMapping(OptionValues options) {
         RtToneMapping.SdrMode sdrMode = RtToneMapping.SdrMode.of(options.get(RendererOptions.Rt.Tonemap.SDR_MAPPER));
         RtToneMapping.HdrMode hdrMode = RtToneMapping.HdrMode.of(options.get(RendererOptions.Rt.Tonemap.HDR_MAPPER));
-        float paperWhiteNits = options.get(RendererOptions.Rt.Tonemap.PAPER_WHITE_NITS);
-        return new RtToneMapping.Settings(sdrMode, hdrMode, paperWhiteNits,
-                options.get(RendererOptions.Rt.Hdr.PEAK_NITS) / paperWhiteNits,
+        float peakNits = options.get(RendererOptions.Rt.Hdr.PEAK_NITS);
+        float paperWhiteNits = Math.min(options.get(RendererOptions.Rt.Tonemap.PAPER_WHITE_NITS), peakNits);
+        return new RtToneMapping.Settings(sdrMode, hdrMode, paperWhiteNits, peakNits / paperWhiteNits,
                 parameters(options, RendererOptions.Rt.Tonemap.SDR_CONTROLS.getOrDefault(sdrMode, List.of())),
                 parameters(options, RendererOptions.Rt.Tonemap.HDR_CONTROLS.getOrDefault(hdrMode, List.of())));
     }

@@ -96,11 +96,13 @@ float3 pqEncode(float3 nits) {
     return pow((PQ_C1 + PQ_C2 * y) / (1.0 + PQ_C3 * y), float3(PQ_M2));
 }
 
-float3 displayGammaHdr(float3 pqColor) {
+// peakNits is the peak the HDR transform targets: the bound ACES LUT's mastering peak for the
+// ACES 2.0 mode, paper white times headroom for the analytic modes.
+float3 displayGammaHdr(float3 pqColor, float peakNits) {
     if (abs(pc.gamma - 1.0) < 1.0e-6) {
         return clamp(pqColor, 0.0, 1.0);
     }
-    float peak = max(pc.hdrPeakNits, 1.0);
+    float peak = max(peakNits, 1.0);
     float3 normalizedNits = clamp(pqDecode(pqColor) / peak, 0.0, 1.0);
     float3 adjustedNits = peak * luminanceGamma(normalizedNits, BT2020_LUMA);
     return clamp(pqEncode(adjustedNits), 0.0, 1.0);
@@ -122,7 +124,8 @@ float3 tonemapHdr(float3 lookedAcesCg) {
     float3 uvw = shaperEncode(lookedAcesCg);
     Texture3D<float4> hdrToneLut = ResourceDescriptorHeap[NonUniformResourceIndex(pc.hdrToneLutIndex)];
     SamplerState hdrToneSampler = SamplerDescriptorHeap[NonUniformResourceIndex(pc.hdrToneSamplerIndex)];
-    return displayGammaHdr(hdrToneLut.SampleLevel(hdrToneSampler, lutTexCoord(uvw, pc.lutSize), 0.0).rgb);
+    return displayGammaHdr(hdrToneLut.SampleLevel(hdrToneSampler, lutTexCoord(uvw, pc.lutSize), 0.0).rgb,
+            pc.hdrPeakNits);
 }
 
 // Local analytical operators were authored against scene-linear BT.709. The transport and the
@@ -206,7 +209,7 @@ void main(uint3 dispatchId : SV_DispatchThreadID) {
             hdrColor = tonemapHdr(lookedAcesCg);
         } else {
             hdrColor = displayGammaHdr(applyHdrToneMapper(HDR_MODE, bt709, pc.paperWhiteNits,
-                    pc.headroom, hdrToneParameters()));
+                    pc.headroom, hdrToneParameters()), pc.paperWhiteNits * pc.headroom);
         }
         hdrImage[pix] = float4(hdrColor, 1.0);
     }

@@ -1,5 +1,6 @@
 package dev.comfyfluffy.caustica.renderer.runtime;
 
+import dev.comfyfluffy.caustica.renderer.presentation.RtToneLut;
 import dev.comfyfluffy.caustica.renderer.presentation.RtToneMapping;
 import dev.comfyfluffy.caustica.settings.Option;
 import dev.comfyfluffy.caustica.settings.OptionValues;
@@ -170,10 +171,49 @@ final class RtToneMappingTest {
     void headroomIsThePeakOverPaperWhite() {
         var overrides = new HashMap<Option<?>, Object>();
         overrides.put(RendererOptions.Rt.Tonemap.PAPER_WHITE_NITS, 250.0f);
-        overrides.put(RendererOptions.Rt.Hdr.PEAK_NITS, 2000);
+        overrides.put(RendererOptions.Rt.Hdr.PEAK_NITS, 800.0f);
         var settings = RtRenderSettings.capture(options(overrides), true);
         assertEquals(250.0f, settings.toneMapping().paperWhiteNits());
-        assertEquals(8.0f, settings.toneMapping().headroom());
+        assertEquals(3.2f, settings.toneMapping().headroom());
+    }
+
+    @Test
+    void paperWhiteIsClampedToThePeak() {
+        var overrides = new HashMap<Option<?>, Object>();
+        overrides.put(RendererOptions.Rt.Tonemap.PAPER_WHITE_NITS, 500.0f);
+        overrides.put(RendererOptions.Rt.Hdr.PEAK_NITS, 400.0f);
+        var settings = RtRenderSettings.capture(options(overrides), true);
+        assertEquals(400.0f, settings.toneMapping().paperWhiteNits());
+        assertEquals(1.0f, settings.toneMapping().headroom());
+    }
+
+    @Test
+    void aces20RendersThroughTheNearestPackagedHdrLut() {
+        assertEquals(500, RtToneLut.nearestHdrLutNits(80.0f));
+        assertEquals(500, RtToneLut.nearestHdrLutNits(750.0f));
+        assertEquals(1000, RtToneLut.nearestHdrLutNits(800.0f));
+        assertEquals(4000, RtToneLut.nearestHdrLutNits(5000.0f));
+        var overrides = new HashMap<Option<?>, Object>();
+        overrides.put(RendererOptions.Rt.Tonemap.HDR_MAPPER, "aces2.0");
+        overrides.put(RendererOptions.Rt.Hdr.PEAK_NITS, 1400.0f);
+        assertEquals(1000, RtRenderSettings.capture(options(overrides), true).hdrLutNits());
+        assertEquals(1000, RtRenderSettings.effectivePeakNits(options(overrides)));
+    }
+
+    @Test
+    void analyticHdrMappersReportTheConfiguredPeak() {
+        var overrides = new HashMap<Option<?>, Object>();
+        overrides.put(RendererOptions.Rt.Tonemap.HDR_MAPPER, "bt2390");
+        overrides.put(RendererOptions.Rt.Hdr.PEAK_NITS, 1400.0f);
+        assertEquals(1400, RtRenderSettings.effectivePeakNits(options(overrides)));
+        assertEquals(7.0f, RtRenderSettings.capture(options(overrides), true).toneMapping().headroom());
+    }
+
+    @Test
+    void peakNitsLoadsAnyValueInItsRange() {
+        assertEquals(800.0f, RendererOptions.Rt.Hdr.PEAK_NITS.normalize(800));
+        assertEquals(80.0f, RendererOptions.Rt.Hdr.PEAK_NITS.normalize(10.0));
+        assertEquals(5000.0f, RendererOptions.Rt.Hdr.PEAK_NITS.normalize(10000.0));
     }
 
     @Test
