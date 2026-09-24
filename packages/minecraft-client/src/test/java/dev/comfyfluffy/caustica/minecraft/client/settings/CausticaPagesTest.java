@@ -1,0 +1,254 @@
+package dev.comfyfluffy.caustica.minecraft.client.settings;
+
+import dev.comfyfluffy.caustica.minecraft.client.MinecraftOptions;
+import dev.comfyfluffy.caustica.minecraft.client.config.CausticaConfig;
+import dev.comfyfluffy.caustica.minecraft.client.config.CausticaOptions;
+import dev.comfyfluffy.caustica.renderer.runtime.RendererOptions;
+import dev.comfyfluffy.caustica.settings.Option;
+import dev.comfyfluffy.caustica.settings.ResourceId;
+import dev.comfyfluffy.caustica.settings.SettingsRegistry;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
+import java.util.function.Predicate;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+final class CausticaPagesTest {
+    private static final Option<Boolean> HDR = Option.bool("hdr.enabled", false);
+    private static final Option<String> ROUTE =
+            Option.stringChoice("denoising.route", "raw", List.of("raw"));
+    private static final Option<Float> CONTRAST = Option.range("tonemap.contrast", 0, 2, 1);
+    private static final Option<Float> PAPER_WHITE = Option.range("hdr.paper-white-nits", 80, 500, 200);
+    private static final Option<Float> KEY = Option.range("exposure.key", 0, 1, 0.18f);
+    private static final Option<Float> FUTURE_METER = Option.range("exposure.future-meter", 0, 1, 0.5f);
+
+    @TempDir Path directory;
+
+    /** A renderer feature that declares options the pages have never heard of, known only by their ids. */
+    private CausticaPages.Engine synthetic(Predicate<Option<?>> available, Option<?>... options) {
+        SettingsRegistry registry = new SettingsRegistry();
+        registry.feature(CausticaConfig.FEATURE).options(List.of(options)).register();
+        CausticaOptions store = CausticaOptions.load(directory.resolve("synthetic.toml"), registry);
+        return new CausticaPages.Engine(registry, store, available);
+    }
+
+    private CausticaPages.Engine renderer() {
+        SettingsRegistry registry = new SettingsRegistry();
+        MinecraftOptions.register(registry);
+        CausticaOptions store = CausticaOptions.load(directory.resolve("renderer.toml"), registry);
+        return new CausticaPages.Engine(registry, store, ignored -> true);
+    }
+
+    private static List<String> ids(SettingsPage page) {
+        return page.allControls().stream().map(SettingControl::id).toList();
+    }
+
+    private static List<String> ids(SettingGroup section) {
+        return section.rows().stream().map(SettingControl::id).toList();
+    }
+
+    private static List<String> sectionIds(SettingsPage page) {
+        return page.sections().stream().map(SettingGroup::id).toList();
+    }
+
+    private static SettingGroup section(SettingsPage page, String id) {
+        return page.sections().stream().filter(section -> section.id().equals(id)).findFirst().orElseThrow();
+    }
+
+    @Test
+    void theHdrPathAppliesOnlyWhileHdrIsRequestedAndPresentable() {
+        CausticaPages.Engine sdr = synthetic(ignored -> true, HDR, CONTRAST, PAPER_WHITE, KEY);
+        SettingsPage page = CausticaPages.toneMapping(sdr);
+        assertEquals(List.of("sdr-output"), sectionIds(page));
+        assertEquals(List.of("hdr.enabled", "tonemap.contrast"), ids(page));
+
+        CausticaPages.Engine unavailable = synthetic(option -> option != HDR, HDR, CONTRAST, PAPER_WHITE, KEY);
+        unavailable.store().apply(CausticaConfig.FEATURE, HDR, true);
+        assertEquals(List.of("sdr-output"), sectionIds(CausticaPages.toneMapping(unavailable)));
+
+        CausticaPages.Engine hdr = synthetic(ignored -> true, HDR, CONTRAST, PAPER_WHITE, KEY);
+        hdr.store().apply(CausticaConfig.FEATURE, HDR, true);
+        SettingsPage hdrPage = CausticaPages.toneMapping(hdr);
+        assertEquals(List.of("hdr-output"), sectionIds(hdrPage));
+        assertEquals(List.of("hdr.enabled", "tonemap.contrast", "hdr.paper-white-nits"), ids(hdrPage));
+        assertNotEquals(page.shape(), hdrPage.shape());
+    }
+
+    @Test
+    void theRendererToneMappingPageLeadsWithHdrOutput() {
+        CausticaPages.Engine engine = renderer();
+        assertEquals(List.of("hdr.enabled", "tonemap.gamma"), ids(CausticaPages.toneMapping(engine)));
+        engine.store().apply(CausticaConfig.FEATURE, RendererOptions.Rt.Hdr.ENABLED, true);
+        assertEquals(List.of("hdr.enabled", "tonemap.gamma", "hdr.ui-nits", "hdr.peak-nits"),
+                ids(CausticaPages.toneMapping(engine)));
+    }
+
+    @Test
+    void everydayExposureRowsLeadAndEveryOtherExposureRowIsFoldedUnderAdvanced() {
+        SettingsPage page = CausticaPages.exposure(renderer());
+        SettingGroup basic = section(page, "exposure");
+        SettingGroup advanced = section(page, "exposure.advanced");
+        assertFalse(basic.advanced());
+        assertTrue(advanced.advanced());
+        assertEquals(List.of("exposure.mode", "exposure.manual-ev", "exposure.key", "exposure.adapt-darken",
+                "exposure.adapt-brighten"), ids(basic));
+        assertEquals(List.of("exposure.low-percentile", "exposure.high-percentile", "exposure.stride",
+                "exposure.center-weight-sigma", "exposure.center-weight-floor", "exposure.environment-weight-cap",
+                "exposure.emissive-weight-cap", "exposure.pre-exposure"), ids(advanced));
+
+        SettingsPage synthetic = CausticaPages.exposure(synthetic(ignored -> true, HDR, KEY, FUTURE_METER));
+        assertEquals(List.of("exposure.key"), ids(section(synthetic, "exposure")));
+        assertEquals(List.of("exposure.future-meter"), ids(section(synthetic, "exposure.advanced")));
+    }
+
+    @Test
+    void theUpscalingPageShowsOnlyTheSelectedRoutesSettings() {
+        CausticaPages.Engine engine = renderer();
+        var route = RendererOptions.Rt.Denoising.ROUTE;
+        engine.store().apply(CausticaConfig.FEATURE, route, "ray_reconstruction");
+        SettingsPage rayReconstruction = CausticaPages.upscaling(engine);
+        assertEquals(List.of("denoiser", "dlss-rr", "latency"), sectionIds(rayReconstruction));
+        assertEquals(List.of("dlss-rr.quality"), ids(section(rayReconstruction, "dlss-rr")));
+        assertEquals(List.of("frame-generation.enabled", "reflex.enabled"),
+                ids(section(rayReconstruction, "latency")));
+
+        engine.store().apply(CausticaConfig.FEATURE, route, "temporal_denoiser");
+        SettingsPage temporal = CausticaPages.upscaling(engine);
+        assertEquals(List.of("denoiser", "nrd", "latency"), sectionIds(temporal));
+        assertEquals(List.of("denoising.method", "dlss-sr.quality"), ids(section(temporal, "nrd")));
+
+        engine.store().apply(CausticaConfig.FEATURE, route, "raw");
+        assertEquals(List.of("denoiser", "latency"), sectionIds(CausticaPages.upscaling(engine)));
+        assertFalse(ids(rayReconstruction).contains("dlss-rr.preset"));
+    }
+
+    /** Every page in every HDR and denoiser state, so rows that appear conditionally are included. */
+    static List<SettingsPage> everyPageState(CausticaPages.Engine engine) {
+        List<SettingsPage> pages = new ArrayList<>();
+        for (boolean hdr : List.of(false, true)) {
+            engine.store().apply(CausticaConfig.FEATURE, RendererOptions.Rt.Hdr.ENABLED, hdr);
+            pages.add(CausticaPages.toneMapping(engine));
+        }
+        for (Object route : RendererOptions.Rt.Denoising.ROUTE.choices()) {
+            engine.store().apply(CausticaConfig.FEATURE, RendererOptions.Rt.Denoising.ROUTE, route);
+            pages.add(CausticaPages.upscaling(engine));
+        }
+        pages.addAll(List.of(CausticaPages.exposure(engine), CausticaPages.overlays(engine)));
+        return pages;
+    }
+
+    @Test
+    void everyGroupedOrPageOwnedRendererOptionIsReachable() {
+        SettingsRegistry registry = new SettingsRegistry();
+        MinecraftOptions.register(registry);
+        CausticaOptions store = CausticaOptions.load(directory.resolve("reachable.toml"), registry);
+        CausticaPages.Engine engine = new CausticaPages.Engine(registry, store, ignored -> true);
+        Set<String> reachable = new HashSet<>();
+        CausticaPages.videoSettings(registry, store, ignored -> true).forEach(row -> reachable.add(row.id()));
+        everyPageState(engine).forEach(page -> reachable.addAll(ids(page)));
+
+        List<String> missing = new ArrayList<>();
+        for (Option<?> option : MinecraftOptions.allSettings()) {
+            boolean pageOwned = List.of("exposure.", "tonemap.", "hdr.").stream().anyMatch(option.id()::startsWith);
+            boolean hasRow = OptionControls.of(store, CausticaConfig.FEATURE, option) != null;
+            if (hasRow && (option.group() != null || pageOwned) && !reachable.contains(option.id())) {
+                missing.add(option.id());
+            }
+        }
+        assertTrue(missing.isEmpty(), "unreachable options: " + missing);
+    }
+
+    @Test
+    void noRowAppearsOnTwoPages() {
+        CausticaPages.Engine engine = renderer();
+        engine.store().apply(CausticaConfig.FEATURE, RendererOptions.Rt.Hdr.ENABLED, true);
+        List<SettingsPage> pages = List.of(CausticaPages.toneMapping(engine), CausticaPages.exposure(engine),
+                CausticaPages.upscaling(engine), CausticaPages.overlays(engine));
+        Set<String> seen = new HashSet<>();
+        for (SettingsPage page : pages) {
+            for (String id : ids(page)) {
+                assertTrue(seen.add(id), id + " appears on two pages");
+            }
+        }
+        assertEquals(List.of("entities.glow.enabled", "overlay.block-outline.enabled", "composite.debug-view",
+                "screenshots.exr-enabled"), ids(CausticaPages.overlays(engine)));
+    }
+
+    @Test
+    void videoSettingsShowsTheEverydayRowsAndOpensEveryPage() {
+        SettingsRegistry registry = new SettingsRegistry();
+        MinecraftOptions.register(registry);
+        ResourceId bloom = ResourceId.of("caustica", "bloom");
+        registry.feature(bloom).group("bloom")
+                .option(Option.bool("bloom.enabled", true).inGroupAsHeader("bloom"))
+                .option(Option.range("bloom.strength", 0, 2, 0.35f).inGroup("bloom")).register();
+        registry.feature(ResourceId.of("test", "empty")).register();
+        CausticaOptions store = CausticaOptions.load(directory.resolve("links.toml"), registry);
+
+        assertEquals(List.of(CausticaPages.RAY_TRACING, "composite.max-bounces", "composite.water-waves",
+                        "entities.enabled", "particles.enabled"),
+                CausticaPages.videoSettings(registry, store, ignored -> true).stream()
+                        .map(SettingControl::id).toList());
+        List<CausticaPages.Link> links = CausticaPages.links(registry, store, ignored -> true);
+        assertEquals(List.of("tone-mapping", "exposure", "upscaling", bloom.toString(), "overlays"),
+                links.stream().map(CausticaPages.Link::id).toList());
+
+        SettingsPage page = links.get(3).page().get();
+        SettingGroup section = page.sections().getFirst();
+        assertEquals(List.of("bloom.enabled", "bloom.strength"), ids(section));
+        assertSame(section.rows().getFirst(), section.gate());
+        section.gate().set(false);
+        assertTrue(section.editable(section.gate()));
+        assertFalse(section.editable(section.rows().getLast()));
+    }
+
+    @Test
+    void aRendererPageWithoutRowsGetsNoButton() {
+        SettingsRegistry registry = new SettingsRegistry();
+        registry.feature(CausticaConfig.FEATURE).options(List.of(HDR, ROUTE)).register();
+        CausticaOptions store = CausticaOptions.load(directory.resolve("sparse.toml"), registry);
+        List<CausticaPages.Link> links = CausticaPages.links(registry, store, ignored -> true);
+        assertEquals(List.of("tone-mapping", "upscaling"), links.stream().map(CausticaPages.Link::id).toList());
+    }
+
+    @Test
+    void anExtensionPageKeepsUngroupedRowsAndSkipsOptionsWithoutRows() {
+        SettingsRegistry registry = new SettingsRegistry();
+        var loose = registry.feature(ResourceId.of("test", "loose")).option(Option.bool("loose", true)).register();
+        var pathOnly = registry.feature(ResourceId.of("test", "path")).option(Option.optionalString("path"))
+                .register();
+        CausticaOptions store = CausticaOptions.load(directory.resolve("extensions.toml"), registry);
+
+        SettingsPage page = CausticaPages.feature(loose, store);
+        assertEquals(List.of("other"), sectionIds(page));
+        assertEquals(List.of("loose"), ids(page));
+        assertTrue(CausticaPages.feature(pathOnly, store).sections().isEmpty());
+    }
+
+    @Test
+    void resettingAPageRestoresEveryEditableRow() {
+        CausticaPages.Engine engine = synthetic(ignored -> true, HDR, CONTRAST, PAPER_WHITE, KEY, FUTURE_METER);
+        engine.store().apply(CausticaConfig.FEATURE, HDR, true);
+        engine.store().apply(CausticaConfig.FEATURE, PAPER_WHITE, 300f);
+        engine.store().apply(CausticaConfig.FEATURE, KEY, 0.5f);
+        engine.store().apply(CausticaConfig.FEATURE, FUTURE_METER, 0.9f);
+        CausticaPages.toneMapping(engine).reset();
+        CausticaPages.exposure(engine).reset();
+
+        assertFalse((Boolean) engine.value(HDR));
+        assertEquals(200f, engine.value(PAPER_WHITE));
+        assertEquals(0.18f, engine.value(KEY));
+        assertEquals(0.5f, engine.value(FUTURE_METER));
+        assertEquals(List.of("sdr-output"), sectionIds(CausticaPages.toneMapping(engine)));
+    }
+}
