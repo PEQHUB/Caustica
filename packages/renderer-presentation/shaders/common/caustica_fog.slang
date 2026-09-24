@@ -77,18 +77,38 @@ float4 fogPrefixAt(uint2 pixel, uint2 extent, float distance, float maximumDista
     float scatteringFraction = 1.0 - segmentT > 1e-5 ? (1.0 - partialT) / (1.0 - segmentT) : fraction;
     return float4(lerp(before.rgb, after.rgb, scatteringFraction), before.a * partialT);
 }
+float fogDistance(float2 uv, float depth, float maximumDistance) {
+    return depth <= 0.0 ? maximumDistance : min(length(unproject(uv, depth)), maximumDistance);
+}
+// Fraction of a pixel's path that a column may run past its own first surface while keeping half its weight.
+static const float FOG_COLUMN_PENETRATION = 0.1;
 float4 fogTransportAt(float2 uv, float depth, uint2 extent, float maximumDistance) {
-    float distance = depth <= 0.0 ? maximumDistance : min(length(unproject(uv, depth)), maximumDistance);
+    float distance = fogDistance(uv, depth, maximumDistance);
+    Texture2D<float> primaryDepth = ResourceDescriptorHeap[pc.depthIndex];
+    uint w,h; primaryDepth.GetDimensions(w,h);
     float2 grid = uv * float2(extent) - 0.5;
     int2 base = int2(floor(grid));
     float2 blend = grid - floor(grid);
     float4 volume = 0.0;
+    float total = 0.0;
     for (int y=0;y<2;y++) for (int x=0;x<2;x++) {
         int2 p = clamp(base+int2(x,y), int2(0), int2(extent-1));
-        float weight = (x == 0 ? 1-blend.x : blend.x)*(y == 0 ? 1-blend.y : blend.y);
+        // A column integrates along its center ray through every surface. The jittered primary sample
+        // nearest that ray gives the column's first physical surface.
+        float2 center = (float2(p) + 0.5) / float2(extent) * float2(w,h);
+        int2 sample = clamp(int2(floor(center - pc.traceData.xy)), int2(0), int2(w-1,h-1));
+        float columnDistance = fogDistance((float2(sample) + 0.5 + pc.traceData.xy) / float2(w,h),
+                primaryDepth.Load(int3(sample,0)), maximumDistance);
+        // Past that surface the column's transport lies inside or behind an occluder beside this pixel's ray.
+        // Columns that stay clear to this pixel's endpoint keep their bilinear weight.
+        float penetration = max(0.0, distance - columnDistance) / (FOG_COLUMN_PENETRATION * distance);
+        penetration *= penetration;
+        float weight = (x == 0 ? 1-blend.x : blend.x)*(y == 0 ? 1-blend.y : blend.y)
+                     / (1.0 + penetration * penetration);
         volume += fogPrefixAt(uint2(p), extent, distance, maximumDistance) * weight;
+        total += weight;
     }
-    return volume;
+    return volume / total;
 }
 float4 previousLighting(float3 center, uint2 extent, float maximumDistance, float3 lightDirection) {
     float4 q = pc.previousClipX * center.x + pc.previousClipY * center.y
