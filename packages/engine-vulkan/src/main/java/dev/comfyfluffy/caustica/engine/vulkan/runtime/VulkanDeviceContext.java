@@ -234,8 +234,12 @@ public final class VulkanDeviceContext implements GpuDevice {
 
     public GraphicsQueue graphics() { return graphics; }
 
-    /** Dispatch final resource destruction after its owning references have ended. */
-    public void deferDestroy(Runnable destroy) { graphics.releaseAbandoned(destroy); }
+    /**
+     * Destroys on the graphics retirement thread once every graphics use reserved before this call has
+     * completed, so graphics frames already submitted or recording may still read the resource. Callable
+     * from any thread. Async compute reads are not covered; they end with their job's completion.
+     */
+    public void deferDestroy(Runnable destroy) { graphics.releaseAfterReservedGraphics(destroy); }
 
     long completedComputeValue() { return completedComputeValue; }
 
