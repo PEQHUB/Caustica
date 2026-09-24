@@ -104,7 +104,7 @@ public final class MinecraftLightProvider implements AutoCloseable {
                 captured.sunAngleRadians(), captured.moonAngleRadians(),
                 settings.noonTiltDegrees() * TO_RADIANS,
                 lighting.sunIlluminanceLux() * SURFACE_TO_TOP_ILLUMINANCE,
-                lighting.moonIlluminanceLux() * SURFACE_TO_TOP_ILLUMINANCE,
+                settings.moonIlluminanceLux() * SURFACE_TO_TOP_ILLUMINANCE,
                 captured.moonPhaseIndex(),
                 lighting.moonPhaseFixedFraction(),
                 settings.sunAngularRadiusDegrees() * TO_RADIANS,
@@ -135,9 +135,9 @@ public final class MinecraftLightProvider implements AutoCloseable {
                           double moonAngularRadiusRadians) {
     }
 
-    /** Sky-owned angular settings sampled by this contribution without process-global option access. */
+    /** Sky-owned celestial settings sampled by this contribution without process-global option access. */
     public record CelestialSettings(double noonTiltDegrees, double sunAngularRadiusDegrees,
-                                    double moonAngularRadiusDegrees) {
+                                    double moonAngularRadiusDegrees, double moonIlluminanceLux) {
     }
 
 }

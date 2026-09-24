@@ -39,7 +39,7 @@ public final class MinecraftApiBootstrap {
         List<CausticaExtension> extensions = new ArrayList<>();
         extensions.add(new BloomExtension());
         extensions.addAll(platform.extensions());
-        var calibration = new MinecraftLightingCalibration(128_000.0f, 5.0f, 2_000.0f, 0.002f, 10.0f, 0.1f);
+        var calibration = new MinecraftLightingCalibration(128_000.0f, 2_000.0f, 0.002f, 10.0f, 0.1f);
         MinecraftProvidersExtension minecraftProviders = new MinecraftProvidersExtension(
                 frameAdapter::installFrameSelector, frameAdapter::installFrameCapture,
                 new MinecraftClientMaterialEpochCompiler(calibration), calibration,

@@ -152,7 +152,7 @@ final class SkyLutPassTest {
     }
 
     @Test void skyStateUsesOneCapturedHostFrame() {
-        var lighting = new MinecraftLightingCalibration(100, 2, 3, 4, 5, .25f);
+        var lighting = new MinecraftLightingCalibration(100, 3, 4, 5, .25f);
         var captured = new MinecraftCelestialFrame(.1f, .2f, .3f, .4f,
                 6, 63, 1063, 1, lighting);
         OptionValues defaults = new OptionValues() {
@@ -165,6 +165,8 @@ final class SkyLutPassTest {
         assertEquals(.3f, state.starAngleRadians());
         assertEquals(1f, state.viewerAltitudeKm());
         assertEquals(6f, state.moonPhaseIndex());
+        assertEquals(SkyLutPass.MOON_ILLUMINANCE_LUX.defaultValue(), state.moonIlluminanceLux());
+        assertEquals(.3f, state.moonIlluminanceLux());
     }
 
 }

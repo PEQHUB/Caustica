@@ -53,6 +53,20 @@ final class MinecraftLightProviderTest {
     }
 
     @Test
+    void moonlightFollowsTheConfiguredFullMoonIlluminance() {
+        var captured = new MinecraftCelestialFrame((float) Math.PI, 0, 0, 0,
+                0, 63, 63, 1, new MinecraftLightingCalibration(128_000, 1, 0, 0, .1f));
+
+        var lights = MinecraftLightProvider.celestialLights(captured,
+                new MinecraftLightProvider.CelestialSettings(0, .6, 1.5, 0.3));
+
+        // A full moon overhead delivers the configured lux at the same surface ratio as the sun.
+        assertEquals(0.3 * 100_000.0 / 128_000.0, lights.moon().orElseThrow().illuminanceRedLux(), 1.0e-9);
+        assertTrue(MinecraftLightProvider.celestialLights(captured,
+                new MinecraftLightProvider.CelestialSettings(0, .6, 1.5, 0)).moon().isEmpty());
+    }
+
+    @Test
     void unchangedCelestialAndHelmetSkipSubmission() {
         RecordingLights channel = new RecordingLights();
         MinecraftLightProvider provider = provider(channel);
@@ -116,10 +130,10 @@ final class MinecraftLightProviderTest {
         RecordingLights channel = new RecordingLights();
         AtomicInteger reads = new AtomicInteger();
         var celestial = new MinecraftCelestialFrame(0, (float) Math.PI, 0, 0,
-                0, 63, 63, 1, new MinecraftLightingCalibration(128_000, 5, 1, 0, 0, .1f));
+                0, 63, 63, 1, new MinecraftLightingCalibration(128_000, 1, 0, 0, .1f));
         var frame = new MinecraftLightFrame(Optional.of(celestial), Optional.empty());
         MinecraftLightProvider provider = new MinecraftLightProvider(channel, new SceneId() { },
-                () -> new MinecraftLightProvider.CelestialSettings(30, .6, 1.5),
+                () -> new MinecraftLightProvider.CelestialSettings(30, .6, 1.5, 5),
                 () -> { reads.incrementAndGet(); return frame; });
 
         provider.update();
@@ -135,7 +149,7 @@ final class MinecraftLightProviderTest {
 
     private static MinecraftLightProvider provider(RecordingLights channel) {
         return new MinecraftLightProvider(channel, new SceneId() { },
-                () -> new MinecraftLightProvider.CelestialSettings(30.0, 0.6, 1.5), () -> null);
+                () -> new MinecraftLightProvider.CelestialSettings(30.0, 0.6, 1.5, 5.0), () -> null);
     }
 
     private static LightDescriptor.Spot helmet() {
