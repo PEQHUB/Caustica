@@ -40,7 +40,13 @@
 		"VulkanGpuSurfaceMixin",
 		"VulkanInstanceMixin",
 		"VulkanUtilsMixin",
-		"VulkanGpuTextureAccessor"
+		"VulkanGpuTextureAccessor",
+		"GuiMixin",
+		"KeyboardHandlerMixin",
+		"KeyboardInputMixin",
+		"MouseHandlerMixin",
+		"OptionsMixin",
+		"TextureAtlasMixin"
 	],
 	"injectors": {
 		"defaultRequire": 1
