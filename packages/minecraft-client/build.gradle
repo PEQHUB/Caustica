@@ -298,7 +298,8 @@ def verifyEmbeddedApi = tasks.register("verifyEmbeddedApi") {
 		"minecraft-rendering": ["caustica/shaders/minecraft/"],
 		"nvidia-ngx": ["caustica/natives/"],
 		"renderer-presentation": ["caustica/shaders/pipelines/", "caustica/color/"],
-		"renderer-raytracing": ["caustica/shaders/world/", "caustica/shaders/fallback/", "caustica/shaders/pipelines/nee_at/"],
+		"renderer-raytracing": ["caustica/shaders/world/", "caustica/shaders/fallback/", "caustica/shaders/pipelines/nee_at/",
+				"caustica/sharc.properties"],
 		"shader-api": ["caustica/shaders/api/"],
 		"slang-runtime": ["caustica/natives/slang/"]
 	]
