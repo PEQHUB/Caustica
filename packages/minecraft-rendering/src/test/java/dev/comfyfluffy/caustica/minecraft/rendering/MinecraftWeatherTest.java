@@ -55,6 +55,63 @@ final class MinecraftWeatherTest {
         }
     }
 
+    @Test void skyKeepsVanillasSaturationAtClearRainAndThunder() {
+        assertEquals(1f, new MinecraftWeather(0, 0).skySaturation());
+        // Rain keeps a quarter of the colour's departure from grey over 0.25 + 0.75 * 0.6 of its grey.
+        assertEquals(.25f / .7f, new MinecraftWeather(1, 0).skySaturation(), 1.0e-6f);
+        // Thunder keeps 0.06 of the departure over 0.06 + 0.94 * 0.24 of the grey.
+        assertEquals(.06f / .2856f, new MinecraftWeather(1, 1).skySaturation(), 1.0e-6f);
+    }
+
+    @Test void skySaturationIsVanillasSkyColourLayerRelativeToItsGrey() {
+        // Plains, desert and snowy-plains sky colours.
+        for (int sky : new int[]{0x78A7FF, 0x6EB1FF, 0x7FA1FF}) {
+            float[] clear = {(sky >> 16 & 255) / 255f, (sky >> 8 & 255) / 255f, (sky & 255) / 255f};
+            float clearGrey = greyscale(clear)[0];
+            for (int rainStep = 0; rainStep <= 10; rainStep++) {
+                for (int thunderStep = 0; thunderStep <= rainStep; thunderStep++) {
+                    var weather = new MinecraftWeather(rainStep / 10f, thunderStep / 10f);
+                    float[] vanilla = vanillaSkyColorLayer(clear, weather);
+                    float grey = greyscale(vanilla)[0];
+                    for (int channel = 0; channel < 3; channel++) {
+                        assertEquals(weather.skySaturation() * (clear[channel] / clearGrey - 1),
+                                vanilla[channel] / grey - 1, 1.0e-5f);
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * 26.2 {@code WeatherAttributes.addLayer} for {@code SKY_COLOR}, on unquantized channels: rain without thunder,
+     * then thunder, each blend the colour with {@code ARGB.srgbLerp} toward {@code ColorModifier.BLEND_TO_GRAY}'s
+     * result, {@code srgbLerp(factor, c, scaleRGB(greyscale(c), brightness))}, with (0.6, 0.75) and (0.24, 0.94).
+     */
+    private static float[] vanillaSkyColorLayer(float[] color, MinecraftWeather weather) {
+        float thunder = weather.thunderLevel();
+        float rain = weather.rainLevel() - thunder;
+        if (rain > 0) color = srgbLerp(rain, color, blendToGray(color, .6f, .75f));
+        if (thunder > 0) color = srgbLerp(thunder, color, blendToGray(color, .24f, .94f));
+        return color;
+    }
+
+    private static float[] blendToGray(float[] color, float brightness, float factor) {
+        return srgbLerp(factor, color, scaleRgb(greyscale(color), brightness));
+    }
+
+    private static float[] greyscale(float[] color) {
+        float grey = color[0] * .3f + color[1] * .59f + color[2] * .11f;
+        return new float[]{grey, grey, grey};
+    }
+
+    private static float[] scaleRgb(float[] color, float scale) {
+        return new float[]{color[0] * scale, color[1] * scale, color[2] * scale};
+    }
+
+    private static float[] srgbLerp(float delta, float[] from, float[] to) {
+        return new float[]{lerp(delta, from[0], to[0]), lerp(delta, from[1], to[1]), lerp(delta, from[2], to[2])};
+    }
+
     /**
      * 26.2 {@code WeatherAttributes.addLayer}: rain without thunder, then thunder, each linearly blend the value
      * toward {@code FloatModifier.ALPHA_BLEND}'s result, a blend toward the night value by 5/16 and 135/256.

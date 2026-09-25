@@ -252,7 +252,7 @@ public final class SkyLutPass implements Pass<PassFrame> {
 
     private static SkyLutPushData.SkyInputs pushInputs(SkyInputsData v) {
         return new SkyLutPushData.SkyInputs(vec(v.celestial()), vec(v.skyLook0()), vec(v.skyLook1()),
-                vec(v.skyLook2()), vec(v.skyLook3()), vec(v.sunUv()), vec(v.moonUv()));
+                vec(v.skyLook2()), vec(v.skyLook3()), vec(v.skyLook4()), vec(v.sunUv()), vec(v.moonUv()));
     }
     private static SkyLutPushData.Float4 vec(SkyInputsData.Float4 v) {
         return new SkyLutPushData.Float4(v.x(), v.y(), v.z(), v.w());
@@ -269,6 +269,7 @@ public final class SkyLutPass implements Pass<PassFrame> {
                         s.viewerAltitudeKm(), s.moonPhaseIndex()),
                 new SkyInputsData.Float4(s.groundAlbedo(), s.horizonSoftenRadians(), s.daylightFactor(),
                         s.beamTransmittance()),
+                new SkyInputsData.Float4(s.skySaturation(), 0, 0, 0),
                 a.sunUv(), a.moonUv());
     }
 
@@ -286,7 +287,7 @@ public final class SkyLutPass implements Pass<PassFrame> {
                 options.get(MOON_DISC_HALF_ANGLE_DEGREES) * r, altitude,
                 captured.moonPhaseIndex(), options.get(GROUND_ALBEDO),
                 options.get(HORIZON_SOFTEN_DEGREES) * r, captured.weather().daylightFactor(),
-                captured.weather().beamTransmittance());
+                captured.weather().beamTransmittance(), captured.weather().skySaturation());
     }
 
     static float viewerAltitudeKm(double cameraY, double seaLevel, double metersPerSceneUnit) {
@@ -399,7 +400,7 @@ public final class SkyLutPass implements Pass<PassFrame> {
                     float moonAngularRadiusRadians, float moonPhaseFixedFraction, float sunDiscHalfAngleRadians,
                     float moonDiscHalfAngleRadians, float viewerAltitudeKm, float moonPhaseIndex,
                     float groundAlbedo, float horizonSoftenRadians, float daylightFactor,
-                    float beamTransmittance) { }
+                    float beamTransmittance, float skySaturation) { }
 
     private static Option<Float> option(String name, float min, float max, float value) {
         return Option.range("sky." + name, min, max, value).inGroup(GROUP);
