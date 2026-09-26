@@ -15,6 +15,7 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.util.ArrayList;
 import java.util.HexFormat;
 import java.util.HashSet;
 import java.util.List;
@@ -29,11 +30,36 @@ public final class SlangRuntime {
     private SlangLibrary library;
     private MemorySegment runtime = MemorySegment.NULL;
     private Path runtimeDirectory;
+    private String compilerIdentity;
     private final Set<SlangSession> sessions = new HashSet<>();
+    private final List<SlangRuntime> siblings = new ArrayList<>();
     private boolean acceptingSessions = true;
 
     public SlangRuntime(SlangRuntimeConfig config) {
         this.config = Objects.requireNonNull(config, "config");
+    }
+
+    private SlangRuntime(SlangRuntimeConfig config, SlangLibrary library, Path runtimeDirectory) {
+        this.config = config;
+        this.library = library;
+        this.runtimeDirectory = runtimeDirectory;
+    }
+
+    /**
+     * Returns {@code count} additional runtimes that share this runtime's validated native library, creating
+     * the missing ones. The native layer serializes all compilation on one runtime's global session, so only
+     * sessions of different runtimes compile concurrently. A sibling creates its global session on its first
+     * session request, stays owned by this runtime, and shuts down with it.
+     */
+    public synchronized List<SlangRuntime> siblings(int count) {
+        if (!acceptingSessions) {
+            throw new IllegalStateException("Slang runtime is shut down");
+        }
+        loadLibrary();
+        while (siblings.size() < count) {
+            siblings.add(new SlangRuntime(config, library, runtimeDirectory));
+        }
+        return List.copyOf(siblings.subList(0, count));
     }
 
     public synchronized SlangSession openSession(List<Path> searchPaths, boolean debugInformation,
@@ -52,13 +78,28 @@ public final class SlangRuntime {
     }
 
     public synchronized String compilerVersion() {
-        initialize();
+        loadLibrary();
         return library.compilerVersion();
     }
 
     public synchronized Path runtimeDirectory() {
-        initialize();
+        loadLibrary();
         return runtimeDirectory;
+    }
+
+    /**
+     * Identifies the compiler that produces this runtime's output: the Slang version and SHA-256 digests of
+     * the native runtime. A bundled runtime is extracted into a directory named by its bundle digest; an
+     * override is identified by its compiler, core, and shim libraries. Like the version, the identity does
+     * not create the global session.
+     */
+    public synchronized String compilerIdentity() {
+        loadLibrary();
+        if (compilerIdentity == null) {
+            compilerIdentity = library.compilerVersion() + '|' + (config.runtimeOverride().isPresent()
+                    ? overrideDigest(SlangPlatform.current()) : runtimeDirectory.getFileName().toString());
+        }
+        return compilerIdentity;
     }
 
     public synchronized boolean isInitialized() {
@@ -70,6 +111,7 @@ public final class SlangRuntime {
         for (SlangSession session : sessions) {
             session.retainUntilProcessExit();
         }
+        siblings.forEach(SlangRuntime::shutdown);
     }
 
     private synchronized void removeSession(SlangSession session) {
@@ -78,6 +120,15 @@ public final class SlangRuntime {
 
     private void initialize() {
         if (!runtime.equals(MemorySegment.NULL)) {
+            return;
+        }
+        loadLibrary();
+        runtime = library.createRuntime();
+    }
+
+    /** Loads and validates the native library once; a sibling starts with its runtime's library. */
+    private void loadLibrary() {
+        if (library != null) {
             return;
         }
         SlangPlatform platform = SlangPlatform.current();
@@ -89,9 +140,7 @@ public final class SlangRuntime {
             throw new IllegalStateException("Bundled Slang version mismatch: expected " + expectedVersion
                     + ", loaded " + compilerVersion);
         }
-        MemorySegment loadedRuntime = loaded.createRuntime();
         library = loaded;
-        runtime = loadedRuntime;
         runtimeDirectory = directory;
         LOGGER.info("Slang compiler initialized (version {}, runtime {})", compilerVersion, directory);
     }
@@ -184,6 +233,18 @@ public final class SlangRuntime {
         } finally {
             Files.deleteIfExists(temporary);
         }
+    }
+
+    private String overrideDigest(SlangPlatform platform) {
+        StringBuilder digests = new StringBuilder();
+        try {
+            for (String name : List.of(platform.compilerName(), platform.coreName(), platform.shimName())) {
+                digests.append(sha256(runtimeDirectory.resolve(name)));
+            }
+        } catch (IOException e) {
+            throw new IllegalStateException("Could not hash Slang runtime override " + runtimeDirectory, e);
+        }
+        return digests.toString();
     }
 
     private static boolean matches(Path path, SlangRuntimeManifest.FileEntry expected) throws IOException {
