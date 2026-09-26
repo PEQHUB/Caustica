@@ -8,6 +8,7 @@ import dev.comfyfluffy.caustica.minecraft.client.config.CausticaConfig;
 import dev.comfyfluffy.caustica.settings.Option;
 import dev.comfyfluffy.caustica.settings.OptionValues;
 import dev.comfyfluffy.caustica.renderer.runtime.RtRenderSettings;
+import dev.comfyfluffy.caustica.renderer.runtime.pipeline.RtJitter;
 import dev.comfyfluffy.caustica.engine.session.RenderSessionHost;
 import dev.comfyfluffy.caustica.minecraft.client.session.MinecraftEngineWorldSession;
 import dev.comfyfluffy.caustica.engine.frame.FrameSnapshot;
@@ -212,7 +213,9 @@ public final class MinecraftRtRuntime {
     private DlssRayReconstruction.Settings rayReconstructionSettings(RtDenoisingSettings denoising) {
         return new DlssRayReconstruction.Settings(
                 denoising.route() == DenoiserRoute.RAY_RECONSTRUCTION,
-                settings.get(RendererOptions.Rt.DlssRr.QUALITY), settings.get(RendererOptions.Rt.DlssRr.PRESET));
+                dev.comfyfluffy.caustica.minecraft.client.UltraCaptureSession.effectiveDlssQuality(
+                        settings.get(RendererOptions.Rt.DlssRr.QUALITY)),
+                settings.get(RendererOptions.Rt.DlssRr.PRESET));
     }
 
     private DlssSuperResolution.Settings superResolutionSettings(RtDenoisingSettings denoising) {
@@ -321,8 +324,28 @@ public final class MinecraftRtRuntime {
         if (session != null && session.renderer != null) session.renderer.resetExposureHistory();
     }
 
+    public void resetSceneHistory() {
+        if (session != null && session.renderer != null) session.renderer.resetSceneHistory();
+    }
+
     public void captureFrame(FrameSnapshot snapshot) {
         if (session != null && session.renderer != null) session.renderer.captureFrame(snapshot);
+    }
+
+    /**
+     * Jitter phases covering the current window at the live reconstruction render size. A capture
+     * completes after exactly this many fresh reconstructed frames.
+     */
+    public int jitterPhaseCount(int displayWidth, int displayHeight) {
+        if (session == null || session.rayReconstruction == null) {
+            return 32;
+        }
+        int renderWidth = displayWidth;
+        int[] optimal = session.rayReconstruction.queryOptimalRenderSize(displayWidth, displayHeight);
+        if (optimal != null && optimal.length >= 2 && optimal[0] > 0) {
+            renderWidth = optimal[0];
+        }
+        return RtJitter.phaseCount(renderWidth, displayWidth);
     }
 
     public void beginFrame() {
@@ -655,7 +678,11 @@ public final class MinecraftRtRuntime {
             superResolution.configure(superResolutionSettings(denoising));
             renderer.configureDenoising(denoising);
 
-            world.progress();
+            // A capture owns one immutable scene: suspend scene mutation (streaming, entity motion,
+            // atlas animation) while the composited frames keep reconstructing the frozen state.
+            if (!dev.comfyfluffy.caustica.minecraft.client.UltraCaptureSession.active()) {
+                world.progress();
+            }
             boolean resourcesReady = programs.hasActive();
             if (resourcesReady) {
                 telemetry.beginFrameIfInactive();

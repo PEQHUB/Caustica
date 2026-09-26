@@ -518,5 +518,16 @@
 	"caustica.option.caustica.minecraft.fog.debug.value.0": "Normal Image",
 	"caustica.option.caustica.minecraft.fog.debug.value.1": "Transmittance",
 	"caustica.option.caustica.minecraft.fog.debug.value.2": "Scattered Light",
-	"item.caustica.spotlight_helmet": "Spotlight Helmet"
+	"item.caustica.spotlight_helmet": "Spotlight Helmet",
+	"key.category.caustica.controls": "Caustica",
+	"key.caustica.ultra_screenshot": "Ultra Screenshot",
+	"caustica.status.ultraScreenshot.started": "Ultra screenshot started: DLAA accumulation over one full jitter phase (F4 to cancel)",
+	"caustica.status.ultraScreenshot.cancelled": "Ultra screenshot cancelled",
+	"caustica.status.ultraScreenshot.requiresWorld": "Ultra screenshot requires a loaded world",
+	"caustica.status.ultraScreenshot.busy": "Ultra screenshot: a capture or screenshot write is already active",
+	"caustica.status.ultraScreenshot.requiresDlssRr": "Ultra screenshot requires the DLSS Ray Reconstruction route and no debug view",
+	"caustica.status.ultraScreenshot.failed": "Ultra screenshot failed",
+	"caustica.status.ultraScreenshot.invalidated": "Ultra screenshot cancelled: world or renderer settings changed",
+	"caustica.status.ultraScreenshot.resized": "Ultra screenshot cancelled: window resized",
+	"caustica.status.ultraScreenshot.timedOut": "Ultra screenshot timed out waiting for fresh frames"
 }

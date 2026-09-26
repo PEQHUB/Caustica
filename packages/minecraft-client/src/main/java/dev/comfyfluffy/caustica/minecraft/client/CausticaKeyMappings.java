@@ -12,6 +12,6 @@ public final class CausticaKeyMappings {
     }
 
     public static KeyMapping[] all() {
-        return new KeyMapping[] {TonemapperQuickToggle.KEY};
+        return new KeyMapping[] {UltraScreenshot.KEY, TonemapperQuickToggle.KEY};
     }
 }
