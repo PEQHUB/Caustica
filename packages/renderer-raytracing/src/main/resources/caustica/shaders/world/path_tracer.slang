@@ -47,6 +47,11 @@ public void runFillStablePlanes<TComposition : IComposition, TTrace : IRetainedR
     // footprint of the next segment for a cache query.
     float lobeRoughness = 0.0;
     uint2 feedback = uint2(0u);
+    // The restart continues build's delta chain from the camera distance of its origin. That is build's
+    // unfolded length for a camera or single-delta endpoint and along straight transmission; a folded
+    // multi-delta chain restarts with a narrower cone, which only sharpens its lookups.
+    float coneSpread = traceCameraSpread(pixel, extent, frame);
+    float coneWidth = coneSpread * length(path.origin - frame.camOffset);
     while (true) {
         WorldPayload intersection = {};
         intersection.seed = seed;
@@ -88,8 +93,9 @@ public void runFillStablePlanes<TComposition : IComposition, TTrace : IRetainedR
             path.throughput = float3(1.0);
         }
         if (!first && !missed) signalDistance += distance;
+        coneWidth += coneSpread * distance;
         // Keep the material closure out of the medium integration's live state.
-        WorldHit hit = resolveWorldHit<TComposition>(intersection, ray, previousPdf);
+        WorldHit hit = resolveWorldHit<TComposition>(intersection, ray, previousPdf, coneWidth);
         float3 emission = float3(0.0);
         if (!first) {
             emission = missed ? hit.radiance : hit.surface.emissionRadiance;
@@ -164,6 +170,8 @@ public void runFillStablePlanes<TComposition : IComposition, TTrace : IRetainedR
         if (updatesOnly && !sharc.record(vertex, direct.diffuse + direct.specular, emission, event,
                 retainedLightRandom(seed))) break;
         if (!scattered) break;
+        // Delta events report a zero PDF and keep the spread.
+        if (previousPdf > 0.0) coneSpread += traceConeSpreadGrowth(previousPdf);
         bool diffuseEvent = (event & EVENT_DIFFUSE) != 0u;
         if (first) diffusePath = diffuseEvent;
         lobeRoughness += diffuseEvent ? 1.0 : sqrt(hit.surface.alphaRoughness);

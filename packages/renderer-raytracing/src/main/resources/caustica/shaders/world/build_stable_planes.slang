@@ -89,6 +89,7 @@ public void runBuildStablePlanes<TComposition : IComposition>() {
     branch.imageTransform = float3x3(1, 0, 0, 0, 1, 0, 0, 0, 1);
     branch.identity = 1u;
     float3 cameraDirection = branch.path.direction;
+    float coneSpread = traceCameraSpread(pixel, extent, frame);
     uint count = 1u;
     float3 stableRadiance = float3(0.0);
     [unroll]
@@ -116,7 +117,8 @@ public void runBuildStablePlanes<TComposition : IComposition>() {
             restart.throughput = branch.path.throughput;
             branch.length += distance;
             // Material closures need not remain live across medium sampling and its shadow traversal.
-            WorldHit hit = resolveWorldHit<TComposition>(intersection, ray, 0.0);
+            // Build follows only delta events, so the cone width is the camera spread times the unfolded length.
+            WorldHit hit = resolveWorldHit<TComposition>(intersection, ray, 0.0, coneSpread * branch.length);
             if (plane == 0u && step == 0u) {
                 // Camera-segment media stop at the physical boundary, before delta branches continue.
                 float4 clip = mul(frame.curViewProj, float4(hit.position - frame.camOffset, 1.0));

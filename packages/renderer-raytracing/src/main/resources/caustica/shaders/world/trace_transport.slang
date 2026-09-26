@@ -527,13 +527,40 @@ public float tracePhase(float cosine, float g) {
     return (1.0 - g * g) / (12.5663706144 * pow(1.0 + g * g - 2.0 * g * cosine, 1.5));
 }
 
+float2 traceCameraClip(uint2 pixel, uint2 extent, WorldPush frame) {
+    return (float2(pixel) + 0.5 + frame.jitter) * (2.0 / float2(extent)) - 1.0;
+}
+
+float3 traceCameraDirection(float2 clip, WorldPush frame) {
+    float4 point = mul(frame.invViewProj, float4(clip, 0.0, 1.0));
+    return normalize(point.xyz / point.w);
+}
+
+/**
+ * Angle between this pixel's camera ray and the ray one trace-resolution pixel above it. A camera ray
+ * cone starts at the eye with zero width and this spread. Delta events at flat triangles keep the
+ * spread, so the cone's width is spread times unfolded path length until a continuous scatter widens it.
+ */
+public float traceCameraSpread(uint2 pixel, uint2 extent, WorldPush frame) {
+    float2 clip = traceCameraClip(pixel, extent, frame);
+    return length(traceCameraDirection(clip + float2(0.0, 2.0 / float(extent.y)), frame)
+            - traceCameraDirection(clip, frame));
+}
+
+/**
+ * Spread a continuous scatter adds to a ray cone: 0.3 times the apex angle of the cone whose solid
+ * angle is 1 / pdf. RTXPT's factor deliberately under-estimates the lobe because stochastic paths
+ * already antialias, while over-blur would be visible.
+ */
+public float traceConeSpreadGrowth(float pdf) {
+    return 0.6 * acos(max(-1.0, 1.0 - 1.0 / (6.28318530718 * pdf)));
+}
+
 public PackedPathSegment traceCamera<TComposition : IComposition>(uint2 pixel,
         uint2 extent, WorldPush frame) {
     PackedPathSegment path = {};
-    float2 clip = (float2(pixel) + 0.5 + frame.jitter) * (2.0 / float2(extent)) - 1.0;
-    float4 point = mul(frame.invViewProj, float4(clip, 0.0, 1.0));
     path.origin = frame.camOffset;
-    path.direction = normalize(point.xyz / point.w);
+    path.direction = traceCameraDirection(traceCameraClip(pixel, extent, frame), frame);
     path.throughput = float3(1.0);
     path.ior = 1.0;
     path.flags = PATH_ENDPOINT_VALID;
