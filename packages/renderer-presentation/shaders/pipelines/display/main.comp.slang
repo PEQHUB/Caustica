@@ -2,11 +2,16 @@
 // via baked ACES 2.0 display-transform LUTs (see tools/bake_display_lut.py). Tonemap seam: the path tracer and DLSS-RR use scene-linear
 // ACEScg; exposure is applied from the compositor-owned 1x1 image right here, followed by the selected
 // scene-referred ACES look (LMT), then the shared ACES 2.0 output transform for each display.
+//
+// The HDR switch is a specialization constant that RtDisplayPipeline fixes per shader variant, so the
+// SDR-only variant carries no HDR code.
 
 import display_common;
 import presentation_common;
 
 [[vk::push_constant]] DisplayPush pc;
+
+[vk::constant_id(0)] const bool HDR_ENABLED = false;
 
 // MUST exactly match SHAPER_LO_STOPS/SHAPER_HI_STOPS in tools/bake_display_lut.py -- these are the two
 // halves of one shaper function, one run at bake time (Python), one at sample time (here); if they
@@ -135,7 +140,7 @@ void main(uint3 dispatchId : SV_DispatchThreadID) {
     float3 lookedAcesCg = applyLook(exposedAcesCg);
     outputImage[pix] = float4(tonemap(lookedAcesCg), 1.0);
 
-    if (pc.hdrEnabled != 0) {
+    if (HDR_ENABLED) {
         hdrImage[pix] = float4(tonemapHdr(lookedAcesCg), 1.0);
     }
 }
