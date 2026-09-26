@@ -315,7 +315,9 @@ float3 tonemapHdrBt2390(float3 paperReferred709, float paperWhiteNits, float hea
 
 // The operators below return paper-white-relative BT.709 for a peak of `headroom`.
 float3 pqEncodeMappedBt709(float3 mapped709, float paperWhiteNits, float headroom) {
-    float3 mapped2020 = max(mul(BT709_TO_BT2020, max(mapped709, float3(0.0))), float3(0.0));
+    // Signed BT.709 transport represents BT.2020-contained colors with negative BT.709 coordinates;
+    // the target-domain clamp happens after conversion, in the target basis.
+    float3 mapped2020 = max(mul(BT709_TO_BT2020, mapped709), float3(0.0));
     return pqEncodePaperRelativeBt2020(mapped2020, paperWhiteNits, headroom);
 }
 
