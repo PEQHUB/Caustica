@@ -811,7 +811,7 @@ public final class RtFrameRenderer {
                         presentationResources().hdrDisplayImage(), presentationResources().sdrToneLut(),
                         presentationResources().hdrToneLut(), displayLookLut,
                         settings.hdr(), settings.exposure().gamma(),
-                        presentationResources().loadedHdrLutNits(), true);
+                        presentationResources().loadedHdrLutNits(), true, settings.toneMapping());
             }
             VulkanBarriers.memoryBarrier(cmd, stack); // display output visible to debug composite
 

@@ -192,7 +192,8 @@ public final class MinecraftRtRuntime {
     public boolean settingAvailable(Option<?> option) {
         if (RendererOptions.Rt.Sharc.OPTIONS.contains(option)) return sharcAvailable();
         return (option != RendererOptions.Rt.Hdr.ENABLED && option != RendererOptions.Rt.Hdr.UI_NITS
-                && option != RendererOptions.Rt.Hdr.PEAK_NITS) || swapchainPqAvailable;
+                && option != RendererOptions.Rt.Hdr.PEAK_NITS && option != RendererOptions.Rt.Tonemap.HDR_MAPPER
+                && option != RendererOptions.Rt.Tonemap.PAPER_WHITE_NITS) || swapchainPqAvailable;
     }
 
     /** SHaRC runs in a build whose SHaRC headers verified, on a device that enabled their features. */
