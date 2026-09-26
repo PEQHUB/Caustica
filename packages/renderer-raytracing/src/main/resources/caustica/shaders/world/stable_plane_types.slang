@@ -10,6 +10,14 @@ public static const uint STABLE_PLANE_FLAG_TRANSMISSION = 8u;
 // Flags bits 8 through 15 store the number of delta segments before the endpoint.
 public static const uint STABLE_PLANE_DEPTH_SHIFT = 8u;
 public static const uint STABLE_PLANE_DEPTH_MASK = 255u;
+// A branch id is 1 for the camera path; each delta event shifts in two bits naming its lobe. The leading
+// bit and every reflection bit therefore occupy even bit positions.
+public static const uint STABLE_PLANE_BRANCH_REFLECTION = 1u;
+public static const uint STABLE_PLANE_BRANCH_TRANSMISSION = 2u;
+
+public bool stablePlaneBranchReflects(uint branchId) {
+    return countbits(branchId & 0x55555555u) > 1u;
+}
 
 // Logical world-space guide values; physical scratch storage is scalar SoA.
 public struct StablePlaneRecord {

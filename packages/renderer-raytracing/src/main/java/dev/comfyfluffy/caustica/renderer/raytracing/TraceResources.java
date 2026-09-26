@@ -85,6 +85,8 @@ public final class TraceResources {
                 VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "guide specular albedo " + renderWidth + "x" + renderHeight);
         GpuImage specularMotion = createImage(context, renderWidth, renderHeight,
                 VK10.VK_FORMAT_R16G16_SFLOAT, "guide specular motion " + renderWidth + "x" + renderHeight);
+        GpuImage responsivity = createImage(context, renderWidth, renderHeight,
+                VK10.VK_FORMAT_R16_SFLOAT, "guide responsivity " + renderWidth + "x" + renderHeight);
         GpuImage diffuseRadianceHitDistance = createImage(context, renderWidth, renderHeight,
                 VK10.VK_FORMAT_R16G16B16A16_SFLOAT,
                 "NRD diffuse radiance hit distance " + renderWidth + "x" + renderHeight);
@@ -126,7 +128,7 @@ public final class TraceResources {
         releases.add(pathScratchBuffer::destroy);
         images = new TraceImages(traceColor, stablePlaneMetadata,
                 normalRoughness, diffuseAlbedo, depth, primaryDepth, motion,
-                specularAlbedo, specularMotion, diffuseRadianceHitDistance,
+                specularAlbedo, specularMotion, responsivity, diffuseRadianceHitDistance,
                 specularRadianceHitDistance, nrdViewZ, nrdMotion, nrdDisocclusionThresholdMix,
                 denoisedDiffuseRadianceHitDistance,
                 denoisedSpecularRadianceHitDistance, nrdStableRadiance, reconstructedColor,

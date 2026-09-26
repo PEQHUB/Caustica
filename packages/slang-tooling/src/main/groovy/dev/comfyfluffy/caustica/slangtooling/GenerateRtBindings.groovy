@@ -73,7 +73,8 @@ abstract class GenerateRtBindings extends DefaultTask {
                         "nrdViewZ": "StorageImageIndex",
                         "denoisedDiffuseRadianceHitDistance": "StorageImageIndex",
                         "denoisedSpecularRadianceHitDistance": "StorageImageIndex",
-                        "nrdStableRadiance": "StorageImageIndex"]
+                        "nrdStableRadiance": "StorageImageIndex",
+                        "responsivityGuide": "StorageImageIndex"]
     ]
 
     // Gradle decorates this task; closure dispatch cannot resolve a private static helper through it.

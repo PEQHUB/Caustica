@@ -45,7 +45,7 @@ final class RtShaderRecordAbiTest {
                 new WorldPushData.Float2(11, 12), 13, 14, 15,
                 new WorldPushData.Float3(16, 17, 18), new Matrix4f().scaling(19), 20, 21,
                 0x1111222233334444L, 22, 0x2222333344445555L, 0x3333444455556666L, 31,
-                new WorldPushData.Float3(-1024, 2048, -4096));
+                new WorldPushData.Float3(-1024, 2048, -4096), 0.25f);
         ByteBuffer bytes = storage(WorldPushData.BYTE_SIZE);
 
         value.write(bytes);
@@ -71,9 +71,9 @@ final class RtShaderRecordAbiTest {
         assertEquals(-1024, bytes.getFloat(320));
         assertEquals(2048, bytes.getFloat(324));
         assertEquals(-4096, bytes.getFloat(328));
+        assertEquals(0.25f, bytes.getFloat(332));
         assertEquals(0, bytes.getInt(292));
         assertEquals(0, bytes.getInt(316));
-        assertEquals(0, bytes.getInt(332));
     }
 
     @Test
@@ -162,8 +162,9 @@ final class RtShaderRecordAbiTest {
 
     @Test
     void worldPushRootsRetainTheirDescriptorHeapAbi() {
-        assertArrayEquals(new int[]{0, 8, 16, 24, 32, 40, 56, 68, 72, 76, 80, 84, 88, 92,
-                        96, 100, 104, 112, 120, 128, 136, 144, 152, 160, 168, 176, 180, 184, 188, 192, 200, 208, 216},
+        assertArrayEquals(new int[]{0, 8, 16, 24, 32, 40, 56, 68, 72, 76, 80, 84, 88, 92, 96,
+                        100, 104, 112, 120, 128, 136, 144, 152, 160, 168, 176, 184, 188, 192, 196, 200, 208, 216,
+                        224},
                 new int[]{RtBindings.WORLD_PUSH_ADDRESS_OFFSET, RtBindings.WORLD_COMPOSITION_DATA_ADDRESS_OFFSET,
                         RtBindings.WORLD_GEOMETRY_TABLE_ADDRESS_OFFSET, RtBindings.WORLD_PATH_QUEUE_ADDRESS_OFFSET,
                         RtBindings.WORLD_TOP_LEVEL_AS_INDEX_OFFSET, RtBindings.WORLD_STABLE_PLANE_METADATA_IMAGE_INDEX_OFFSET,
@@ -172,7 +173,8 @@ final class RtShaderRecordAbiTest {
                         RtBindings.WORLD_SPECULAR_RADIANCE_HIT_DISTANCE_INDEX_OFFSET, RtBindings.WORLD_NRD_VIEW_Z_INDEX_OFFSET,
                         RtBindings.WORLD_DENOISED_DIFFUSE_RADIANCE_HIT_DISTANCE_INDEX_OFFSET,
                         RtBindings.WORLD_DENOISED_SPECULAR_RADIANCE_HIT_DISTANCE_INDEX_OFFSET,
-                        RtBindings.WORLD_NRD_STABLE_RADIANCE_INDEX_OFFSET, RtBindings.WORLD_INITIAL_VOLUME_IMPLEMENTATION_OFFSET,
+                        RtBindings.WORLD_NRD_STABLE_RADIANCE_INDEX_OFFSET, RtBindings.WORLD_RESPONSIVITY_GUIDE_INDEX_OFFSET,
+                        RtBindings.WORLD_INITIAL_VOLUME_IMPLEMENTATION_OFFSET,
                         RtBindings.WORLD_INITIAL_VOLUME_ACTIVE_OFFSET, RtBindings.WORLD_INITIAL_VOLUME_BINDING_OFFSET,
                         RtBindings.WORLD_INITIAL_VOLUME_INSTANCE_OFFSET, RtBindings.WORLD_NEE_AT_STATE_ADDRESS_OFFSET,
                         RtBindings.WORLD_NRD_SIGNAL_ENCODING_OFFSET, RtBindings.WORLD_STABLE_PLANE_BUFFER_ADDRESS_OFFSET,

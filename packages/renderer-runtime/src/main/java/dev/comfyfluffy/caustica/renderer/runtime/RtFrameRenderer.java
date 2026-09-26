@@ -650,7 +650,8 @@ public final class RtFrameRenderer {
                 environmentState.implementation(),
                 geometryHistory.currentInstances().value(),
                 geometryHistory.previousInstances() == null ? 0L : geometryHistory.previousInstances().value(),
-                geometryHistory.previousMask(), previousOriginDelta
+                geometryHistory.previousMask(), previousOriginDelta,
+                settings.rrResponsivity()
         ).write(push);
         pushBuf.flush(0L, WORLD_PUSH_SIZE);
         VulkanBarriers.memoryBarrier(cmd, stack);
@@ -928,6 +929,8 @@ public final class RtFrameRenderer {
                 storageIndex(traceImages().specularAlbedo()));
         target.putInt(base + RtBindings.WORLD_SPECULAR_MOTION_GUIDE_INDEX_OFFSET,
                 storageIndex(traceImages().specularMotion()));
+        target.putInt(base + RtBindings.WORLD_RESPONSIVITY_GUIDE_INDEX_OFFSET,
+                storageIndex(traceImages().responsivity()));
         target.putInt(base + RtBindings.WORLD_DIFFUSE_RADIANCE_HIT_DISTANCE_INDEX_OFFSET,
                 storageIndex(traceImages().diffuseRadianceHitDistance()));
         target.putInt(base + RtBindings.WORLD_SPECULAR_RADIANCE_HIT_DISTANCE_INDEX_OFFSET,

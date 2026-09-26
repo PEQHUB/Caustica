@@ -60,6 +60,13 @@ public void stablePlaneExportGuides(uint2 pixel, uint2 extent, WorldPush frame) 
             float4(diffuseEstimate, 0.0);
     worldFloat4StorageImage(worldBindings.resources.specularAlbedoGuide)[pixel] =
             float4(specularEstimate, 1.0);
+    // A dominant sky endpoint describes no surface whose history RR could follow. Reached directly or only
+    // through delta transmission it is fully responsive. Reflected sky shares its pixel with the reflector's
+    // accumulated transport and keeps the floor like every other endpoint.
+    bool historyFreeSky = (record.flags & STABLE_PLANE_FLAG_ENVIRONMENT) != 0u
+            && !stablePlaneBranchReflects(record.branchId);
+    worldFloatStorageImage(worldBindings.resources.responsivityGuide)[pixel] =
+            historyFreeSky ? 1.0 : frame.responsivityFloor;
     worldFloat4StorageImage(worldBindings.resources.stablePlaneMetadataImage)[pixel] =
             float4(float(available) / 3.0, float(dominant) * 0.5,
                     float((record.flags >> STABLE_PLANE_DEPTH_SHIFT) & STABLE_PLANE_DEPTH_MASK)

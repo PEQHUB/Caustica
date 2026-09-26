@@ -88,6 +88,8 @@
 	"caustica.setting.dlss-rr.quality.1": "Balanced",
 	"caustica.setting.dlss-rr.quality.2": "Quality",
 	"caustica.setting.dlss-rr.quality.5": "DLAA",
+	"caustica.setting.dlss-rr.responsivity": "RR Responsivity",
+	"caustica.setting.dlss-rr.responsivity.tooltip": "How strongly Ray Reconstruction favors the newest frame over its accumulated history. 0 gives the steadiest image; higher values react faster to lighting changes but show more noise. Sky seen directly or through glass and water always uses the newest frame.",
 	"caustica.setting.dlss-sr.quality": "SR Quality",
 	"caustica.setting.dlss-sr.quality.tooltip": "DLSS Super Resolution quality mode: the render resolution used before NRD output is reconstructed to display resolution.",
 	"caustica.setting.dlss-sr.quality.3": "Ultra Performance",

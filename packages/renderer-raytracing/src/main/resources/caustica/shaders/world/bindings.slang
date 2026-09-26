@@ -30,6 +30,7 @@ public struct WorldResourceIndices {
     public StorageImageIndex denoisedDiffuseRadianceHitDistance;
     public StorageImageIndex denoisedSpecularRadianceHitDistance;
     public StorageImageIndex nrdStableRadiance;
+    public StorageImageIndex responsivityGuide;
 };
 
 /**

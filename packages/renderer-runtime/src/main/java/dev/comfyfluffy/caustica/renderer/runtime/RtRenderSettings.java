@@ -11,7 +11,8 @@ import java.util.List;
 /** Renderer settings captured together at the host frame or resource-configuration boundary. */
 public record RtRenderSettings(int debugView, int maxBounces, float jitterSignX, float jitterSignY,
                                int hdrLutNits, boolean hdr, RtExposure.Settings exposure,
-                               RtToneMapping.Settings toneMapping, Sharc sharc) {
+                               RtToneMapping.Settings toneMapping, Sharc sharc,
+                               float rrResponsivity) {
     /** SHaRC cache controls; see {@link RendererOptions.Rt.Sharc}. */
     public record Sharc(boolean enabled, int cacheExponent, int updateTileSize, int accumulationFrames,
                         int staleFrames, float sceneScale, float gridLogarithmBase, float gridLevelBias,
@@ -25,7 +26,8 @@ public record RtRenderSettings(int debugView, int maxBounces, float jitterSignX,
                 options.get(RendererOptions.Rt.Composite.JITTER_SIGN_Y),
                 RtToneLut.nearestHdrLutNits(options.get(RendererOptions.Rt.Hdr.PEAK_NITS)),
                 pqActive && options.get(RendererOptions.Rt.Hdr.ENABLED), exposure(options),
-                toneMapping(options), sharc(options));
+                toneMapping(options), sharc(options),
+                options.get(RendererOptions.Rt.DlssRr.RESPONSIVITY));
     }
 
     /**
