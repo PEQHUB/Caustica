@@ -33,8 +33,8 @@ final class MinecraftFogInputs {
                 (float) light.illuminanceRedLux(), (float) light.illuminanceGreenLux(),
                 (float) light.illuminanceBlueLux()};
         float daylight = (float) Math.max(0, Math.cos(celestial.sunAngleRadians()));
-        float sky = celestial.lighting().sunIlluminanceLux() * daylight * 0.015f
-                + celestial.lighting().nightAirglowLuminanceCdM2();
+        float sky = celestial.lighting().sunIlluminanceLux() * celestial.weather().daylightFactor() * daylight
+                * 0.015f + celestial.lighting().nightAirglowLuminanceCdM2();
         return new FogFrame(field, frame.dailyDensity(), celestial.seaLevel() + 6, 18,
                 windPhase(frame.animationSeconds()), direction, illuminance,
                 new float[]{sky * 0.7f, sky * 0.85f, sky});

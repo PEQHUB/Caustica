@@ -10,6 +10,7 @@ import dev.comfyfluffy.caustica.minecraft.rendering.sky.gen.SkyInputsData;
 import dev.comfyfluffy.caustica.minecraft.rendering.sky.gen.SkyLutPushData;
 import dev.comfyfluffy.caustica.minecraft.rendering.MinecraftCelestialFrame;
 import dev.comfyfluffy.caustica.minecraft.rendering.MinecraftLightingCalibration;
+import dev.comfyfluffy.caustica.minecraft.rendering.MinecraftWeather;
 import dev.comfyfluffy.caustica.settings.Option;
 import dev.comfyfluffy.caustica.settings.OptionValues;
 import dev.comfyfluffy.caustica.support.SharedResource;
@@ -32,7 +33,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 final class SkyLutPassTest {
     private static final SkyLutPass.SkyState SKY = new SkyLutPass.SkyState(
             .1f, .2f, .3f, .4f, 100_000, .2f, .003f, 1.5f, .5f, .01f, .02f,
-            .1f, .03f, .04f, 1.25f, 2, .3f, .05f);
+            .1f, .03f, .04f, 1.25f, 2, .3f, .05f, .6875f, .25f);
     private static final SkyLutPass.AtlasSnapshot ATLAS = new SkyLutPass.AtlasSnapshot(null, 0, 1,
             new SkyInputsData.Float4(.1f, .2f, .3f, .4f),
             new SkyInputsData.Float4(.5f, .6f, .7f, .8f));
@@ -43,6 +44,8 @@ final class SkyLutPassTest {
         assertEquals(112, SkyInputsData.BYTE_SIZE);
         assertEquals(SKY.sunAngleRadians(), bytes.getFloat(0));
         assertEquals(SKY.groundAlbedo(), bytes.getFloat(64));
+        assertEquals(SKY.daylightFactor(), bytes.getFloat(72));
+        assertEquals(SKY.beamTransmittance(), bytes.getFloat(76));
         assertEquals(.1f, bytes.getFloat(80));
         assertEquals(.8f, bytes.getFloat(108));
     }
@@ -154,13 +157,17 @@ final class SkyLutPassTest {
     @Test void skyStateUsesOneCapturedHostFrame() {
         var lighting = new MinecraftLightingCalibration(100, 3, 4, 5, .25f);
         var captured = new MinecraftCelestialFrame(.1f, .2f, .3f, .4f,
-                6, 63, 1063, 1, lighting);
+                6, 63, 1063, 1, lighting, new MinecraftWeather(1, .5f));
         OptionValues defaults = new OptionValues() {
             @Override public <T> T get(Option<T> option) { return option.defaultValue(); }
         };
 
         SkyLutPass.SkyState state = SkyLutPass.gather(defaults, captured);
 
+        // The shader applies the weather to the calibrated sun, as the sun light and fog do on the CPU.
+        assertEquals(100f, state.sunIlluminanceLux());
+        assertEquals(captured.weather().daylightFactor(), state.daylightFactor());
+        assertEquals(captured.weather().beamTransmittance(), state.beamTransmittance());
         assertEquals(.1f, state.sunAngleRadians());
         assertEquals(.3f, state.starAngleRadians());
         assertEquals(1f, state.viewerAltitudeKm());

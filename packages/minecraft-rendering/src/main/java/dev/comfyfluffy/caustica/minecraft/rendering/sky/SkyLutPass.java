@@ -272,7 +272,8 @@ public final class SkyLutPass implements Pass<PassFrame> {
                         s.moonAngularRadiusRadians(), s.moonPhaseFixedFraction()),
                 new SkyInputsData.Float4(s.sunDiscHalfAngleRadians(), s.moonDiscHalfAngleRadians(),
                         s.viewerAltitudeKm(), s.moonPhaseIndex()),
-                new SkyInputsData.Float4(s.groundAlbedo(), s.horizonSoftenRadians(), 0, 0),
+                new SkyInputsData.Float4(s.groundAlbedo(), s.horizonSoftenRadians(), s.daylightFactor(),
+                        s.beamTransmittance()),
                 a.sunUv(), a.moonUv());
     }
 
@@ -289,7 +290,8 @@ public final class SkyLutPass implements Pass<PassFrame> {
                 options.get(SUN_DISC_HALF_ANGLE_DEGREES) * r,
                 options.get(MOON_DISC_HALF_ANGLE_DEGREES) * r, altitude,
                 captured.moonPhaseIndex(), options.get(GROUND_ALBEDO),
-                options.get(HORIZON_SOFTEN_DEGREES) * r);
+                options.get(HORIZON_SOFTEN_DEGREES) * r, captured.weather().daylightFactor(),
+                captured.weather().beamTransmittance());
     }
 
     static float viewerAltitudeKm(double cameraY, double seaLevel, double metersPerSceneUnit) {
@@ -401,7 +403,8 @@ public final class SkyLutPass implements Pass<PassFrame> {
                     float starLuminance, float noonTiltRadians, float sunAngularRadiusRadians,
                     float moonAngularRadiusRadians, float moonPhaseFixedFraction, float sunDiscHalfAngleRadians,
                     float moonDiscHalfAngleRadians, float viewerAltitudeKm, float moonPhaseIndex,
-                    float groundAlbedo, float horizonSoftenRadians) { }
+                    float groundAlbedo, float horizonSoftenRadians, float daylightFactor,
+                    float beamTransmittance) { }
 
     private static Option<Float> option(String name, float min, float max, float value) {
         return Option.range("sky." + name, min, max, value).inGroup(GROUP);
