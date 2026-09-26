@@ -44,11 +44,22 @@ final class MinecraftFogInputsTest {
         var stormSun = MinecraftLightProvider.celestialLights(storm.celestial(),
                 MinecraftProgramSession.celestialSettings(DEFAULTS)).sun().orElseThrow();
 
-        // The fog is lit by the path tracer's sun light, and its daylight ambient darkens with the sky.
-        float daylight = storm.celestial().weather().daylightFactor();
+        // The fog is lit by the path tracer's sun light, and its daylight ambient darkens and greys with the sky.
+        var weather = storm.celestial().weather();
         assertEquals((float) stormSun.illuminanceGreenLux(), stormFog.lightRadiance()[1]);
-        assertEquals(clearFog.lightRadiance()[1] * daylight * .25f, stormFog.lightRadiance()[1], 1.0e-2f);
-        assertEquals(clearFog.ambientRadiance()[2] * daylight, stormFog.ambientRadiance()[2], 1.0e-2f);
+        assertEquals(clearFog.lightRadiance()[1] * weather.daylightFactor() * .25f, stormFog.lightRadiance()[1],
+                1.0e-2f);
+        float clearLuminance = luminance(clearFog.ambientRadiance());
+        float stormLuminance = luminance(stormFog.ambientRadiance());
+        assertEquals(clearLuminance * weather.daylightFactor(), stormLuminance, 1.0e-2f);
+        for (int channel = 0; channel < 3; channel++) {
+            assertEquals(weather.skySaturation() * (clearFog.ambientRadiance()[channel] / clearLuminance - 1),
+                    stormFog.ambientRadiance()[channel] / stormLuminance - 1, 1.0e-5f);
+        }
+    }
+
+    private static float luminance(float[] acesCg) {
+        return 0.27222872f * acesCg[0] + 0.67408177f * acesCg[1] + 0.05368952f * acesCg[2];
     }
 
     private static MinecraftFogFrame noonFog(MinecraftWeather weather) {
