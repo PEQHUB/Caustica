@@ -298,7 +298,14 @@ public float3 traceVisibility<TComposition : IComposition>(PackedPathSegment pat
     ray.Direction = selected.direction;
     ray.TMin = traceEpsilon();
     ray.TMax = selected.maximumDistance;
-    return traceVisibilityRay<TComposition>(ray, path.absorption, path.ior, seed);
+    float3 visibility = traceVisibilityRay<TComposition>(ray, path.absorption, path.ior, seed);
+    // Outdoor light connections attenuate through the spatial medium; explicit interiors carry
+    // their absorption in the shadow state and stay on the interior contract.
+    if (path.ior == 1.0 && !any(path.absorption > 0.0)) {
+        visibility *= traceSpatialLightTransmittance<TComposition>(
+                ray.Origin, ray.Direction, selected.maximumDistance);
+    }
+    return visibility;
 }
 
 public struct TraceSpatialMedium {
@@ -378,7 +385,10 @@ public float3 traceVolumeLighting<TComposition : IComposition>(float3 position, 
     ray.Direction = selected.direction;
     ray.TMin = minimumDistance;
     ray.TMax = min(selected.maximumDistance, maximumDistance);
-    float3 visibility = traceVisibilityRay<TComposition>(ray, float3(0.0), 1.0, seed);
+    // The scattering point is in the spatial medium by construction; the helper holds identity when
+    // the medium is inactive.
+    float3 visibility = traceVisibilityRay<TComposition>(ray, float3(0.0), 1.0, seed)
+            * traceSpatialLightTransmittance<TComposition>(ray.Origin, ray.Direction, ray.TMax);
     return selectedRadiance * visibility * (totalWeight / (float(candidates) * selectedWeight));
 }
 
@@ -452,6 +462,38 @@ public TraceSpatialMedium traceSpatialMediumSegment<TComposition : IComposition>
     }
     result.scatteringDistance = scatteringWeight > 0.0 ? result.scatteringDistance / scatteringWeight : 0.0;
     return result;
+}
+
+// Light connections attenuate through the spatial medium with the same quadrature ladder and range
+// cap as continuation segments. Scattering stays owned by the path integrator, so only extinction is
+// evaluated; the deterministic nodes need no seed. Returns identity when the medium is inactive.
+public float3 traceSpatialLightTransmittance<TComposition : IComposition>(
+        float3 origin, float3 direction, float distance) {
+    float3 transmittance = float3(1.0);
+    if (worldBindings.spatialMediumActive == 0u) return transmittance;
+    NeeAtState state = neeAtState(worldBindings.neeAtStateAddress)[0];
+    float length = min(distance, 256.0 / state.metersPerSceneUnit);
+    float lengthMeters = length * state.metersPerSceneUnit;
+    uint sampleCount = lengthMeters <= 1.0 ? 1u : lengthMeters <= 4.0 ? 2u : lengthMeters <= 8.0 ? 4u : 8u;
+    WorldPush frame = ((ConstPtr<WorldPush>)worldBindings.worldPushAddress)[0];
+    TComposition.Volumes volumes = {};
+    SpatialMediumInput input = {};
+    input.shaderRoot = worldShaderRoot();
+    input.bindingData = worldBindings.spatialMediumBindingData;
+    input.instanceData = worldBindings.spatialMediumInstanceData;
+    input.metersPerSceneUnit = state.metersPerSceneUnit;
+    input.time = frame.time;
+    for (uint i = 0u; i < sampleCount; i++) {
+        float2 quadrature = SPATIAL_QUADRATURE[sampleCount - 1u + i];
+        float3 p = origin + direction * (length * quadrature.x);
+        input.position = p + float3(worldBindings.spatialMediumOriginX,
+                worldBindings.spatialMediumOriginY, worldBindings.spatialMediumOriginZ);
+        input.proceduralPosition = p + frame.proceduralDomainOffset;
+        SpatialMediumProperties medium = volumes.evaluateSpatialMedium(
+                worldBindings.spatialMediumImplementation, input);
+        transmittance *= exp(-medium.extinction * (length * quadrature.y));
+    }
+    return transmittance;
 }
 
 public struct TraceDirect {
