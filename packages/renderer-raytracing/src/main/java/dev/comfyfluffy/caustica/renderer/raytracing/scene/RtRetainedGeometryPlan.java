@@ -176,6 +176,11 @@ public final class RtRetainedGeometryPlan {
         return List.copyOf(groups);
     }
 
+    /**
+     * Opaque geometry needs no coverage test, so traversal commits it without shader involvement. Opacity does
+     * not imply zero transmission: volume boundaries and uncertified surfaces are opaque and still transmit.
+     * Every guaranteed shadow blocker is opaque, so visibility queries see a blocker only as a committed hit.
+     */
     private static boolean isOpaque(MeshBuild.Geometry<?> geometry) {
         return geometry.volume() != null || geometry.surface() == null
                 || geometry.surface().coverage() instanceof MeshBuild.CoveragePolicy.Opaque;

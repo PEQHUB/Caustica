@@ -166,7 +166,9 @@ public ShadowPayload traceShadowQuery<TComposition : IComposition>(RayDesc ray,
     ShadowPayload shadow = {};
     shadow.volumeAbsorption = absorption;
     shadow.volumeIor = ior;
-    RayQuery<RAY_FLAG_FORCE_NON_OPAQUE> query;
+    // Traversal resolves opaque geometry and known micromap states itself, so only coverage-tested
+    // surfaces without a volume reach this loop.
+    RayQuery<RAY_FLAG_NONE> query;
     query.TraceRayInline(worldAccelerationStructure(), RAY_FLAG_NONE,
             WORLD_RAY_MASK_SECONDARY, ray);
     uint proceedCount = 0u;
@@ -177,26 +179,17 @@ public ShadowPayload traceShadowQuery<TComposition : IComposition>(RayDesc ray,
         uint primitiveIndex = query.CandidatePrimitiveIndex();
         RetainedGeometryRecord record = ((ConstPtr<RetainedGeometryRecord>)worldBindings.geometryTableAddress)
                 [instanceBase + geometryIndex];
-        // A certified blocker has full coverage and zero transmission across its entire revision.
-        if ((record.flags & RETAINED_GEOMETRY_GUARANTEED_SHADOW_BLOCKER) != 0u) {
-            shadow.hitDistance = query.CandidateTriangleRayT();
-            query.Abort();
-            shadowDiagnosticQuery(diagnostics, proceedCount, true, uint2(instanceBase + geometryIndex, primitiveIndex));
-            return shadow;
-        }
-        if ((record.flags & RETAINED_GEOMETRY_HAS_VOLUME) == 0u) {
-            CoverageInput input = {};
-            input.shaderRoot = worldShaderRoot();
-            input.bindingData = record.surfaceBinding;
-            input.instanceData = worldInstanceRecord(record).instanceData;
-            input.primitiveIndex = primitiveIndex;
-            input.barycentrics = query.CandidateTriangleBarycentrics();
-            TComposition.Coverages coverages = {};
-            float coverage = clamp(coverages.evaluateCoverage(record.coverageImplementation, input), 0.0, 1.0);
-            bool stochastic = (record.flags & RETAINED_GEOMETRY_STOCHASTIC) != 0u;
-            if (stochastic ? worldCoverageRandom(seed, instanceBase, geometryIndex, primitiveIndex) >= coverage
-                    : coverage < record.alphaCutoff) continue;
-        }
+        CoverageInput input = {};
+        input.shaderRoot = worldShaderRoot();
+        input.bindingData = record.surfaceBinding;
+        input.instanceData = worldInstanceRecord(record).instanceData;
+        input.primitiveIndex = primitiveIndex;
+        input.barycentrics = query.CandidateTriangleBarycentrics();
+        TComposition.Coverages coverages = {};
+        float coverage = clamp(coverages.evaluateCoverage(record.coverageImplementation, input), 0.0, 1.0);
+        bool stochastic = (record.flags & RETAINED_GEOMETRY_STOCHASTIC) != 0u;
+        if (stochastic ? worldCoverageRandom(seed, instanceBase, geometryIndex, primitiveIndex) >= coverage
+                : coverage < record.alphaCutoff) continue;
         // Committing narrows the search distance; traversal still finds the nearest accepted surface.
         query.CommitNonOpaqueTriangleHit();
     }
@@ -211,6 +204,8 @@ public ShadowPayload traceShadowQuery<TComposition : IComposition>(RayDesc ray,
     shadowDiagnosticQuery(diagnostics, proceedCount, true,
             uint2(query.CommittedInstanceID() + query.CommittedGeometryIndex(), primitiveIndex));
     shadow.hitDistance = query.CommittedRayT();
+    // A certified blocker has full coverage and zero transmission across its entire revision.
+    if ((record.flags & RETAINED_GEOMETRY_GUARANTEED_SHADOW_BLOCKER) != 0u) return shadow;
     WorldInstanceHistory history = worldInstanceHistory(record, false);
     uint3 indices = worldTriangleIndices(record, primitiveIndex);
     float3 p0 = worldVertex(history.current, indices.x);
