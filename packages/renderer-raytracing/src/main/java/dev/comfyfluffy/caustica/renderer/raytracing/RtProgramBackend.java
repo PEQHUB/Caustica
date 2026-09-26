@@ -186,25 +186,17 @@ public final class RtProgramBackend implements ProgramBackend, AutoCloseable {
             Future<RtShaderCode> volumeLighting = submitStage(submitted, "volume-lighting",
                     stages::compileVolumeLighting);
             Future<RtShaderCode> visibility = submitStage(submitted, "visibility-rays", stages::compileVisibilityRays);
-            Future<RtShaderCode> shadowClosest = submitStage(submitted, "shadow-closest-hit",
-                    stages::compileShadowClosestHit);
             Future<RtShaderCode> radiance = submitStage(submitted, "radiance-any-hit", stages::compileRadianceAnyHit);
-            Future<RtShaderCode> shadow = submitStage(submitted, "shadow-any-hit", stages::compileShadowAnyHit);
             Future<RtShaderCode> resolve = submitStage(submitted, "resolve-stable-planes",
                     () -> stages.compilePlain("resolve_stable_planes.slang", WorldShaderCompiler.ENTRY_POINT));
             Future<RtShaderCode> environment = submitStage(submitted, "environment", stages::compileEnvironmentMiss);
             Future<RtShaderCode> closest = submitStage(submitted, "closest-hit", stages::compileClosestHit);
-            Future<RtShaderCode> shadowBlocker = submitStage(submitted, "shadow-blocker",
-                    () -> stages.compilePlain("shadow_blocker.slang", WorldShaderCompiler.ENTRY_POINT));
-            Future<RtShaderCode> shadowMiss = submitStage(submitted, "shadow-miss",
-                    () -> stages.compilePlain("shadow.rmiss.slang", WorldShaderCompiler.ENTRY_POINT));
             awaitStages(submitted);
             pipeline = RtPipeline.create(context,
                     new RtShaderCode[]{build.resultNow(), fill.resultNow(), visibility.resultNow(),
                             volumeLighting.resultNow(), resolve.resultNow()},
-                    new RtShaderCode[]{environment.resultNow(), shadowMiss.resultNow()},
-                    closest.resultNow(), radiance.resultNow(), shadow.resultNow(), shadowClosest.resultNow(),
-                    shadowBlocker.resultNow());
+                    new RtShaderCode[]{environment.resultNow()},
+                    closest.resultNow(), radiance.resultNow());
             return new Candidate(composition, shaderCompiler, table, pipeline);
         } catch (IOException | RuntimeException | Error failure) {
             if (pipeline != null) pipeline.destroy();
