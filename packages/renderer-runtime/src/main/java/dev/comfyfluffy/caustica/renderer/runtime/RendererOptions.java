@@ -82,9 +82,9 @@ public final class RendererOptions {
             public static final List<String> MODES = List.of("auto", "manual");
             public static final Option<String> MODE = stringChoice("caustica.rt.exposure.mode", "exposure.mode", "auto", MODES).inGroup("exposure");
             public static final Option<Float> MANUAL_EV = clampedFloat("caustica.rt.exposure.manualEv", "exposure.manual-ev", 0.0f, -15.0f, 15.0f).inGroup("exposure");
-            public static final Option<Float> KEY = exposureScale("caustica.rt.exposure.key", "exposure.key", 0.18f);
-            public static final Option<Float> ADAPT_DARKEN = exposureScale("caustica.rt.exposure.adaptDarken", "exposure.adapt-darken", 2.0f);
-            public static final Option<Float> ADAPT_BRIGHTEN = exposureScale("caustica.rt.exposure.adaptBrighten", "exposure.adapt-brighten", 0.4f);
+            public static final Option<Float> KEY = exposureScale("caustica.rt.exposure.key", "exposure.key", 0.18f).sliderRange(0.05, 0.5);
+            public static final Option<Float> ADAPT_DARKEN = exposureScale("caustica.rt.exposure.adaptDarken", "exposure.adapt-darken", 2.0f).sliderRange(0.1, 20.0);
+            public static final Option<Float> ADAPT_BRIGHTEN = exposureScale("caustica.rt.exposure.adaptBrighten", "exposure.adapt-brighten", 0.4f).sliderRange(0.1, 20.0);
             public static final Option<Float> LOW_PERCENTILE = clampedFloat("caustica.rt.exposure.lowPercentile", "exposure.low-percentile", 0.50f, 0.0f, 1.0f);
             public static final Option<Float> HIGH_PERCENTILE = clampedFloat("caustica.rt.exposure.highPercentile", "exposure.high-percentile", 0.95f, 0.0f, 1.0f);
             public static final Option<Integer> STRIDE = clampedInt("caustica.rt.exposure.stride", "exposure.stride", 2, 1, 8);
