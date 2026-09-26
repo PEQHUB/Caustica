@@ -37,7 +37,7 @@ public final class RtToneMapping {
         PSYCHOV69(14, "psychov69"),
         PSYCHOV24(8, "psychov24");
 
-        public static final SdrMode DEFAULT = ACES_2_0;
+        public static final SdrMode DEFAULT = PSYCHOV31;
 
         private final int id;
         private final String configName;
@@ -73,7 +73,7 @@ public final class RtToneMapping {
         PSYCHOV69(8, "psychov69"),
         PSYCHOV24(2, "psychov24");
 
-        public static final HdrMode DEFAULT = ACES_2_0;
+        public static final HdrMode DEFAULT = PSYCHOV31;
 
         private final int id;
         private final String configName;
