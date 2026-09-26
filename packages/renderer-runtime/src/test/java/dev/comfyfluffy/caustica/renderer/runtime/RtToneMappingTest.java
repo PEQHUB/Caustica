@@ -6,6 +6,7 @@ import dev.comfyfluffy.caustica.settings.Option;
 import dev.comfyfluffy.caustica.settings.OptionValues;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -83,6 +84,19 @@ final class RtToneMappingTest {
                 RtToneMapping.HdrMode.PSYCHOV31, 4, RtToneMapping.HdrMode.PSYCHOVISUAL, 5,
                 RtToneMapping.HdrMode.PRISM, 6, RtToneMapping.HdrMode.PSYCHOV30, 7,
                 RtToneMapping.HdrMode.PSYCHOV69, 8), hdr);
+    }
+
+    @Test
+    void quickTogglePreselectsTakeEverySdrAndHdrName() {
+        List<String> expected = new ArrayList<>(RtToneMapping.sdrConfigNames());
+        expected.addAll(List.of("caustica", "bt2390"));
+        assertEquals(expected, RtToneMapping.quickToggleNames());
+        for (String name : RtToneMapping.quickToggleNames()) {
+            assertEquals(name, RendererOptions.Rt.Tonemap.QUICK_TOGGLE_A.normalize(name));
+            assertEquals(name, RendererOptions.Rt.Tonemap.QUICK_TOGGLE_B.normalize(name));
+        }
+        assertEquals("aces2.0", RendererOptions.Rt.Tonemap.QUICK_TOGGLE_A.defaultValue());
+        assertEquals("psychov31", RendererOptions.Rt.Tonemap.QUICK_TOGGLE_B.defaultValue());
     }
 
     @Test

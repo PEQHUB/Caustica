@@ -1,11 +1,13 @@
 package dev.comfyfluffy.caustica.minecraft.client.mixin;
 
 import dev.comfyfluffy.caustica.minecraft.client.MinecraftHostTelemetry;
+import com.mojang.blaze3d.platform.InputConstants;
 import com.mojang.blaze3d.systems.RenderSystem;
 import com.mojang.blaze3d.vulkan.VulkanDevice;
 
 import dev.comfyfluffy.caustica.minecraft.client.CausticaClientComposition;
 import dev.comfyfluffy.caustica.minecraft.client.MinecraftTextureLifetime;
+import dev.comfyfluffy.caustica.minecraft.client.TonemapperQuickToggle;
 import dev.comfyfluffy.caustica.minecraft.client.vulkan.MinecraftVulkanBackend;
 import dev.comfyfluffy.caustica.spi.vulkan.VulkanLowLatency;
 
@@ -15,6 +17,7 @@ import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 /**
  * Runs Reflex sleep at the start of {@link Minecraft#runTick}, before simulation.
@@ -33,6 +36,16 @@ public abstract class MinecraftMixin {
 		CausticaClientComposition.current().uiOverlay().destroy();
 		CausticaClientComposition.current().runtime().shutdown();
 		MinecraftTextureLifetime.drain();
+	}
+
+	@Inject(method = "handleGlobalKeyPress", at = @At("HEAD"), cancellable = true)
+	private void caustica$handleToneMapperToggle(InputConstants.Key key, boolean controlDown,
+			CallbackInfoReturnable<Boolean> cir) {
+		Minecraft minecraft = (Minecraft) (Object) this;
+		if (!minecraft.options.keyDebugModifier.isDown() && TonemapperQuickToggle.KEY.matches(key)) {
+			TonemapperQuickToggle.flip();
+			cir.setReturnValue(true);
+		}
 	}
 
 	// Session and resize work uses client-tick cadence, after the per-frame Reflex sleep.

@@ -26,6 +26,7 @@ public final class RendererOptions {
                 Rt.Exposure.ENVIRONMENT_WEIGHT_CAP, Rt.Exposure.EMISSIVE_WEIGHT_CAP, Rt.Exposure.PRE_EXPOSURE,
                 Rt.Tonemap.GAMMA,
                 Rt.Tonemap.SDR_MAPPER, Rt.Tonemap.HDR_MAPPER, Rt.Tonemap.PAPER_WHITE_NITS,
+                Rt.Tonemap.QUICK_TOGGLE_A, Rt.Tonemap.QUICK_TOGGLE_B,
                 Rt.Screenshots.EXR_ENABLED,
                 Rt.Hdr.ENABLED, Rt.Hdr.UI_NITS, Rt.Hdr.PEAK_NITS));
         Rt.Tonemap.SDR_CONTROLS.values().forEach(settings::addAll);
@@ -110,6 +111,12 @@ public final class RendererOptions {
             public static final Option<String> HDR_MAPPER = stringChoice("caustica.rt.hdr.toneMapper", "hdr.tone-mapper",
                     RtToneMapping.HdrMode.DEFAULT.configName(), RtToneMapping.hdrConfigNames()).inGroup("output");
             public static final Option<Float> PAPER_WHITE_NITS = clampedFloat("caustica.rt.hdr.paperWhiteNits", "hdr.paper-white-nits", 200.0f, 80.0f, 500.0f).inGroup("output");
+            // The two mappers the quick-toggle key flips between; a name an output does not offer
+            // leaves that output's mapper unchanged.
+            public static final Option<String> QUICK_TOGGLE_A = stringChoice("caustica.rt.tonemap.quickToggleA", "tonemap.quick-toggle-a",
+                    RtToneMapping.SdrMode.ACES_2_0.configName(), RtToneMapping.quickToggleNames()).inGroup("output");
+            public static final Option<String> QUICK_TOGGLE_B = stringChoice("caustica.rt.tonemap.quickToggleB", "tonemap.quick-toggle-b",
+                    RtToneMapping.SdrMode.PSYCHOV31.configName(), RtToneMapping.quickToggleNames()).inGroup("output");
 
             public static final Map<RtToneMapping.SdrMode, List<Option<Float>>> SDR_CONTROLS = sdrControls();
             public static final Map<RtToneMapping.HdrMode, List<Option<Float>>> HDR_CONTROLS = hdrControls();
