@@ -24,6 +24,8 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.Arrays;
+import java.util.Set;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.Callable;
@@ -231,6 +233,26 @@ final class WorldShaderCompilerTest {
         } finally {
             threads.shutdown();
         }
+    }
+
+    @Test
+    void sharcHeadersKeyStoredBinaries(@TempDir Path cache) throws Exception {
+        var program = new ProgramComposition(List.of());
+        Path first = Files.createDirectories(cache.resolve("first"));
+        Path second = Files.createDirectories(cache.resolve("second"));
+        for (String header : SharcSdk.HEADERS.keySet()) {
+            Files.writeString(first.resolve(header), "// " + header);
+            Files.writeString(second.resolve(header), "// " + header);
+        }
+        Files.writeString(second.resolve("SharcCommon.h"), "// changed");
+        List<String> hashes = new ArrayList<>();
+        for (Path headers : Arrays.asList(null, first, second)) {
+            try (WorldShaderCompiler compiler = WorldShaderCompiler.create(runtime,
+                    cache.resolve("sources-" + hashes.size()), program, headers)) {
+                hashes.add(compiler.composition().contentHash());
+            }
+        }
+        assertEquals(3, Set.copyOf(hashes).size(), hashes::toString);
     }
 
     @Test
