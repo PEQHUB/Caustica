@@ -18,8 +18,8 @@ import java.util.function.Supplier;
  *
  * <p>Rows write the shared preference store as they change, so the renderer follows on its next frame. The
  * page is re-derived every tick and its rows are rebuilt in place when a change alters which rows apply, such
- * as picking another denoiser, or when the player folds a section; the rebuild waits until no control is
- * held, so a slider being dragged across denoisers is not replaced under the pointer. Opening, leaving and
+ * as picking another tone mapper, or when the player folds a section; the rebuild waits until no control is
+ * held, so a slider being dragged across mappers is not replaced under the pointer. Opening, leaving and
  * rebuilding a page never render a frame outside the game's own frame loop. The store reaches disk when the
  * page closes.
  */

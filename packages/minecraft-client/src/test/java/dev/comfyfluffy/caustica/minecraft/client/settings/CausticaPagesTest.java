@@ -3,10 +3,14 @@ package dev.comfyfluffy.caustica.minecraft.client.settings;
 import dev.comfyfluffy.caustica.minecraft.client.MinecraftOptions;
 import dev.comfyfluffy.caustica.minecraft.client.config.CausticaConfig;
 import dev.comfyfluffy.caustica.minecraft.client.config.CausticaOptions;
+import dev.comfyfluffy.caustica.renderer.presentation.RtToneMapping;
 import dev.comfyfluffy.caustica.renderer.runtime.RendererOptions;
+import dev.comfyfluffy.caustica.renderer.runtime.RendererOptions.Rt.Tonemap;
 import dev.comfyfluffy.caustica.settings.Option;
 import dev.comfyfluffy.caustica.settings.ResourceId;
 import dev.comfyfluffy.caustica.settings.SettingsRegistry;
+import net.minecraft.network.chat.Component;
+import net.minecraft.network.chat.contents.TranslatableContents;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -14,8 +18,10 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Objects;
 import java.util.Set;
 import java.util.function.Predicate;
+import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -36,10 +42,17 @@ final class CausticaPagesTest {
 
     /** A renderer feature that declares options the pages have never heard of, known only by their ids. */
     private CausticaPages.Engine synthetic(Predicate<Option<?>> available, Option<?>... options) {
-        SettingsRegistry registry = new SettingsRegistry();
-        registry.feature(CausticaConfig.FEATURE).options(List.of(options)).register();
+        SettingsRegistry registry = registry(options);
         CausticaOptions store = CausticaOptions.load(directory.resolve("synthetic.toml"), registry);
         return new CausticaPages.Engine(registry, store, available);
+    }
+
+    private static SettingsRegistry registry(Option<?>... options) {
+        SettingsRegistry registry = new SettingsRegistry();
+        var feature = registry.feature(CausticaConfig.FEATURE);
+        Stream.of(options).map(Option::group).filter(Objects::nonNull).distinct().forEach(feature::group);
+        feature.options(List.of(options)).register();
+        return registry;
     }
 
     private CausticaPages.Engine renderer() {
@@ -65,32 +78,84 @@ final class CausticaPagesTest {
         return page.sections().stream().filter(section -> section.id().equals(id)).findFirst().orElseThrow();
     }
 
+    /** Selects ACES 2.0 on both outputs, the LUT path, which has no per-mapper controls. */
+    private static CausticaPages.Engine lutMappers(CausticaPages.Engine engine) {
+        var store = engine.store();
+        store.apply(CausticaConfig.FEATURE, Tonemap.SDR_MAPPER, RtToneMapping.SdrMode.ACES_2_0.configName());
+        store.apply(CausticaConfig.FEATURE, Tonemap.HDR_MAPPER, RtToneMapping.HdrMode.ACES_2_0.configName());
+        return engine;
+    }
+
     @Test
     void theHdrPathAppliesOnlyWhileHdrIsRequestedAndPresentable() {
-        CausticaPages.Engine sdr = synthetic(ignored -> true, HDR, CONTRAST, PAPER_WHITE, KEY);
+        Option<?>[] options = {HDR, Tonemap.SDR_MAPPER, Tonemap.HDR_MAPPER, CONTRAST, PAPER_WHITE, KEY};
+        CausticaPages.Engine sdr = lutMappers(synthetic(ignored -> true, options));
         SettingsPage page = CausticaPages.toneMapping(sdr);
         assertEquals(List.of("sdr-output"), sectionIds(page));
-        assertEquals(List.of("hdr.enabled", "tonemap.contrast"), ids(page));
+        assertEquals(List.of("sdr.tone-mapper", "hdr.enabled", "tonemap.contrast"), ids(page));
+        assertEquals(Set.of("sdr.tone-mapper"), page.wide());
 
-        CausticaPages.Engine unavailable = synthetic(option -> option != HDR, HDR, CONTRAST, PAPER_WHITE, KEY);
+        CausticaPages.Engine unavailable = lutMappers(synthetic(option -> option != HDR, options));
         unavailable.store().apply(CausticaConfig.FEATURE, HDR, true);
         assertEquals(List.of("sdr-output"), sectionIds(CausticaPages.toneMapping(unavailable)));
 
-        CausticaPages.Engine hdr = synthetic(ignored -> true, HDR, CONTRAST, PAPER_WHITE, KEY);
+        CausticaPages.Engine hdr = lutMappers(synthetic(ignored -> true, options));
         hdr.store().apply(CausticaConfig.FEATURE, HDR, true);
         SettingsPage hdrPage = CausticaPages.toneMapping(hdr);
         assertEquals(List.of("hdr-output"), sectionIds(hdrPage));
-        assertEquals(List.of("hdr.enabled", "tonemap.contrast", "hdr.paper-white-nits"), ids(hdrPage));
+        assertEquals(List.of("hdr.tone-mapper", "hdr.enabled", "tonemap.contrast", "hdr.paper-white-nits"),
+                ids(hdrPage));
+        assertEquals(Set.of("hdr.tone-mapper"), hdrPage.wide());
         assertNotEquals(page.shape(), hdrPage.shape());
     }
 
     @Test
-    void theRendererToneMappingPageLeadsWithHdrOutput() {
-        CausticaPages.Engine engine = renderer();
-        assertEquals(List.of("hdr.enabled", "tonemap.gamma"), ids(CausticaPages.toneMapping(engine)));
+    void theRendererToneMappingPageLeadsWithTheMapperAndHdrOutput() {
+        CausticaPages.Engine engine = lutMappers(renderer());
+        List<String> sdr = ids(CausticaPages.toneMapping(engine));
+        assertEquals(List.of("sdr.tone-mapper", "hdr.enabled", "tonemap.gamma"), sdr.subList(0, 3));
+        assertTrue(sdr.stream().noneMatch(id -> id.startsWith("hdr.") && !id.equals("hdr.enabled")),
+                sdr::toString);
+
         engine.store().apply(CausticaConfig.FEATURE, RendererOptions.Rt.Hdr.ENABLED, true);
-        assertEquals(List.of("hdr.enabled", "tonemap.gamma", "hdr.ui-nits", "hdr.peak-nits"),
-                ids(CausticaPages.toneMapping(engine)));
+        List<String> hdr = ids(CausticaPages.toneMapping(engine));
+        assertEquals(List.of("hdr.tone-mapper", "hdr.enabled", "tonemap.gamma"), hdr.subList(0, 3));
+        assertTrue(hdr.containsAll(List.of("hdr.paper-white-nits", "hdr.ui-nits", "hdr.peak-nits")),
+                hdr::toString);
+        assertTrue(hdr.stream().noneMatch(id -> id.startsWith("sdr.")), hdr::toString);
+    }
+
+    @Test
+    void everyMapperShowsExactlyItsDeclaredControlsUnderItsName() {
+        CausticaPages.Engine engine = renderer();
+        for (RtToneMapping.SdrMode mode : RtToneMapping.SdrMode.values()) {
+            engine.store().apply(CausticaConfig.FEATURE, Tonemap.SDR_MAPPER, mode.configName());
+            assertMapperSection(CausticaPages.toneMapping(engine), "sdr", mode.configName(),
+                    Tonemap.SDR_CONTROLS.getOrDefault(mode, List.of()));
+        }
+        engine.store().apply(CausticaConfig.FEATURE, RendererOptions.Rt.Hdr.ENABLED, true);
+        for (RtToneMapping.HdrMode mode : RtToneMapping.HdrMode.values()) {
+            engine.store().apply(CausticaConfig.FEATURE, Tonemap.HDR_MAPPER, mode.configName());
+            assertMapperSection(CausticaPages.toneMapping(engine), "hdr", mode.configName(),
+                    Tonemap.HDR_CONTROLS.getOrDefault(mode, List.of()));
+        }
+    }
+
+    private static void assertMapperSection(SettingsPage page, String path, String mapper,
+                                            List<Option<Float>> controls) {
+        if (controls.isEmpty()) {
+            assertEquals(List.of(path + "-output"), sectionIds(page), mapper);
+            return;
+        }
+        assertEquals(List.of(path + "-output", path + "." + mapper), sectionIds(page), mapper);
+        SettingGroup section = page.sections().getLast();
+        assertEquals(controls.stream().map(Option::id).toList(), ids(section), mapper);
+        TranslatableContents title = (TranslatableContents) section.title().getContents();
+        assertEquals("caustica.page.tone-mapping.mapper", title.getKey());
+        assertEquals("caustica.setting." + path + ".tone-mapper." + mapper,
+                ((TranslatableContents) ((Component) title.getArgs()[0]).getContents()).getKey());
+        assertTrue(ids(page.sections().getFirst()).stream().noneMatch(id -> id.startsWith(path + "." + mapper)),
+                mapper);
     }
 
     @Test
@@ -134,12 +199,16 @@ final class CausticaPagesTest {
         assertFalse(ids(rayReconstruction).contains("dlss-rr.preset"));
     }
 
-    /** Every page in every HDR and denoiser state, so rows that appear conditionally are included. */
+    /** Every page in every HDR, tone-mapper and denoiser state, so rows that appear conditionally are included. */
     static List<SettingsPage> everyPageState(CausticaPages.Engine engine) {
         List<SettingsPage> pages = new ArrayList<>();
         for (boolean hdr : List.of(false, true)) {
             engine.store().apply(CausticaConfig.FEATURE, RendererOptions.Rt.Hdr.ENABLED, hdr);
-            pages.add(CausticaPages.toneMapping(engine));
+            Option<String> selector = hdr ? Tonemap.HDR_MAPPER : Tonemap.SDR_MAPPER;
+            for (String mapper : selector.choices()) {
+                engine.store().apply(CausticaConfig.FEATURE, selector, mapper);
+                pages.add(CausticaPages.toneMapping(engine));
+            }
         }
         for (Object route : RendererOptions.Rt.Denoising.ROUTE.choices()) {
             engine.store().apply(CausticaConfig.FEATURE, RendererOptions.Rt.Denoising.ROUTE, route);
@@ -161,7 +230,8 @@ final class CausticaPagesTest {
 
         List<String> missing = new ArrayList<>();
         for (Option<?> option : MinecraftOptions.allSettings()) {
-            boolean pageOwned = List.of("exposure.", "tonemap.", "hdr.").stream().anyMatch(option.id()::startsWith);
+            boolean pageOwned = List.of("exposure.", "tonemap.", "sdr.", "hdr.").stream()
+                    .anyMatch(option.id()::startsWith);
             boolean hasRow = OptionControls.of(store, CausticaConfig.FEATURE, option) != null;
             if (hasRow && (option.group() != null || pageOwned) && !reachable.contains(option.id())) {
                 missing.add(option.id());
@@ -216,8 +286,7 @@ final class CausticaPagesTest {
 
     @Test
     void aRendererPageWithoutRowsGetsNoButton() {
-        SettingsRegistry registry = new SettingsRegistry();
-        registry.feature(CausticaConfig.FEATURE).options(List.of(HDR, ROUTE)).register();
+        SettingsRegistry registry = registry(HDR, Tonemap.SDR_MAPPER, Tonemap.HDR_MAPPER, ROUTE);
         CausticaOptions store = CausticaOptions.load(directory.resolve("sparse.toml"), registry);
         List<CausticaPages.Link> links = CausticaPages.links(registry, store, ignored -> true);
         assertEquals(List.of("tone-mapping", "upscaling"), links.stream().map(CausticaPages.Link::id).toList());
@@ -239,7 +308,8 @@ final class CausticaPagesTest {
 
     @Test
     void resettingAPageRestoresEveryEditableRow() {
-        CausticaPages.Engine engine = synthetic(ignored -> true, HDR, CONTRAST, PAPER_WHITE, KEY, FUTURE_METER);
+        CausticaPages.Engine engine = lutMappers(synthetic(ignored -> true, HDR, Tonemap.SDR_MAPPER,
+                Tonemap.HDR_MAPPER, CONTRAST, PAPER_WHITE, KEY, FUTURE_METER));
         engine.store().apply(CausticaConfig.FEATURE, HDR, true);
         engine.store().apply(CausticaConfig.FEATURE, PAPER_WHITE, 300f);
         engine.store().apply(CausticaConfig.FEATURE, KEY, 0.5f);
@@ -252,5 +322,17 @@ final class CausticaPagesTest {
         assertEquals(0.18f, engine.value(KEY));
         assertEquals(0.5f, engine.value(FUTURE_METER));
         assertEquals(List.of("sdr-output"), sectionIds(CausticaPages.toneMapping(engine)));
+    }
+
+    @Test
+    void resettingTheToneMappingPageRestoresTheMapperAndItsControls() {
+        CausticaPages.Engine engine = renderer();
+        Option<Float> saturation = Tonemap.SDR_CONTROLS.get(RtToneMapping.SdrMode.AGX).getLast();
+        engine.store().apply(CausticaConfig.FEATURE, Tonemap.SDR_MAPPER, RtToneMapping.SdrMode.AGX.configName());
+        engine.store().apply(CausticaConfig.FEATURE, saturation, 2.0f);
+        CausticaPages.toneMapping(engine).reset();
+
+        assertEquals(Tonemap.SDR_MAPPER.defaultValue(), engine.value(Tonemap.SDR_MAPPER));
+        assertEquals(saturation.defaultValue(), engine.value(saturation));
     }
 }

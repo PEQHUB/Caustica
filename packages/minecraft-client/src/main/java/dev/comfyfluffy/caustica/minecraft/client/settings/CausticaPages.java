@@ -3,6 +3,8 @@ package dev.comfyfluffy.caustica.minecraft.client.settings;
 import dev.comfyfluffy.caustica.minecraft.client.MinecraftDisplayText;
 import dev.comfyfluffy.caustica.minecraft.client.config.CausticaConfig;
 import dev.comfyfluffy.caustica.minecraft.client.config.CausticaOptions;
+import dev.comfyfluffy.caustica.renderer.presentation.RtToneMapping;
+import dev.comfyfluffy.caustica.renderer.runtime.RendererOptions.Rt.Tonemap;
 import dev.comfyfluffy.caustica.settings.DisplayText;
 import dev.comfyfluffy.caustica.settings.FeatureSettings;
 import dev.comfyfluffy.caustica.settings.Option;
@@ -13,8 +15,11 @@ import net.minecraft.network.chat.ComponentUtils;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.Set;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 /**
  * Derives the Video Settings section and the options pages from the registered settings. Nothing here knows
@@ -22,9 +27,9 @@ import java.util.function.Supplier;
  *
  * <p>Renderer pages select rows by option id prefix, so an option declared under a prefix a page owns appears
  * there without a UI change; a page lists its everyday rows by id and folds every other row it owns into an
- * advanced section. Grouped renderer rows no page owns land on the Overlays & Debug page under their group
- * titles, and every other feature gets one page built from its declared groups. A page without rows gets no
- * button.
+ * advanced section. The Tone Mapping page takes the selected mapper's controls from the renderer's per-mapper
+ * lists. Grouped renderer rows no page owns land on the Overlays & Debug page under their group titles, and
+ * every other feature gets one page built from its declared groups. A page without rows gets no button.
  */
 public final class CausticaPages {
     /** The master switch, which Video Settings gives a whole row. */
@@ -38,7 +43,12 @@ public final class CausticaPages {
     private static final List<String> EXPOSURE_EVERYDAY = List.of("exposure.mode", "exposure.manual-ev",
             "exposure.key", "exposure.adapt-darken", "exposure.adapt-brighten");
 
-    private static final Predicate<Option<?>> TONE_MAPPING = prefix("tonemap.", "hdr.");
+    /** Every per-mapper control of both outputs; the Tone Mapping page shows the selected mapper's only. */
+    private static final Set<String> MAPPER_CONTROLS = Stream.concat(Tonemap.SDR_CONTROLS.values().stream(),
+            Tonemap.HDR_CONTROLS.values().stream()).flatMap(List::stream).map(Option::id)
+            .collect(Collectors.toUnmodifiableSet());
+
+    private static final Predicate<Option<?>> TONE_MAPPING = prefix("tonemap.", "sdr.", "hdr.");
     private static final Predicate<Option<?>> EXPOSURE = prefix("exposure.");
     private static final Predicate<Option<?>> RAY_RECONSTRUCTION = grouped(prefix("dlss-rr."));
     private static final Predicate<Option<?>> NRD = grouped(prefix("denoising."))
@@ -104,19 +114,34 @@ public final class CausticaPages {
     }
 
     /**
-     * HDR Output, the rows of the output path it selects, and the display transform's shared rows. The HDR
-     * path applies only while HDR is requested and the swapchain can present it.
+     * The output path's tone mapper on a whole row, HDR Output, the path's own rows and the display transform's
+     * shared rows, then the selected mapper's controls in their declared order. The HDR path applies only while
+     * HDR is requested and the swapchain can present it.
      */
     static SettingsPage toneMapping(Engine engine) {
         boolean hdr = engine.hdrActive();
-        String path = hdr ? "hdr-output" : "sdr-output";
-        List<SettingControl> rows = new ArrayList<>();
-        rows.add(engine.control(engine.option(HDR_ENABLED)));
-        rows.addAll(engine.controls(option -> option.id().startsWith("tonemap.")
-                || hdr && option.id().startsWith("hdr.") && !option.id().equals(HDR_ENABLED)));
+        String path = hdr ? "hdr" : "sdr";
+        Option<String> selector = hdr ? Tonemap.HDR_MAPPER : Tonemap.SDR_MAPPER;
+        String mapper = (String) engine.value(selector);
+        List<SettingControl> output = new ArrayList<>();
+        output.add(engine.control(selector));
+        output.add(engine.control(engine.option(HDR_ENABLED)));
+        output.addAll(engine.controls(option -> (option.id().startsWith("tonemap.")
+                || option.id().startsWith(path + "."))
+                && !option.id().equals(selector.id()) && !option.id().equals(HDR_ENABLED)
+                && !MAPPER_CONTROLS.contains(option.id())));
+        List<Option<Float>> controls = hdr
+                ? Tonemap.HDR_CONTROLS.getOrDefault(RtToneMapping.HdrMode.of(mapper), List.of())
+                : Tonemap.SDR_CONTROLS.getOrDefault(RtToneMapping.SdrMode.of(mapper), List.of());
+
         List<SettingGroup> sections = new ArrayList<>();
-        section(sections, path, title("tone-mapping", path), rows);
-        return page("tone-mapping", sections);
+        section(sections, path + "-output", title("tone-mapping", path + "-output"), output);
+        section(sections, path + "." + mapper,
+                Component.translatable("caustica.page.tone-mapping.mapper",
+                        LangKeys.optionChoice(CausticaConfig.FEATURE, selector, mapper)),
+                controls.stream().map(engine::control).toList());
+        return new SettingsPage("tone-mapping", Component.translatable("caustica.page.tone-mapping"), sections,
+                Set.of(selector.id()));
     }
 
     /** Mode, compensation and adaptation; the meter's internals are folded under Advanced. */

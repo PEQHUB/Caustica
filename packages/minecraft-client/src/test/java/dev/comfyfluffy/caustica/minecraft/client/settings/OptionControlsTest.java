@@ -5,6 +5,7 @@ import dev.comfyfluffy.caustica.minecraft.client.MinecraftOptions;
 import dev.comfyfluffy.caustica.minecraft.client.MinecraftProvidersExtension;
 import dev.comfyfluffy.caustica.minecraft.client.config.CausticaConfig;
 import dev.comfyfluffy.caustica.minecraft.client.config.CausticaOptions;
+import dev.comfyfluffy.caustica.renderer.presentation.RtToneMapping;
 import dev.comfyfluffy.caustica.renderer.presentation.fog.FogPass;
 import dev.comfyfluffy.caustica.renderer.runtime.RendererOptions;
 import dev.comfyfluffy.caustica.settings.Option;
@@ -143,6 +144,10 @@ final class OptionControlsTest {
             assertEquals("1.25", format(store, renderer, RendererOptions.Rt.Tonemap.GAMMA, 1.25));
             assertEquals("Transmittance", format(store, MinecraftProvidersExtension.ID, FogPass.DEBUG, 1));
             assertEquals("64", format(store, MinecraftProvidersExtension.ID, FogPass.SAMPLES, 64));
+            var psychov30 = RendererOptions.Rt.Tonemap.SDR_CONTROLS.get(RtToneMapping.SdrMode.PSYCHOV30).getFirst();
+            assertEquals("Automatic", format(store, renderer, psychov30, 0));
+            assertEquals("1.2", format(store, renderer, psychov30, 1.2));
+            assertEquals("200 nits", format(store, renderer, RendererOptions.Rt.Tonemap.PAPER_WHITE_NITS, 200));
         }
     }
 

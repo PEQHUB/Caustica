@@ -48,16 +48,22 @@ final class CaptionFitTest {
         return registry;
     }
 
-    /** Every page in every HDR and denoiser state. */
+    /** Every page in every HDR, tone-mapper and denoiser state. */
     private static List<SettingsPage> pages(SettingsRegistry registry, CausticaOptions store) {
         List<CausticaPages.Link> links = CausticaPages.links(registry, store, ALL);
         List<SettingsPage> pages = new ArrayList<>();
         for (boolean hdr : List.of(false, true)) {
             store.apply(CausticaConfig.FEATURE, RendererOptions.Rt.Hdr.ENABLED, hdr);
-            for (Object route : RendererOptions.Rt.Denoising.ROUTE.choices()) {
-                store.apply(CausticaConfig.FEATURE, RendererOptions.Rt.Denoising.ROUTE, route);
+            Option<String> selector = hdr ? RendererOptions.Rt.Tonemap.HDR_MAPPER
+                    : RendererOptions.Rt.Tonemap.SDR_MAPPER;
+            for (String mapper : selector.choices()) {
+                store.apply(CausticaConfig.FEATURE, selector, mapper);
                 links.forEach(link -> pages.add(link.page().get()));
             }
+        }
+        for (Object route : RendererOptions.Rt.Denoising.ROUTE.choices()) {
+            store.apply(CausticaConfig.FEATURE, RendererOptions.Rt.Denoising.ROUTE, route);
+            links.forEach(link -> pages.add(link.page().get()));
         }
         return pages;
     }

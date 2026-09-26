@@ -31,9 +31,9 @@ import java.util.stream.Stream;
  * a non-default value; that slot is why this is not vanilla's list, whose rows hold exactly two widgets.
  *
  * <p>A section's whole-row controls come first and the rest follow in pairs, so rows never alternate between
- * widths. A control is whole-row when its longest caption would not fit half a row, measured with the active
- * font and language and again whenever the window resizes. Advanced sections start folded behind one button;
- * which ones the player unfolded is kept for the rest of the session.
+ * widths. A control is whole-row when the page asks for it or when its longest caption would not fit half a
+ * row, measured with the active font and language and again whenever the window resizes. Advanced sections
+ * start folded behind one button; which ones the player unfolded is kept for the rest of the session.
  */
 final class CausticaPageList extends ContainerObjectSelectionList<CausticaPageList.Row> {
     private static final int ROW_HEIGHT = 25;
@@ -84,7 +84,8 @@ final class CausticaPageList extends ContainerObjectSelectionList<CausticaPageLi
         setFocused(null);
         clearEntries();
         int half = controlWidth(getRowWidth(), false);
-        Predicate<SettingControl> whole = control -> captionWidth(control, minecraft.font::width) > half;
+        Predicate<SettingControl> whole = control -> page.wide().contains(control.id())
+                || captionWidth(control, minecraft.font::width) > half;
         for (SettingGroup section : page.sections()) {
             if (section.advanced()) {
                 String key = page.id() + "/" + section.id();
