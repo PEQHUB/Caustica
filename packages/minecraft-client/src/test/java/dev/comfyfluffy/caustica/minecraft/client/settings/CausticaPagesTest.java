@@ -165,7 +165,8 @@ final class CausticaPagesTest {
         SettingGroup advanced = section(page, "exposure.advanced");
         assertFalse(basic.advanced());
         assertTrue(advanced.advanced());
-        assertEquals(List.of("exposure.mode", "exposure.manual-ev", "exposure.key", "exposure.adapt-darken",
+        assertEquals(List.of("exposure.mode", "exposure.response", "exposure.manual-ev", "exposure.key",
+                "exposure.adapt-darken",
                 "exposure.adapt-brighten"), ids(basic));
         assertEquals(List.of("exposure.low-percentile", "exposure.high-percentile", "exposure.stride",
                 "exposure.center-weight-sigma", "exposure.center-weight-floor", "exposure.environment-weight-cap",
