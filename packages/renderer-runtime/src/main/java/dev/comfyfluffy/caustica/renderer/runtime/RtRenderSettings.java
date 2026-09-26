@@ -59,6 +59,7 @@ public record RtRenderSettings(int debugView, int maxBounces, float jitterSignX,
     private static RtExposure.Settings exposure(OptionValues options) {
         return new RtExposure.Settings(
                 options.get(RendererOptions.Rt.Exposure.MODE),
+                options.get(RendererOptions.Rt.Exposure.RESPONSE),
                 options.get(RendererOptions.Rt.Exposure.MANUAL_EV),
                 options.get(RendererOptions.Rt.Exposure.KEY),
                 options.get(RendererOptions.Rt.Exposure.ADAPT_DARKEN),
