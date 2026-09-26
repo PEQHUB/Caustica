@@ -175,8 +175,8 @@ public final class SlangRuntime {
             throw new IllegalStateException("Bundled Slang runtime manifest identity mismatch");
         }
 
-        Path directory = config.extractionRoot()
-                .resolve(version).resolve(platform.resourceName()).resolve(manifest.bundleSha256());
+        Path directory = extractionDirectory(config.extractionRoot(), version, platform,
+                manifest.bundleSha256());
         try {
             Files.createDirectories(directory);
             for (SlangRuntimeManifest.FileEntry file : manifest.files()) {
@@ -194,6 +194,15 @@ public final class SlangRuntime {
         } catch (IOException e) {
             throw new IllegalStateException("Could not extract bundled Slang runtime to " + directory, e);
         }
+    }
+
+    /**
+     * The bundle's directory under {@code root}, named by a 16-hex-digit prefix of its digest. Windows loads a
+     * DLL only from a path shorter than 260 characters and the root sits inside a launcher's game directory, so
+     * the name stays short; every extracted file is still verified against its full digest.
+     */
+    static Path extractionDirectory(Path root, String version, SlangPlatform platform, String bundleSha256) {
+        return root.resolve(version).resolve(platform.resourceName()).resolve(bundleSha256.substring(0, 16));
     }
 
     private static String bundledVersion() {
