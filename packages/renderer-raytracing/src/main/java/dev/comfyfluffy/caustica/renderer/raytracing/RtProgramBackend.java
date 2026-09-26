@@ -12,6 +12,7 @@ import dev.comfyfluffy.caustica.engine.program.ProgramComposition;
 import dev.comfyfluffy.caustica.renderer.raytracing.layout.RtBindings;
 import dev.comfyfluffy.caustica.renderer.raytracing.pipeline.RtPipeline;
 import dev.comfyfluffy.caustica.renderer.raytracing.pipeline.RtShaderCode;
+import dev.comfyfluffy.caustica.renderer.raytracing.pipeline.RtSharcResolve;
 import dev.comfyfluffy.caustica.renderer.raytracing.shader.ShaderBinaryCache;
 import dev.comfyfluffy.caustica.renderer.raytracing.shader.WorldShaderCompiler;
 import dev.comfyfluffy.caustica.slang.SlangRuntime;
@@ -40,6 +41,9 @@ public final class RtProgramBackend implements ProgramBackend, AutoCloseable {
     public static final int VISIBILITY_RAYGEN_INDEX = 2;
     public static final int VOLUME_LIGHTING_RAYGEN_INDEX = 3;
     public static final int RESOLVE_STABLE_PLANES_RAYGEN_INDEX = 4;
+    /** SHaRC fill variants; they share the world pipeline because its hit table holds this pipeline's handles. */
+    public static final int SHARC_QUERY_RAYGEN_INDEX = 5;
+    public static final int SHARC_UPDATE_RAYGEN_INDEX = 6;
     private static final AtomicInteger THREAD_ID = new AtomicInteger();
     /** Concurrent stage compiles; each compiles on its own Slang runtime. */
     private static final int STAGE_COMPILERS = 4;
@@ -47,6 +51,7 @@ public final class RtProgramBackend implements ProgramBackend, AutoCloseable {
     private final VulkanDeviceContext context;
     private final SlangRuntime slangRuntime;
     private final Path cacheRoot;
+    private final Path sharcHeaders;
     private final ExecutorService compiler = Executors.newSingleThreadExecutor(task -> {
         Thread thread = new Thread(task, "Caustica program compiler-" + THREAD_ID.incrementAndGet());
         thread.setDaemon(true);
@@ -65,11 +70,24 @@ public final class RtProgramBackend implements ProgramBackend, AutoCloseable {
     /**
      * Compiles world programs from temporary source trees under {@code cacheRoot} and keeps their SPIR-V
      * across launches in its sibling {@code spirv} directory.
+     *
+     * @param sharcHeaders verified SHaRC SDK headers, or null. Programs carry the SHaRC stages when the
+     *                     headers are given and the device enabled the buffer int64 atomics and 16-bit
+     *                     storage those stages declare.
      */
-    public RtProgramBackend(VulkanDeviceContext context, SlangRuntime slangRuntime, Path cacheRoot) {
+    public RtProgramBackend(VulkanDeviceContext context, SlangRuntime slangRuntime, Path cacheRoot,
+                            Path sharcHeaders) {
         this.context = Objects.requireNonNull(context, "context");
         this.slangRuntime = Objects.requireNonNull(slangRuntime, "slangRuntime");
         this.cacheRoot = Objects.requireNonNull(cacheRoot, "cacheRoot").toAbsolutePath().normalize();
+        var capabilities = context.backend().capabilities();
+        this.sharcHeaders = capabilities.shaderBufferInt64Atomics() && capabilities.storageBuffer16BitAccess()
+                ? sharcHeaders : null;
+    }
+
+    /** Whether every program of this backend carries the SHaRC fill variants and resolve. */
+    public boolean compilesSharc() {
+        return sharcHeaders != null;
     }
 
     @Override
@@ -165,6 +183,7 @@ public final class RtProgramBackend implements ProgramBackend, AutoCloseable {
         WorldShaderCompiler shaderCompiler = null;
         VmaMappedBuffer table = null;
         RtPipeline pipeline = null;
+        RtSharcResolve sharcResolve = null;
         try {
             if (binaries == null) {
                 binaries = ShaderBinaryCache.open(cacheRoot.resolveSibling("spirv"), slangRuntime.compilerIdentity());
@@ -172,15 +191,21 @@ public final class RtProgramBackend implements ProgramBackend, AutoCloseable {
             List<SlangRuntime> runtimes = new ArrayList<>(STAGE_COMPILERS);
             runtimes.add(slangRuntime);
             runtimes.addAll(slangRuntime.siblings(STAGE_COMPILERS - 1));
-            WorldShaderCompiler stages = WorldShaderCompiler.createIsolated(runtimes, cacheRoot, composition, binaries);
+            WorldShaderCompiler stages = WorldShaderCompiler.createIsolated(runtimes, cacheRoot, composition, binaries,
+                    sharcHeaders);
             shaderCompiler = stages;
             List<Long> data = stages.implementationData();
             table = createImplementationTable(data);
             boolean reordered = context.backend().capabilities().shaderExecutionReordering();
+            boolean sharc = sharcHeaders != null;
             List<Future<RtShaderCode>> submitted = new ArrayList<>();
             // Longest compiles first, so the slowest stages start immediately.
             Future<RtShaderCode> fill = submitStage(submitted, "fill-stable-planes",
                     () -> stages.compileFillStablePlanes(reordered));
+            Future<RtShaderCode> sharcQuery = sharc ? submitStage(submitted, "fill-sharc-query",
+                    () -> stages.compileSharcFill(reordered, false)) : null;
+            Future<RtShaderCode> sharcUpdate = sharc ? submitStage(submitted, "fill-sharc-update",
+                    () -> stages.compileSharcFill(reordered, true)) : null;
             Future<RtShaderCode> build = submitStage(submitted, "build-stable-planes",
                     stages::compileBuildStablePlanes);
             Future<RtShaderCode> volumeLighting = submitStage(submitted, "volume-lighting",
@@ -191,15 +216,22 @@ public final class RtProgramBackend implements ProgramBackend, AutoCloseable {
                     () -> stages.compilePlain("resolve_stable_planes.slang", WorldShaderCompiler.ENTRY_POINT));
             Future<RtShaderCode> environment = submitStage(submitted, "environment", stages::compileEnvironmentMiss);
             Future<RtShaderCode> closest = submitStage(submitted, "closest-hit", stages::compileClosestHit);
+            Future<RtShaderCode> sharcResolveCode = sharc
+                    ? submitStage(submitted, "sharc-resolve", stages::compileSharcResolve) : null;
             awaitStages(submitted);
-            pipeline = RtPipeline.create(context,
-                    new RtShaderCode[]{build.resultNow(), fill.resultNow(), visibility.resultNow(),
-                            volumeLighting.resultNow(), resolve.resultNow()},
-                    new RtShaderCode[]{environment.resultNow()},
+            RtShaderCode[] raygens = sharc
+                    ? new RtShaderCode[]{build.resultNow(), fill.resultNow(), visibility.resultNow(),
+                            volumeLighting.resultNow(), resolve.resultNow(), sharcQuery.resultNow(),
+                            sharcUpdate.resultNow()}
+                    : new RtShaderCode[]{build.resultNow(), fill.resultNow(), visibility.resultNow(),
+                            volumeLighting.resultNow(), resolve.resultNow()};
+            if (sharc) sharcResolve = RtSharcResolve.create(context, sharcResolveCode.resultNow().spirv());
+            pipeline = RtPipeline.create(context, raygens, new RtShaderCode[]{environment.resultNow()},
                     closest.resultNow(), radiance.resultNow());
-            return new Candidate(composition, shaderCompiler, table, pipeline);
+            return new Candidate(composition, shaderCompiler, table, pipeline, sharcResolve);
         } catch (IOException | RuntimeException | Error failure) {
             if (pipeline != null) pipeline.destroy();
+            if (sharcResolve != null) sharcResolve.destroy();
             if (table != null) table.close();
             if (shaderCompiler != null) shaderCompiler.close();
             throw failure;
@@ -252,6 +284,8 @@ public final class RtProgramBackend implements ProgramBackend, AutoCloseable {
         ProgramComposition composition();
         RtPipeline pipeline();
         VulkanDeviceAddress compositionDataAddress();
+        /** The SHaRC resolve, or null for a program without the SHaRC stages. */
+        default RtSharcResolve sharcResolve() { return null; }
 
         default int resolve(SurfaceId<?, ?> id) { return composition().resolve(id); }
         default int resolve(VolumeId<?, ?> id) { return composition().resolve(id); }
@@ -275,21 +309,24 @@ public final class RtProgramBackend implements ProgramBackend, AutoCloseable {
         private final WorldShaderCompiler compiler;
         private final VmaMappedBuffer table;
         private final RtPipeline pipeline;
+        private final RtSharcResolve sharcResolve;
         private final SharedResource<Published> lifetime;
         private Runnable retired = () -> { };
         private CandidateState state = CandidateState.CANDIDATE;
 
         private Candidate(ProgramComposition composition, WorldShaderCompiler compiler,
-                          VmaMappedBuffer table, RtPipeline pipeline) {
+                          VmaMappedBuffer table, RtPipeline pipeline, RtSharcResolve sharcResolve) {
             this.composition = composition;
             this.compiler = compiler;
             this.table = table;
             this.pipeline = pipeline;
+            this.sharcResolve = sharcResolve;
             lifetime = SharedResource.owned(this, ignored -> context.deferDestroy(this::destroy));
         }
 
         @Override public ProgramComposition composition() { return composition; }
         @Override public RtPipeline pipeline() { return pipeline; }
+        @Override public RtSharcResolve sharcResolve() { return sharcResolve; }
         @Override public VulkanDeviceAddress compositionDataAddress() { return table.deviceRange().address(); }
 
         @Override public void close() {
@@ -306,6 +343,7 @@ public final class RtProgramBackend implements ProgramBackend, AutoCloseable {
         private void destroy() {
             try (compiler; table) {
                 pipeline.destroy();
+                if (sharcResolve != null) sharcResolve.destroy();
             } finally {
                 retired.run();
             }

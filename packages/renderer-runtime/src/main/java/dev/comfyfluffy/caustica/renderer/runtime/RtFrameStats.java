@@ -48,6 +48,8 @@ public final class RtFrameStats {
             "frame.environmentLut",
             "frame.buildStablePlanes",
             "frame.fillStablePlanes",
+            "frame.sharcUpdate",
+            "frame.sharcResolve",
             "frame.bakeLocal",
             "frame.exposure",
             "frame.dlssRr",

@@ -32,6 +32,7 @@ import dev.comfyfluffy.caustica.renderer.runtime.RtTelemetry;
 import dev.comfyfluffy.caustica.renderer.runtime.pass.RtPassSchedulerBackend;
 import dev.comfyfluffy.caustica.renderer.raytracing.RtProgramBackend;
 import dev.comfyfluffy.caustica.renderer.raytracing.scene.RtRetainedSceneBackend;
+import dev.comfyfluffy.caustica.renderer.raytracing.shader.SharcSdk;
 import dev.comfyfluffy.caustica.spi.vulkan.GraphicsSubmission;
 import dev.comfyfluffy.caustica.spi.vulkan.VulkanRendererBackend;
 import dev.comfyfluffy.caustica.spi.host.RuntimeHost;
@@ -189,8 +190,17 @@ public final class MinecraftRtRuntime {
     public boolean swapchainPqAvailable() { return swapchainPqAvailable; }
     public boolean hdrEnabled() { return swapchainPqActive && settings.get(RendererOptions.Rt.Hdr.ENABLED); }
     public boolean settingAvailable(Option<?> option) {
+        if (RendererOptions.Rt.Sharc.OPTIONS.contains(option)) return sharcAvailable();
         return (option != RendererOptions.Rt.Hdr.ENABLED && option != RendererOptions.Rt.Hdr.UI_NITS
                 && option != RendererOptions.Rt.Hdr.PEAK_NITS) || swapchainPqAvailable;
+    }
+
+    /** SHaRC runs in a build whose SHaRC headers verified, on a device that enabled their features. */
+    private boolean sharcAvailable() {
+        VulkanDeviceContext context = vulkanContextOrNull();
+        return SharcSdk.includeDirectory() != null && context != null
+                && context.backend().capabilities().shaderBufferInt64Atomics()
+                && context.backend().capabilities().storageBuffer16BitAccess();
     }
 
     private NgxRuntime requireNgxRuntime() {
@@ -669,7 +679,8 @@ public final class MinecraftRtRuntime {
                 requireNgxRuntime().beginActivation();
                 programs = new RtProgramBackend(context,
                         slangRuntime,
-                        shaderCacheRoot);
+                        shaderCacheRoot,
+                        SharcSdk.includeDirectory());
                 scenes = new RtRetainedSceneBackend(context);
                 passes = new RtPassSchedulerBackend(context,
                         org.lwjgl.vulkan.VK10.VK_FORMAT_R16G16B16A16_SFLOAT,

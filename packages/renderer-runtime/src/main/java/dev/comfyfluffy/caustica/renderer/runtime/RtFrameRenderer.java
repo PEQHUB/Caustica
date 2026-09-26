@@ -24,6 +24,7 @@ import dev.comfyfluffy.caustica.engine.frame.FrameSnapshot;
 import dev.comfyfluffy.caustica.engine.resource.ResourceOwners;
 import dev.comfyfluffy.caustica.engine.scene.SceneOrigin;
 import dev.comfyfluffy.caustica.engine.session.EngineSessionServices;
+import dev.comfyfluffy.caustica.renderer.raytracing.gen.SharcFrameData;
 import dev.comfyfluffy.caustica.renderer.raytracing.gen.WorldPushData;
 import dev.comfyfluffy.caustica.renderer.raytracing.gen.WorldPushData.Float2;
 import dev.comfyfluffy.caustica.renderer.raytracing.gen.WorldPushData.Float3;
@@ -117,6 +118,8 @@ public final class RtFrameRenderer {
         RtRetainedSceneBackend.PreparedTrace trace;
         RtProgramBackend.Published program;
         VulkanDeviceAddress worldPushAddress;
+        // This frame's SharcFrame, or null when the frame does not use the SHaRC cache.
+        VulkanDeviceAddress sharcFrameAddress;
 
         FrameExecution(GraphicsUse graphicsUse) {
             this.graphicsUse = graphicsUse;
@@ -481,6 +484,8 @@ public final class RtFrameRenderer {
             resetSceneHistory();
         }
         reconstruction.ensureBackend(traceExtent());
+        frameResources.ensureSharc(context, settings.sharc().enabled() && programs.compilesSharc(),
+                settings.sharc().cacheExponent());
     }
 
     /**
@@ -499,6 +504,8 @@ public final class RtFrameRenderer {
     /** Invalidate renderer state that cannot cross a provider-requested scene discontinuity. */
     public void resetSceneHistory() {
         resetExposureHistory();
+        RtSharcCache sharc = frameResources.sharc();
+        if (sharc != null) sharc.requestReset();
         reconstruction.resetHistory();
         presenter.resetSceneHistory();
         history.reset();
@@ -663,6 +670,18 @@ public final class RtFrameRenderer {
             execution.trace = trace;
             execution.program = program;
             execution.worldPushAddress = pushBuf.deviceAddress();
+            // Tables exist only while the cache is on for a backend whose programs carry the SHaRC stages.
+            RtSharcCache sharc = frameResources.sharc();
+            execution.sharcFrameAddress = null;
+            if (sharc != null) {
+                Float3 offset = frame.cameraOffset();
+                SharcFrameData.Float3 camera = new SharcFrameData.Float3(offset.x(), offset.y(), offset.z());
+                SharcFrameData.Float3 previousCamera = sharc.beginFrame(sceneOrigin, camera, settings.sharc());
+                GpuBuffer sharcFrame = sharc.writeFrame(ctx, (int) frameCounter, camera, previousCamera,
+                        frame.preExposure(), traceExtent().renderWidth(), traceExtent().renderHeight());
+                graphicsUse.whenComplete(sharcFrame::destroy);
+                execution.sharcFrameAddress = sharcFrame.deviceAddress();
+            }
             ByteBuffer roots = stack.calloc(RtBindings.WORLD_PUSH_CONSTANT_SIZE).order(ByteOrder.nativeOrder());
             writeFrameRoots(roots, pushBuf.deviceAddress(), snapshot, pathScratch, program);
             program.writeCompositionDataAddress(roots);
@@ -689,6 +708,29 @@ public final class RtFrameRenderer {
                 scenes.bakeLocal(lighting, cmd,
                         storageIndex(traceImages().nrdViewZ()), storageIndex(traceImages().motion()));
             }
+            if (sharc != null) {
+                // SHaRC update -> resolve -> query: the resolve drains the update's accumulation into
+                // the resolved table that the query fill reads, so each pass waits for the one before.
+                sharc.recordPendingClear(cmd);
+                VulkanBarriers.memoryBarrier(cmd, stack);
+                try (var gpu = commands.time("SHaRC sparse update");
+                     var ignored = RtDebugLabels.scope(ctx, cmd, "SHaRC sparse update");
+                     RtTelemetry.Scope ignoredStats = telemetry.frame().stage("frame.sharcUpdate")) {
+                    int tile = settings.sharc().updateTileSize();
+                    program.pipeline().trace(cmd, Math.ceilDiv(traceExtent().renderWidth(), tile),
+                            Math.ceilDiv(traceExtent().renderHeight(), tile), roots,
+                            RtProgramBackend.SHARC_UPDATE_RAYGEN_INDEX, trace.hitTable());
+                }
+                VulkanBarriers.memoryBarrier(cmd, stack);
+                try (var gpu = commands.time("SHaRC resolve");
+                     var ignored = RtDebugLabels.scope(ctx, cmd, "SHaRC resolve");
+                     RtTelemetry.Scope ignoredStats = telemetry.frame().stage("frame.sharcResolve")) {
+                    program.sharcResolve().dispatch(cmd, execution.sharcFrameAddress, sharc.capacity());
+                }
+                VulkanBarriers.memoryBarrier(cmd, stack);
+            }
+            // The first frames after a cache reset trace the ordinary fill while the cache warms up.
+            int fillRaygen = sharc != null && sharc.queryReady() ? RtProgramBackend.SHARC_QUERY_RAYGEN_INDEX : 1;
             RtShadowDiagnostics.Reservation shadowCounters = null;
             if (RtShadowDiagnostics.ENABLED) {
                 shadowCounters = shadowDiagnostics.begin(ctx, cmd, stack, graphicsUse, telemetry.frameSerial(), "fill stable planes");
@@ -698,7 +740,7 @@ public final class RtFrameRenderer {
                  var ignored = RtDebugLabels.scope(ctx, cmd, "fill stable planes");
                  RtTelemetry.Scope ignoredStats = telemetry.frame().stage("frame.fillStablePlanes")) {
                 program.pipeline().trace(cmd, traceExtent().renderWidth(), traceExtent().renderHeight(),
-                        RtDenoiserState.PLANE_COUNT, roots, 1, trace.hitTable());
+                        RtDenoiserState.PLANE_COUNT, roots, fillRaygen, trace.hitTable());
             }
             try (var gpu = commands.time("resolve stable planes");
                  var ignored = RtDebugLabels.scope(ctx, cmd, "resolve stable planes")) {
@@ -901,6 +943,8 @@ public final class RtFrameRenderer {
         target.putInt(base + RtBindings.WORLD_NRD_SIGNAL_ENCODING_OFFSET,
                 reconstruction.settings().signalEncoding() == DenoiserSignalEncoding.YCOCG_NORMALIZED_HIT_DISTANCE
                         ? 1 : 0);
+        target.putLong(base + RtBindings.WORLD_SHARC_FRAME_ADDRESS_OFFSET,
+                execution.sharcFrameAddress == null ? 0L : execution.sharcFrameAddress.value());
         ViewMedium medium = snapshot.view().medium();
         int implementation = medium instanceof ViewMedium.Volume<?, ?> volume
                 ? program.resolve(volume.implementation()) : 0;

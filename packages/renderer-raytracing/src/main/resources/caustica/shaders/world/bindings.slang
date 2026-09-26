@@ -60,6 +60,8 @@ public struct WorldBindingRoots {
     public float spatialMediumOriginY;
     public float spatialMediumOriginZ;
     public uint64_t shadowDiagnosticsAddress;
+    // This frame's SharcFrame; only the SHaRC fill variants read it.
+    public uint64_t sharcFrameAddress;
 };
 
 public RaytracingAccelerationStructure worldAccelerationStructure() {
