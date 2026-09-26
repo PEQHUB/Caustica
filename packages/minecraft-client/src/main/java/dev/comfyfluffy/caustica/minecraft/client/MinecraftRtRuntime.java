@@ -665,6 +665,7 @@ public final class MinecraftRtRuntime {
         private void openWorld(long epoch, MinecraftDimensionKey dimension,
                                ResourcePackEpoch resourcePackEpoch) {
             try {
+                requireNgxRuntime().beginActivation();
                 programs = new RtProgramBackend(context,
                         slangRuntime,
                         shaderCacheRoot);
