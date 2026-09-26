@@ -21,6 +21,7 @@ import org.lwjgl.vulkan.VkSemaphoreCreateInfo;
 
 import java.nio.IntBuffer;
 import java.nio.LongBuffer;
+import java.util.Arrays;
 
 import static org.lwjgl.vulkan.KHRSwapchain.VK_ERROR_OUT_OF_DATE_KHR;
 import static org.lwjgl.vulkan.KHRSwapchain.VK_SUBOPTIMAL_KHR;
@@ -128,23 +129,26 @@ final class GeneratedFrameQueue {
         submission.signalSemaphore(presentSemaphore, 0L, VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT);
     }
 
+    /**
+     * Grows the acquire ring for a swapchain with more images. Submitted blits may still wait on the
+     * existing semaphores, so they stay in the ring until {@link #destroy} runs after device idle.
+     */
     private void ensureCapacity(VkDevice device, int semaphoreCount) {
         if (acquireSemaphores.length >= semaphoreCount) {
             return;
         }
-        destroyAcquireSemaphores(device);
-        acquireSemaphores = new long[semaphoreCount];
+        int existing = acquireSemaphores.length;
+        acquireSemaphores = Arrays.copyOf(acquireSemaphores, semaphoreCount);
         try (MemoryStack stack = MemoryStack.stackPush()) {
             VkSemaphoreCreateInfo info = VkSemaphoreCreateInfo.calloc(stack).sType$Default();
             LongBuffer semaphore = stack.mallocLong(1);
-            for (int i = 0; i < semaphoreCount; i++) {
+            for (int i = existing; i < semaphoreCount; i++) {
                 if (VK10.vkCreateSemaphore(device, info, null, semaphore) != VK10.VK_SUCCESS) {
                     throw new IllegalStateException("vkCreateSemaphore(fg acquire) failed");
                 }
                 acquireSemaphores[i] = semaphore.get(0);
             }
         }
-        acquireCursor = 0;
     }
 
     void destroy(VkDevice device) {
