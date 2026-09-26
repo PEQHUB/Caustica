@@ -84,6 +84,7 @@ public final class VulkanDeviceContext implements GpuDevice {
     private final int maxOpacityMicromapSubdivisionLevel;
     private long commandPool;
     private ConventionalDescriptorBindings conventionalBindings;
+    private boolean destroyed;
 
     private VulkanDeviceContext(VulkanRendererBackend host, long vma, VulkanDescriptorHeap descriptorHeap,
                       int handleSize, int baseAlign, int handleAlign,
@@ -581,25 +582,48 @@ public final class VulkanDeviceContext implements GpuDevice {
         }
     }
 
+    /**
+     * Destroys every renderer-owned device object once, before the host destroys the device. Each step
+     * runs even after an earlier one fails, including a lost device, because Vulkan requires child
+     * objects to be destroyed before their device; the first failure is rethrown with the rest suppressed.
+     */
     public void destroy() {
-        gpuExecutor.stop();
-        waitIdle();
+        if (destroyed) return;
+        destroyed = true;
+        Throwable failure = runDestroyStep(null, gpuExecutor::stop);
+        failure = runDestroyStep(failure, this::waitIdle);
+        failure = runDestroyStep(failure, graphics::shutdownAfterDeviceIdle);
+        failure = runDestroyStep(failure, gpuExecutor::destroyAfterDeviceIdle);
+        failure = runDestroyStep(failure, () -> {
+            if (commandPool != 0L) {
+                VK10.vkDestroyCommandPool(vk, commandPool, null);
+                commandPool = 0L;
+            }
+        });
+        failure = runDestroyStep(failure, () -> {
+            if (conventionalBindings != null) conventionalBindings.close();
+        });
+        failure = runDestroyStep(failure, descriptorHeap::close);
+        failure = runDestroyStep(failure, () -> {
+            if (vma != 0L) {
+                VulkanDiagnostics.registerAllocator(0L);
+                Vma.vmaDestroyAllocator(vma);
+            }
+        });
+        failure = runDestroyStep(failure, memoryTelemetry::close);
+        if (failure instanceof RuntimeException runtime) throw runtime;
+        if (failure instanceof Error error) throw error;
+        if (failure != null) throw new IllegalStateException("Vulkan device context teardown failed", failure);
+    }
+
+    private static Throwable runDestroyStep(Throwable primary, Runnable step) {
         try {
-            graphics.shutdownAfterDeviceIdle();
-        } finally {
-            gpuExecutor.destroyAfterDeviceIdle();
+            step.run();
+        } catch (Throwable failure) {
+            if (primary == null) return failure;
+            if (primary != failure) primary.addSuppressed(failure);
         }
-        if (commandPool != 0L) {
-            VK10.vkDestroyCommandPool(vk, commandPool, null);
-            commandPool = 0L;
-        }
-        if (conventionalBindings != null) conventionalBindings.close();
-        descriptorHeap.close();
-        if (vma != 0L) {
-            VulkanDiagnostics.registerAllocator(0L);
-            Vma.vmaDestroyAllocator(vma);
-        }
-        memoryTelemetry.close();
+        return primary;
     }
 
     private void ensurePool() {
