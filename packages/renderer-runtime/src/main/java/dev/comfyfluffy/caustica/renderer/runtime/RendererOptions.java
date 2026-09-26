@@ -272,8 +272,9 @@ public final class RendererOptions {
             private Hdr() { }
             public static final Option<Boolean> ENABLED = bool("caustica.rt.hdr", "hdr.enabled", false).inGroup("output");
             public static final Option<Float> UI_NITS = clampedFloat("caustica.rt.hdr.uiNits", "hdr.ui-nits", 200.0f, 80.0f, 500.0f).inGroup("output");
-            public static final List<Integer> PEAK_NITS_STEPS = List.of(500, 1000, 2000, 4000);
-            public static final Option<Integer> PEAK_NITS = intChoice("caustica.rt.hdr.peakNits", "hdr.peak-nits", 1000, PEAK_NITS_STEPS).inGroup("output");
+            // The display's peak brightness. Analytic HDR mappers target it exactly; ACES 2.0 renders
+            // through the packaged LUT nearest to it (RtToneLut.nearestHdrLutNits).
+            public static final Option<Float> PEAK_NITS = clampedFloat("caustica.rt.hdr.peakNits", "hdr.peak-nits", 1000.0f, 80.0f, 5000.0f).inGroup("output").step(10.0);
         }
 
         /** The SHaRC radiance cache; it runs only in a SHaRC SDK build on a device with its features. */
