@@ -97,7 +97,7 @@ def rayTracingRecordSpecs = [
         "buffer|retainedLightRecordLayoutProbe|RetainedLightRecord|dev.comfyfluffy.caustica.renderer.raytracing.gen|RetainedLightRecordData|false",
         "buffer|neeAtStateLayoutProbe|NeeAtState|dev.comfyfluffy.caustica.renderer.raytracing.gen|NeeAtStateData|false",
         "buffer|packedPathSegmentLayoutProbe|PackedPathSegment|dev.comfyfluffy.caustica.renderer.raytracing.gen|PackedPathSegmentData|false",
-        "buffer|stablePlaneRecordLayoutProbe|StablePlaneRecord|dev.comfyfluffy.caustica.renderer.raytracing.gen|StablePlaneRecordData|false",
+        "buffer|packedStablePlaneLayoutProbe|PackedStablePlane|dev.comfyfluffy.caustica.renderer.raytracing.gen|PackedStablePlaneData|false",
         "push|nrdComposePushProbe|NrdComposePush|dev.comfyfluffy.caustica.renderer.raytracing.gen|NrdComposePushData|false",
         "buffer|nrdPlaneFrameLayoutProbe|NrdPlaneFrame|dev.comfyfluffy.caustica.renderer.raytracing.gen|NrdPlaneFrameData|false"
 ]
@@ -264,7 +264,7 @@ def verifyRendererRayTracingJar = tasks.register("verifyRendererRayTracingJar") 
         } as Set
         def expectedGeneratedTopLevelClasses = ["WorldPushData", "RetainedGeometryRecordData", "RetainedInstanceRecordData",
                 "RetainedLightRecordData", "NeeAtStateData", "NeeAtBakePushData", "PackedPathSegmentData",
-                "StablePlaneRecordData", "NrdComposePushData", "NrdPlaneFrameData", "ShadowDiagnosticsData"].collect {
+                "PackedStablePlaneData", "NrdComposePushData", "NrdPlaneFrameData", "ShadowDiagnosticsData"].collect {
             "${generatedRecordClassRoot}${it}.class"
         } as Set
         def packagedShaders = names.findAll {

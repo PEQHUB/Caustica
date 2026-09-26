@@ -7,7 +7,8 @@ import nrd_signals;
 
 public static const uint STABLE_PLANE_MAX_DELTA_SEGMENTS = 9u;
 public StablePlaneStorage stablePlaneRecords(uint2 extent) {
-    return stablePlaneStorage(worldBindings.stablePlaneBufferAddress, STABLE_PLANE_COUNT * extent.x * extent.y);
+    return stablePlaneStorage(worldBindings.stablePlaneBufferAddress, STABLE_PLANE_COUNT * extent.x * extent.y,
+            ((ConstPtr<WorldPush>)worldBindings.worldPushAddress)[0].preExposure);
 }
 public uint stablePlaneRecordIndex(uint2 pixel, uint2 extent, uint plane) {
     return plane * extent.x * extent.y + pixel.y * extent.x + pixel.x;

@@ -4,7 +4,7 @@ import dev.comfyfluffy.caustica.engine.vulkan.runtime.GpuBuffer;
 import dev.comfyfluffy.caustica.engine.vulkan.runtime.GpuImage;
 import dev.comfyfluffy.caustica.engine.vulkan.runtime.VulkanDeviceContext;
 import dev.comfyfluffy.caustica.renderer.raytracing.gen.PackedPathSegmentData;
-import dev.comfyfluffy.caustica.renderer.raytracing.gen.StablePlaneRecordData;
+import dev.comfyfluffy.caustica.renderer.raytracing.gen.PackedStablePlaneData;
 import org.lwjgl.vulkan.VK10;
 import dev.comfyfluffy.caustica.vulkan.ResourceLifetime;
 
@@ -163,6 +163,6 @@ public final class TraceResources {
 
     static long stablePlaneBytes(int width, int height) {
         long pixels = Math.multiplyExact((long) width, (long) height);
-        return Math.multiplyExact(Math.multiplyExact(pixels, 3L), StablePlaneRecordData.BYTE_SIZE);
+        return Math.multiplyExact(Math.multiplyExact(pixels, 3L), PackedStablePlaneData.BYTE_SIZE);
     }
 }

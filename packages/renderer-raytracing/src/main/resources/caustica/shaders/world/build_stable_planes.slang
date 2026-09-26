@@ -59,28 +59,17 @@ StableBranch branchAdvance(StableBranch branch, WorldHit hit, TraceLobes lobes, 
 void branchEnqueue(uint2 pixel, uint2 extent, uint plane, StableBranch branch) {
     uint address = stablePlaneRecordIndex(pixel, extent, plane);
     pathSegmentStorage(worldBindings.pathQueueAddress, STABLE_PLANE_COUNT * extent.x * extent.y).store(address, branch.path);
-    StablePlaneStorage records = stablePlaneRecords(extent);
-    records.storeCurrentVirtualPosition(address, branch.imageTransform[0]);
-    records.storePreviousVirtualPosition(address, branch.imageTransform[1]);
-    records.storeNormal(address, branch.imageTransform[2]);
-    records.storeDiffuseBsdfEstimate(address, branch.motion);
-    records.storeRoughness(address, branch.length);
-    records.storeBranchId(address, branch.identity);
-    records.storeFlags(address, branch.transmitted ? 1u : 0u);
+    stablePlaneRecords(extent).storeQueuedBranch(address, branch.imageTransform, branch.motion, branch.length,
+            branch.identity, branch.transmitted);
 }
 
 StableBranch branchDequeue(uint2 pixel, uint2 extent, uint plane) {
     uint address = stablePlaneRecordIndex(pixel, extent, plane);
     PathSegmentStorage endpoints = pathSegmentStorage(worldBindings.pathQueueAddress, STABLE_PLANE_COUNT * extent.x * extent.y);
-    StablePlaneStorage records = stablePlaneRecords(extent);
     StableBranch branch;
     branch.path = endpoints.load(address);
-    branch.imageTransform = float3x3(records.loadCurrentVirtualPosition(address),
-            records.loadPreviousVirtualPosition(address), records.loadNormal(address));
-    branch.motion = records.loadDiffuseBsdfEstimate(address);
-    branch.length = records.loadRoughness(address);
-    branch.identity = records.loadBranchId(address);
-    branch.transmitted = records.loadFlags(address) != 0u;
+    stablePlaneRecords(extent).loadQueuedBranch(address, branch.imageTransform, branch.motion, branch.length,
+            branch.identity, branch.transmitted);
     // A terminal environment or over-budget branch must leave no valid fill endpoint.
     endpoints.storeFlags(address, 0u);
     return branch;
