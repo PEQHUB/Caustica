@@ -494,6 +494,8 @@
 	"caustica.option.caustica.minecraft.sky.sun-angular-radius-degrees.tooltip": "Apparent radius of the sun as a light source, in degrees. Larger softens shadow edges.",
 	"caustica.option.caustica.minecraft.sky.moon-angular-radius-degrees": "Moon Angular Radius",
 	"caustica.option.caustica.minecraft.sky.moon-angular-radius-degrees.tooltip": "Apparent radius of the moon as a light source, in degrees.",
+	"caustica.option.caustica.minecraft.sky.moon-illuminance-lux": "Moon Brightness",
+	"caustica.option.caustica.minecraft.sky.moon-illuminance-lux.tooltip": "How much light the full moon casts, in lux. The physical value is 0.3; raise it for brighter nights, or set 0 for a moonless sky lit only by airglow and stars.",
 	"caustica.option.caustica.minecraft.sky.sun-disc-half-angle-degrees": "Sun Disc Size",
 	"caustica.option.caustica.minecraft.sky.sun-disc-half-angle-degrees.tooltip": "How large the sun sprite is drawn, in degrees. Does not change how much light it casts.",
 	"caustica.option.caustica.minecraft.sky.moon-disc-half-angle-degrees": "Moon Disc Size",
