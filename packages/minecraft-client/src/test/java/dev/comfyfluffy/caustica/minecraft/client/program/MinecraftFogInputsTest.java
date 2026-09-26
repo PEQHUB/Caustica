@@ -53,7 +53,7 @@ final class MinecraftFogInputsTest {
 
     private static MinecraftFogFrame noonFog(MinecraftWeather weather) {
         var celestial = new MinecraftCelestialFrame(0, (float) Math.PI, 0, 0, 0, 63, 63, 1,
-                new MinecraftLightingCalibration(128_000, 5, 2_000, 0, 10, .1f), weather);
+                new MinecraftLightingCalibration(128_000, 2_000, 0, 10, .1f), weather);
         return new MinecraftFogFrame(celestial, 0, new MinecraftFogFrame.Grid(0, 0, 0, 32, 1, 1, 1,
                 new float[MinecraftFogFrame.Grid.COMPONENTS], new float[1]));
     }
