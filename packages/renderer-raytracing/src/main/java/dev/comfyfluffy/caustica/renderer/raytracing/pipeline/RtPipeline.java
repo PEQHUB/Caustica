@@ -12,12 +12,15 @@ import dev.comfyfluffy.caustica.vulkan.ResourceLifetime;
 import org.lwjgl.system.MemoryStack;
 import org.lwjgl.system.MemoryUtil;
 import org.lwjgl.vulkan.*;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.LongBuffer;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
 import static dev.comfyfluffy.caustica.engine.vulkan.runtime.VulkanDeviceContext.check;
@@ -25,6 +28,7 @@ import static org.lwjgl.vulkan.KHRRayTracingPipeline.*;
 
 /** Descriptor-heap-native world ray-tracing pipeline and shader binding table. */
 public final class RtPipeline {
+    private static final Logger LOGGER = LoggerFactory.getLogger(RtPipeline.class);
     // Pipeline creation and retained-table packing use the same private handle order.
     private static final HitGroup[] HIT_GROUPS = HitGroup.values();
     static final int TLAS_DESCRIPTOR_SET = 0;
@@ -119,8 +123,14 @@ public final class RtPipeline {
                 info.get(0).sType$Default().pNext(flags2.address()).pStages(stages).pGroups(groups)
                         .maxPipelineRayRecursionDepth(1).layout(VK10.VK_NULL_HANDLE);
                 LongBuffer out = stack.mallocLong(1);
-                check(vkCreateRayTracingPipelinesKHR(device, VK10.VK_NULL_HANDLE, VK10.VK_NULL_HANDLE,
-                        info, null, out), "vkCreateRayTracingPipelinesKHR");
+                // The driver compiles the stages on every thread joined to the deferred operation. run() returns
+                // after the operation completes, so this frame's create infos and the modules outlive it.
+                long startNanos = System.nanoTime();
+                DeferredHostOperation.Execution creation = DeferredHostOperation.run(device, operation ->
+                        vkCreateRayTracingPipelinesKHR(device, operation, VK10.VK_NULL_HANDLE, info, null, out));
+                check(creation.result(), "vkCreateRayTracingPipelinesKHR");
+                LOGGER.info(String.format(Locale.ROOT, "Created world RT pipeline in %.1f ms (%d stages, %s)",
+                        (System.nanoTime() - startNanos) / 1.0e6, stageCount, creation.summary()));
                 long pipeline = out.get(0);
                 return createBindingTable(context, stack, pipeline, raygenCount, missCount);
             } finally {
