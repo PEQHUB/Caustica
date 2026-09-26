@@ -25,7 +25,7 @@ import java.util.stream.Stream;
  * Derives the Video Settings section and the options pages from the registered settings. Nothing here knows
  * about widgets, so every page is exercised in tests without a GUI stack.
  *
- * <p>Renderer pages select rows by option id prefix, so an option declared under a prefix a page owns appears
+ * <p>Renderer pages select rows by option id prefix or group, so an option under a page's prefix or group appears
  * there without a UI change; a page lists its everyday rows by id and folds every other row it owns into an
  * advanced section. The Tone Mapping page takes the selected mapper's controls from the renderer's per-mapper
  * lists. Grouped renderer rows no page owns land on the Overlays & Debug page under their group titles, and
@@ -42,6 +42,7 @@ public final class CausticaPages {
     private static final String DENOISING_ROUTE = "denoising.route";
     private static final List<String> EXPOSURE_EVERYDAY = List.of("exposure.mode", "exposure.manual-ev",
             "exposure.key", "exposure.adapt-darken", "exposure.adapt-brighten");
+    private static final List<String> RADIANCE_CACHE_EVERYDAY = List.of("sharc.enabled");
 
     /** Every per-mapper control of both outputs; the Tone Mapping page shows the selected mapper's only. */
     private static final Set<String> MAPPER_CONTROLS = Stream.concat(Tonemap.SDR_CONTROLS.values().stream(),
@@ -57,8 +58,9 @@ public final class CausticaPages {
     private static final Predicate<Option<?>> LATENCY = grouped(prefix("frame-generation.", "reflex."));
     private static final Predicate<Option<?>> UPSCALING = RAY_RECONSTRUCTION.or(NRD).or(SUPER_RESOLUTION)
             .or(LATENCY).or(option -> option.id().equals(DENOISING_ROUTE));
+    private static final Predicate<Option<?>> RADIANCE_CACHE = option -> "radiance-cache".equals(option.group());
     /** Every row a renderer page or the Video Settings section already owns. */
-    private static final Predicate<Option<?>> CLAIMED = TONE_MAPPING.or(EXPOSURE).or(UPSCALING)
+    private static final Predicate<Option<?>> CLAIMED = TONE_MAPPING.or(EXPOSURE).or(UPSCALING).or(RADIANCE_CACHE)
             .or(option -> VIDEO_SETTINGS.contains(option.id()));
 
     /** A page the Video Settings section opens; the supplier re-derives it from current preferences. */
@@ -86,6 +88,7 @@ public final class CausticaPages {
         rendererLink(links, "tone-mapping", () -> toneMapping(engine));
         rendererLink(links, "exposure", () -> exposure(engine));
         rendererLink(links, "upscaling", () -> upscaling(engine));
+        rendererLink(links, "radiance-cache", () -> radianceCache(engine));
         for (FeatureSettings feature : registry.all()) {
             if (feature.id().equals(CausticaConfig.FEATURE)) continue;
             SettingsPage page = feature(feature, options);
@@ -169,6 +172,18 @@ public final class CausticaPages {
         }
         section(sections, "latency", title("upscaling", "latency"), engine.controls(LATENCY));
         return page("upscaling", sections);
+    }
+
+    /**
+     * The SHaRC switch; the cache's size, grid and accumulation tuning are folded under Advanced. The cache view
+     * for directly visible surfaces is a diagnostic and stays on the Overlays & Debug page. Where the build or
+     * device cannot run SHaRC, the host's availability check keeps these rows visible but disabled.
+     */
+    static SettingsPage radianceCache(Engine engine) {
+        List<SettingGroup> sections = new ArrayList<>();
+        everydayAndAdvanced(sections, "radiance-cache", title("radiance-cache", "radiance-cache"),
+                engine.controls(RADIANCE_CACHE), RADIANCE_CACHE_EVERYDAY);
+        return page("radiance-cache", sections);
     }
 
     /** Grouped renderer rows no other page owns, such as overlays and diagnostics, under their group titles. */
